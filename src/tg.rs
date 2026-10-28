@@ -37,6 +37,9 @@ pub struct ChatInfo {
 
 #[derive(Clone, Debug)]
 pub struct ChatMsg {
+    pub id: i32,
+    /// Unix-время (секунды) для разделителей по датам.
+    pub ts: i64,
     pub outgoing: bool,
     pub sender: String,
     pub text: String,
@@ -63,6 +66,9 @@ pub enum Event {
     History { chat: PeerId, msgs: Vec<ChatMsg> },
     Incoming { chat: PeerId, chat_name: String, msg: ChatMsg },
     Sent { chat: PeerId, msg: ChatMsg, scheduled: bool },
+    Edited { chat: PeerId, msg: ChatMsg },
+    /// `chat` = None для личных чатов и обычных групп (id сообщений общие на аккаунт).
+    Deleted { chat: Option<PeerId>, ids: Vec<i32> },
     Status(String),
     Error(String),
 }
@@ -121,7 +127,7 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
             .and_then(|p| p.name().map(str::to_string))
             .unwrap_or_else(|| fallback_name.to_string())
     };
-    ChatMsg { outgoing: m.outgoing(), sender, text, time: format_time(m.date()) }
+    ChatMsg { id: m.id(), ts: m.date().as_second(), outgoing: m.outgoing(), sender, text, time: format_time(m.date()) }
 }
 
 fn dialog_unread(d: &grammers_client::peer::Dialog) -> i32 {
@@ -140,7 +146,10 @@ pub async fn load_dialogs(client: &Client) -> Result<Vec<ChatInfo>> {
         out.push(ChatInfo {
             id: d.peer_id(),
             peer: d.peer_ref(),
-            name: d.peer().name().unwrap_or("(без имени)").to_string(),
+            name: match d.peer() {
+                Peer::User(u) if u.is_self() => "Избранное".to_string(),
+                p => p.name().unwrap_or("(без имени)").to_string(),
+            },
             kind: kind_of(d.peer()),
             unread: dialog_unread(&d),
         });
@@ -206,6 +215,15 @@ pub fn spawn_worker(
                         let name = m.peer().and_then(|p| p.name()).unwrap_or("?").to_string();
                         let msg = to_chat_msg(&m, &name);
                         let _ = events.send(Event::Incoming { chat: m.peer_id(), chat_name: name, msg });
+                    }
+                    Ok(Update::MessageEdited(m)) => {
+                        let name = m.peer().and_then(|p| p.name()).unwrap_or("?").to_string();
+                        let msg = to_chat_msg(&m, &name);
+                        let _ = events.send(Event::Edited { chat: m.peer_id(), msg });
+                    }
+                    Ok(Update::MessageDeleted(d)) => {
+                        let chat = d.channel_id().map(PeerId::channel_unchecked);
+                        let _ = events.send(Event::Deleted { chat, ids: d.messages().to_vec() });
                     }
                     Ok(_) => {}
                     Err(e) => {

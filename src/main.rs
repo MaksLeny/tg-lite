@@ -165,6 +165,7 @@ async fn run() -> Result<()> {
     let cmd_tx = tg::spawn_worker(conn, ev_tx);
 
     let terminal = ratatui::init();
+    let _ = crossterm::execute!(io::stdout(), crossterm::terminal::SetTitle("Tg-Lite"));
     let result = ui::run(terminal, cmd_tx, ev_rx, Arc::clone(&saver)).await;
     ratatui::restore();
 

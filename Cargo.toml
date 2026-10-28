@@ -29,3 +29,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
