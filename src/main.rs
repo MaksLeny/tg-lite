@@ -33,7 +33,12 @@ fn ask(prompt: &str) -> Result<String> {
 }
 
 fn ask_secret(prompt: &str) -> Result<String> {
-    Ok(rpassword::prompt_password(prompt)?)
+    // Подсказку печатаем сами (rpassword на Windows портит кириллицу), а ввод скрываем им.
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let pw = rpassword::read_password()?;
+    println!();
+    Ok(pw)
 }
 
 /// Первый запуск: спрашиваем ключи API и придумываем пароль приложения.
@@ -105,17 +110,50 @@ async fn run() -> Result<()> {
         (id, hash, pw, SessionBlob::default())
     };
 
-    // 2. Подключение.
+    // 2. Подключение (при необходимости через SOCKS5-прокси).
     let session = Arc::new(VaultSession::from_blob(blob));
-    let conn = tg::connect(Arc::clone(&session), api_id);
-    let saver = Arc::new(Saver { vault, api_id, api_hash: api_hash.clone(), session, password });
+    let saver = Arc::new(Saver { vault, api_id, api_hash: api_hash.clone(), session: Arc::clone(&session), password });
     saver.save()?; // файл создаётся сразу, ключи не потеряются
 
-    println!("Подключаюсь к Telegram…");
-    let authorized = tokio::time::timeout(Duration::from_secs(40), conn.client.is_authorized())
-        .await
-        .map_err(|_| anyhow!("нет ответа от Telegram за 40 секунд: проверьте интернет (в РФ может понадобиться VPN/прокси)"))?
-        .map_err(|e| anyhow!("{e}"))?;
+    let proxy_file = data_dir().join("proxy.txt");
+    let mut proxy = std::env::var("TGLITE_PROXY").ok().filter(|s| !s.trim().is_empty()).or_else(|| {
+        std::fs::read_to_string(&proxy_file).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    });
+    let (conn, authorized) = loop {
+        match &proxy {
+            Some(p) => println!("Подключаюсь к Telegram через прокси {p}…"),
+            None => println!("Подключаюсь к Telegram…"),
+        }
+        let conn = tg::connect(Arc::clone(&session), api_id, proxy.clone());
+        match tokio::time::timeout(Duration::from_secs(25), conn.client.is_authorized()).await {
+            Ok(Ok(a)) => break (conn, a),
+            res => {
+                let why = match res {
+                    Ok(Err(e)) => e.to_string(),
+                    _ => "нет ответа за 25 секунд".to_string(),
+                };
+                conn.quit.quit();
+                println!("\nНе удалось подключиться: {why}.");
+                println!("Если VPN работает как расширение или «системный прокси», программа его не видит.");
+                println!("Введите SOCKS5-прокси из вашего VPN-клиента, например 127.0.0.1:1080");
+                println!("(или Enter, чтобы просто повторить; 0 — убрать прокси; q — выйти).");
+                let a = ask("Прокси: ")?;
+                match a.as_str() {
+                    "q" | "Q" => return Err(anyhow!("подключение отменено")),
+                    "" => {}
+                    "0" => {
+                        proxy = None;
+                        let _ = std::fs::remove_file(&proxy_file);
+                    }
+                    other => {
+                        let url = if other.contains("://") { other.to_string() } else { format!("socks5://{other}") };
+                        let _ = std::fs::write(&proxy_file, &url);
+                        proxy = Some(url);
+                    }
+                }
+            }
+        }
+    };
     if !authorized {
         sign_in_flow(&conn.client, &api_hash).await?;
         saver.save()?;

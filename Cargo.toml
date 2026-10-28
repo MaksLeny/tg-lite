@@ -10,7 +10,7 @@ base64 = "0.23.1"
 chacha20poly1305 = "0.11.0"
 crossterm = "0.29.0"
 getrandom = "0.4.3"
-grammers-client = { version = "0.11.0", features = ["markdown"] }
+grammers-client = { version = "0.11.0", features = ["markdown", "proxy"] }
 grammers-mtsender = "0.11.0"
 grammers-session = { version = "0.11.0", default-features = false, features = ["serde"] }
 jiff = "0.2.38"

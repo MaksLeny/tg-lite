@@ -74,8 +74,11 @@ pub struct Connection {
 }
 
 /// Подключается к Telegram, используя сессию из хранилища.
-pub fn connect(session: Arc<VaultSession>, api_id: i32) -> Connection {
-    let SenderPool { runner, updates, handle } = SenderPool::new(Arc::clone(&session), api_id);
+/// `proxy` — необязательный SOCKS5-прокси вида `socks5://127.0.0.1:1080`.
+pub fn connect(session: Arc<VaultSession>, api_id: i32, proxy: Option<String>) -> Connection {
+    let params = grammers_mtsender::ConnectionParams { proxy_url: proxy, ..Default::default() };
+    let SenderPool { runner, updates, handle } =
+        SenderPool::with_configuration(Arc::clone(&session), api_id, params);
     let client = Client::new(handle.clone());
     tokio::spawn(runner.run());
     Connection { client, quit: handle, updates }
