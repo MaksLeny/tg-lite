@@ -218,7 +218,7 @@ fn kind_of(peer: &Peer) -> Kind {
 }
 
 pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
-    let text = m.text().to_string();
+    let text = crate::util::clean_or(m.text(), "[эмодзи]");
     let has_media = m.media().is_some();
     let text = match (text.is_empty(), has_media) {
         (true, true) => "[вложение]".to_string(),
@@ -229,7 +229,7 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
     let sender = if m.outgoing() {
         "Я".to_string()
     } else {
-        m.sender().and_then(|p| p.name().map(str::to_string)).unwrap_or_else(|| fallback_name.to_string())
+        m.sender().and_then(|p| p.name().map(crate::util::clean)).unwrap_or_else(|| fallback_name.to_string())
     };
     ChatMsg { id: m.id(), ts: m.date().as_second(), outgoing: m.outgoing(), sender, text, time: format_time(m.date()) }
 }
@@ -260,7 +260,7 @@ fn folder_from_raw(f: &tl::enums::DialogFilter) -> Option<Folder> {
             include.dedup();
             Some(Folder {
                 id: f.id,
-                title: t.text.clone(),
+                title: crate::util::clean_or(&t.text, "Папка").trim().to_string(),
                 include,
                 exclude: f.exclude_peers.iter().filter_map(input_peer_id).collect(),
                 include_self: f.pinned_peers.iter().chain(f.include_peers.iter()).any(|p| matches!(p, tl::enums::InputPeer::PeerSelf)),
@@ -278,7 +278,7 @@ fn folder_from_raw(f: &tl::enums::DialogFilter) -> Option<Folder> {
             include.dedup();
             Some(Folder {
                 id: f.id,
-                title: t.text.clone(),
+                title: crate::util::clean_or(&t.text, "Папка").trim().to_string(),
                 include,
                 include_self: f.pinned_peers.iter().chain(f.include_peers.iter()).any(|p| matches!(p, tl::enums::InputPeer::PeerSelf)),
                 ..Default::default()
@@ -297,16 +297,16 @@ pub async fn load_dialogs(client: &Client) -> Result<Vec<ChatInfo>> {
         let (name, presence, is_contact, is_bot, is_self) = match d.peer() {
             Peer::User(u) => {
                 let is_self = u.is_self();
-                let name = if is_self { "Избранное".to_string() } else { u.full_name() };
+                let name = if is_self { "Избранное".to_string() } else { crate::util::clean(&u.full_name()) };
                 let presence = if is_self { None } else { Some(presence_from(u.status())) };
                 (name, presence, u.contact(), u.is_bot(), is_self)
             }
-            p => (p.name().unwrap_or("(без имени)").to_string(), None, false, false, false),
+            p => (crate::util::clean(p.name().unwrap_or("(без имени)")), None, false, false, false),
         };
         out.push(ChatInfo {
             id: d.peer_id(),
             peer: d.peer_ref(),
-            name: if name.trim().is_empty() { "(без имени)".to_string() } else { name },
+            name: if name.trim().is_empty() { "(без имени)".to_string() } else { name.trim().to_string() },
             kind: kind_of(d.peer()),
             unread: dialog_unread(&d),
             presence,
@@ -383,12 +383,12 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                 }
                 match update {
                     Ok(Update::NewMessage(m)) => {
-                        let name = m.peer().and_then(|p| p.name()).unwrap_or("?").to_string();
+                        let name = crate::util::clean(m.peer().and_then(|p| p.name()).unwrap_or("?")).trim().to_string();
                         let msg = to_chat_msg(&m, &name);
                         let _ = events.send(Event::Incoming { chat: m.peer_id(), chat_name: name, msg });
                     }
                     Ok(Update::MessageEdited(m)) => {
-                        let name = m.peer().and_then(|p| p.name()).unwrap_or("?").to_string();
+                        let name = crate::util::clean(m.peer().and_then(|p| p.name()).unwrap_or("?")).trim().to_string();
                         let msg = to_chat_msg(&m, &name);
                         let _ = events.send(Event::Edited { chat: m.peer_id(), msg });
                     }

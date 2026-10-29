@@ -31,3 +31,65 @@ pub fn log(msg: &str) {
         let _ = writeln!(f, "{} {}", now.strftime("%Y-%m-%d %H:%M:%S"), msg);
     }
 }
+
+/// Можно ли безопасно вывести символ в консоль Windows. Эмодзи, флаги, невидимые символы
+/// (склейки, вариационные селекторы) в её шрифте не рисуются: вместо них появляются
+/// квадратики, а разная трактовка ширины сдвигает и стирает соседний текст.
+pub fn is_safe_char(c: char) -> bool {
+    matches!(c as u32,
+        0x20..=0x7E            // ASCII
+        | 0xA1..=0x24F         // латиница (без неразрывного пробела и мягкого переноса: ниже)
+        | 0x370..=0x3FF        // греческий
+        | 0x400..=0x482 | 0x48A..=0x4FF // кириллица без комбинируемых знаков
+        | 0x2010..=0x2015 | 0x2018..=0x201E | 0x2020..=0x2022 | 0x2026 | 0x2030 | 0x2039 | 0x203A
+        | 0x20AC | 0x2116 | 0x2122
+        | 0x2190..=0x2193
+        | 0x2500..=0x259F      // рамки и блоки
+    ) && c as u32 != 0xAD
+}
+
+/// Очищает текст от символов, которые консоль не умеет рисовать. Переводы строк сохраняются,
+/// неразрывные пробелы и табуляция становятся обычными пробелами.
+pub fn clean(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\t' | '\u{a0}' | '\u{2002}'..='\u{200a}' | '\u{3000}' => out.push(' '),
+            c if is_safe_char(c) => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// То же, но если после очистки ничего не осталось (например, одни эмодзи), возвращает `placeholder`.
+pub fn clean_or(s: &str, placeholder: &str) -> String {
+    let c = clean(s);
+    if c.trim().is_empty() && !s.trim().is_empty() { placeholder.to_string() } else { c }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_emoji_and_invisibles() {
+        assert_eq!(clean("Привет 😀 мир"), "Привет  мир");
+        assert_eq!(clean("Анастасия ❤️ Тимофей"), "Анастасия  Тимофей");
+        assert_eq!(clean("a\u{200d}b\u{fe0f}c"), "abc");
+        assert_eq!(clean("🇷🇺 Россия"), " Россия");
+        assert_eq!(clean("строка1\nстрока2"), "строка1\nстрока2");
+        assert_eq!(clean("a\u{a0}b"), "a b");
+        assert_eq!(clean("№5 — «да» €"), "№5 — «да» €");
+        assert_eq!(clean_or("😀😀", "[эмодзи]"), "[эмодзи]");
+        assert_eq!(clean_or("", "[эмодзи]"), "");
+        assert_eq!(clean_or("ok", "[эмодзи]"), "ok");
+    }
+
+    #[test]
+    fn keeps_normal_text() {
+        let s = "Код для входа: 12345. «Не давайте» код — никому, ёЁ ї ґ";
+        assert_eq!(clean(s), s);
+    }
+}

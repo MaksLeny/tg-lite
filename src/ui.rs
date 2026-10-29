@@ -485,6 +485,9 @@ impl App {
     }
 
     fn insert_char(&mut self, c: char) {
+        if !crate::util::is_safe_char(c) && c != '\n' {
+            return; // эмодзи и невидимые символы консоль не рисует; в сообщение они не попадут
+        }
         let b = self.byte_idx(self.cursor);
         self.input.insert(b, c);
         self.cursor += 1;
@@ -1341,10 +1344,19 @@ pub async fn run(
         tokio::select! {
             Some(ev) = key_rx.recv() => match ev {
                 TermEvent::Key(k) if k.kind == KeyEventKind::Press => {
+                    let before = std::mem::discriminant(&app.mode);
+                    let refresh = k.code == KeyCode::F(5);
                     app.handle_key(k, &cmd, &saver);
+                    // Смена экрана и F5: полная перерисовка, чтобы не оставалось «мусора».
+                    if refresh || before != std::mem::discriminant(&app.mode) {
+                        let _ = terminal.clear();
+                    }
                     dirty = true;
                 }
-                TermEvent::Resize(..) => dirty = true,
+                TermEvent::Resize(..) => {
+                    let _ = terminal.clear();
+                    dirty = true;
+                }
                 _ => {}
             },
             Some(ev) = events.recv() => {
@@ -1354,6 +1366,7 @@ pub async fn run(
             _ = tick.tick() => {
                 if app.should_autolock() {
                     app.lock();
+                    let _ = terminal.clear();
                     dirty = true;
                 }
                 if let Some(t) = app.pending_load {
