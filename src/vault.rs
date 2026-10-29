@@ -14,6 +14,8 @@ use grammers_session::{BoxFuture, Session, SessionData};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+use crate::settings::Settings;
+
 const MAGIC: &[u8; 6] = b"TGLT01";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
@@ -24,6 +26,9 @@ pub struct Secrets {
     pub api_id: i32,
     pub api_hash: String,
     pub session: SessionBlob,
+    /// Нет в хранилищах версий 0.0.1/0.0.2: тогда берутся значения по умолчанию.
+    #[serde(default)]
+    pub settings: Settings,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -263,6 +268,7 @@ mod tests {
             api_id: 12345,
             api_hash: "abcdef0123456789".into(),
             session: SessionBlob::default(),
+            settings: Settings::default(),
         }
     }
 
@@ -273,6 +279,16 @@ mod tests {
         assert_eq!(dec.api_id, 12345);
         assert_eq!(dec.api_hash, "abcdef0123456789");
         assert_eq!(dec.session.dc_options.len(), 5);
+    }
+
+    #[test]
+    fn old_format_without_settings_loads() {
+        // Секреты, записанные версиями 0.0.1/0.0.2, не содержат поля settings.
+        let mut v = serde_json::to_value(sample()).unwrap();
+        v.as_object_mut().unwrap().remove("settings");
+        let s: Secrets = serde_json::from_value(v).unwrap();
+        assert_eq!(s.settings, Settings::default());
+        assert_eq!(s.api_id, 12345);
     }
 
     #[test]
@@ -309,22 +325,81 @@ mod tests {
 }
 
 /// Всё необходимое, чтобы в любой момент сохранить хранилище заново
-/// (после входа, периодически и при выходе).
+/// (после входа, при смене настроек или пароля, периодически и при выходе).
 pub struct Saver {
-    pub vault: VaultFile,
-    pub api_id: i32,
-    pub api_hash: String,
-    pub session: std::sync::Arc<VaultSession>,
-    pub password: String,
+    vault: VaultFile,
+    api_id: i32,
+    api_hash: String,
+    session: std::sync::Arc<VaultSession>,
+    state: Mutex<SaverState>,
+    /// Не даёт двум сохранениям одновременно писать один и тот же временный файл.
+    write_lock: Mutex<()>,
+}
+
+struct SaverState {
+    password: String,
+    settings: Settings,
 }
 
 impl Saver {
+    pub fn new(
+        vault: VaultFile,
+        api_id: i32,
+        api_hash: String,
+        session: std::sync::Arc<VaultSession>,
+        password: String,
+        settings: Settings,
+    ) -> Self {
+        Saver {
+            vault,
+            api_id,
+            api_hash,
+            session,
+            state: Mutex::new(SaverState { password, settings }),
+            write_lock: Mutex::new(()),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, SaverState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn password(&self) -> String {
+        self.state().password.clone()
+    }
+
+    pub fn set_password(&self, password: String) {
+        self.state().password = password;
+    }
+
+    pub fn settings(&self) -> Settings {
+        self.state().settings.clone()
+    }
+
+    pub fn set_settings(&self, settings: Settings) {
+        self.state().settings = settings;
+    }
+
     pub fn save(&self) -> Result<()> {
+        let (password, settings) = {
+            let st = self.state();
+            (st.password.clone(), st.settings.clone())
+        };
         let secrets = Secrets {
             api_id: self.api_id,
             api_hash: self.api_hash.clone(),
             session: self.session.snapshot(),
+            settings,
         };
-        self.vault.save(&secrets, &self.password)
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.vault.save(&secrets, &password)
+    }
+
+    /// Сохраняет в фоне, не задерживая интерфейс (Argon2 на слабом ПК занимает заметное время).
+    pub fn save_in_background(self: &std::sync::Arc<Self>) {
+        let s = std::sync::Arc::clone(self);
+        std::thread::spawn(move || {
+            let _ = s.save();
+        });
     }
 }
