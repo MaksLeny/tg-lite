@@ -27,6 +27,8 @@ pub struct Settings {
     pub history_limit: u32,
     /// Номер цвета акцента (см. ACCENT_NAMES).
     pub accent: u8,
+    /// Закреплённые чаты (bot-API id), показываются в списке первыми.
+    pub pinned: Vec<i64>,
 }
 
 impl Default for Settings {
@@ -39,6 +41,7 @@ impl Default for Settings {
             show_status: true,
             history_limit: 60,
             accent: 0,
+            pinned: Vec::new(),
         }
     }
 }

@@ -161,6 +161,10 @@ pub enum Cmd {
         delay_minutes: Option<u32>,
     },
     MarkRead(ChatInfo),
+    /// Исправить своё сообщение.
+    Edit { chat: ChatInfo, id: i32, text: String, markdown: bool },
+    /// Удалить своё сообщение (у всех).
+    Delete { chat: ChatInfo, id: i32 },
 }
 
 /// События от обработчика к интерфейсу.
@@ -469,6 +473,37 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                     }
                 }
+                Cmd::Edit { chat, id, text, markdown } => {
+                    let msg = if markdown { InputMessage::new().markdown(&text) } else { InputMessage::new().text(&text) };
+                    match client.edit_message(chat.peer, id, msg).await {
+                        Ok(()) => {
+                            let m = ChatMsg {
+                                id,
+                                ts: 0,
+                                outgoing: true,
+                                sender: "Я".into(),
+                                text: crate::util::clean_or(&text, "[эмодзи]"),
+                                time: String::new(),
+                            };
+                            let _ = events.send(Event::Edited { chat: chat.id, msg: m });
+                            let _ = events.send(Event::Status("Сообщение исправлено".into()));
+                        }
+                        Err(e) => {
+                            log(&format!("edit: {e}"));
+                            let _ = events.send(Event::Error(format!("не исправлено: {e}")));
+                        }
+                    }
+                }
+                Cmd::Delete { chat, id } => match client.delete_messages(chat.peer, &[id]).await {
+                    Ok(_) => {
+                        let _ = events.send(Event::Deleted { chat: Some(chat.id), ids: vec![id] });
+                        let _ = events.send(Event::Status("Сообщение удалено".into()));
+                    }
+                    Err(e) => {
+                        log(&format!("delete: {e}"));
+                        let _ = events.send(Event::Error(format!("не удалено: {e}")));
+                    }
+                },
                 Cmd::MarkRead(chat) => {
                     let client = client.clone();
                     tokio::spawn(async move {

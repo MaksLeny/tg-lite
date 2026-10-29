@@ -81,6 +81,7 @@ enum Mode {
 #[derive(Clone, PartialEq, Debug)]
 enum Tab {
     All,
+    Unread,
     Users,
     Groups,
     Channels,
@@ -118,6 +119,12 @@ pub struct App {
     pending_load: Option<Instant>,
     reload_pending: bool,
     should_quit: bool,
+    /// Поиск по названиям чатов (`/find`); пусто — без фильтра.
+    filter: String,
+    /// Черновики по чатам: переключение чата не теряет набранный текст (только в памяти).
+    drafts: HashMap<PeerId, (String, usize)>,
+    /// Сообщение, ожидающее подтверждения удаления (второй `/del`).
+    pending_delete: Option<(PeerId, i32)>,
 }
 
 // ------------------------------------------------------------------ вспомогательное
@@ -328,6 +335,19 @@ fn build_message_lines(msgs: &[ChatMsg], width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Текст переписки для сохранения в файл: «дата время имя: текст».
+fn export_text(chat_name: &str, msgs: &[ChatMsg]) -> String {
+    let tz = jiff::tz::TimeZone::system();
+    let mut out = format!("Переписка: {chat_name}\nСохранено Tg-Lite {VERSION}\n\n");
+    for m in msgs {
+        let when = jiff::Timestamp::from_second(m.ts)
+            .map(|t| t.to_zoned(tz.clone()).strftime("%d.%m.%Y %H:%M").to_string())
+            .unwrap_or_default();
+        out.push_str(&format!("[{when}] {}: {}\n", m.sender, m.text.replace('\n', "\n    ")));
+    }
+    out
+}
+
 fn beep() {
     let mut out = std::io::stdout();
     let _ = out.write_all(b"\x07");
@@ -372,6 +392,9 @@ impl App {
             pending_load: None,
             reload_pending: false,
             should_quit: false,
+            filter: String::new(),
+            drafts: HashMap::new(),
+            pending_delete: None,
         }
     }
 
@@ -385,6 +408,7 @@ impl App {
     fn in_tab(&self, tab: &Tab, c: &ChatInfo) -> bool {
         match tab {
             Tab::All => true,
+            Tab::Unread => c.unread > 0,
             Tab::Users => c.kind == Kind::User,
             Tab::Groups => c.kind == Kind::Group,
             Tab::Channels => c.kind == Kind::Channel,
@@ -395,6 +419,7 @@ impl App {
     fn tabs(&self) -> Vec<(Tab, String)> {
         let mut v = vec![
             (Tab::All, "Все".to_string()),
+            (Tab::Unread, "Новые".to_string()),
             (Tab::Users, "Личные".to_string()),
             (Tab::Groups, "Группы".to_string()),
             (Tab::Channels, "Каналы".to_string()),
@@ -409,8 +434,50 @@ impl App {
         self.chats.iter().filter(|c| c.unread > 0 && self.in_tab(tab, c)).count()
     }
 
+    fn is_pinned(&self, c: &ChatInfo) -> bool {
+        c.id.bot_api_dialog_id().is_some_and(|d| self.settings.pinned.contains(&d))
+    }
+
+    /// Индексы чатов, видимых во вкладке: с учётом поиска, закреплённые сверху.
+    fn visible_idx(&self) -> Vec<usize> {
+        let q = self.filter.to_lowercase();
+        let mut v: Vec<usize> = (0..self.chats.len())
+            .filter(|&i| {
+                let c = &self.chats[i];
+                self.in_tab(&self.tab, c) && (q.is_empty() || c.name.to_lowercase().contains(&q))
+            })
+            .collect();
+        v.sort_by_key(|&i| !self.is_pinned(&self.chats[i])); // сортировка устойчивая
+        v
+    }
+
     fn visible_ids(&self) -> Vec<PeerId> {
-        self.chats.iter().filter(|c| self.in_tab(&self.tab, c)).map(|c| c.id).collect()
+        self.visible_idx().into_iter().map(|i| self.chats[i].id).collect()
+    }
+
+    /// Меняет выбранный чат; набранный текст остаётся черновиком старого чата.
+    fn set_sel(&mut self, new: Option<PeerId>) {
+        if new == self.sel {
+            return;
+        }
+        let had_old = self.sel.is_some();
+        if let Some(old) = self.sel {
+            if self.input.is_empty() {
+                self.drafts.remove(&old);
+            } else {
+                self.drafts.insert(old, (std::mem::take(&mut self.input), self.cursor));
+            }
+        }
+        match new.and_then(|n| self.drafts.remove(&n)) {
+            Some((text, cur)) => {
+                self.cursor = cur.min(text.chars().count());
+                self.input = text;
+            }
+            None if had_old => self.cursor = 0, // текст ушёл в черновик, поле пустое
+            None => {}                          // выбора не было: набранный текст не трогаем
+        }
+        self.sel = new;
+        self.pending_delete = None;
     }
 
     /// Следит, чтобы выбранный чат был виден в текущей вкладке. Возвращает true, если выбор сменился.
@@ -421,7 +488,7 @@ impl App {
                 return false;
             }
         }
-        self.sel = vis.first().copied();
+        self.set_sel(vis.first().copied());
         self.scroll = 0;
         self.pending_load = self.sel.map(|_| Instant::now());
         true
@@ -435,7 +502,7 @@ impl App {
         let pos = self.sel.and_then(|s| vis.iter().position(|x| *x == s)).unwrap_or(0) as i32;
         let np = (pos + delta).clamp(0, vis.len() as i32 - 1) as usize;
         if self.sel != Some(vis[np]) {
-            self.sel = Some(vis[np]);
+            self.set_sel(Some(vis[np]));
             self.scroll = 0;
             self.pending_load = Some(Instant::now());
         }
@@ -466,6 +533,8 @@ impl App {
         self.mode = Mode::Locked;
         self.lock_input.clear();
         self.lock_error.clear();
+        self.pw_first.clear();
+        self.pw_stage = 0;
     }
 
     fn should_autolock(&self) -> bool {
@@ -618,8 +687,11 @@ impl App {
                     self.status = "Отложенное сообщение запланировано".into();
                 } else {
                     self.status = "Отправлено".into();
-                    self.push_unique(chat, msg, true);
-                    self.scroll = 0;
+                    // Если история чата ещё не загружена, сообщение подтянется вместе с ней.
+                    self.push_unique(chat, msg, false);
+                    if self.sel == Some(chat) {
+                        self.scroll = 0;
+                    }
                 }
             }
             Event::SendFailed { text } => {
@@ -793,6 +865,7 @@ impl App {
                 'q' => self.should_quit = true,
                 'l' => self.lock(),
                 'r' => self.refresh(cmd),
+                'f' => self.start_find(),
                 't' => self.toggle_markdown(),
                 'j' => self.insert_char('\n'),
                 _ => {}
@@ -808,6 +881,7 @@ impl App {
             KeyCode::F(3) => self.toggle_markdown(),
             KeyCode::F(4) => self.mode = Mode::Settings,
             KeyCode::F(5) => self.refresh(cmd),
+            KeyCode::F(6) => self.start_find(),
             KeyCode::F(10) => self.should_quit = true,
             // Shift+Enter / Alt+Enter — новая строка. Enter внутри вставленного текста — тоже.
             KeyCode::Enter if shift || alt || since_prev < PASTE_GAP => self.insert_char('\n'),
@@ -829,7 +903,13 @@ impl App {
             KeyCode::Down => self.move_selection(1),
             KeyCode::PageUp => self.scroll += 8,
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(8),
-            KeyCode::Esc => self.clear_input(),
+            KeyCode::Esc => {
+                if self.input.is_empty() && !self.filter.is_empty() {
+                    self.set_filter("");
+                } else {
+                    self.clear_input();
+                }
+            }
             KeyCode::Char(c) => self.insert_char(c),
             _ => {}
         }
@@ -854,6 +934,10 @@ impl App {
                 return;
             }
         }
+        if self.try_command(&text, cmd, saver) {
+            return;
+        }
+        self.pending_delete = None;
         let simple = match text.as_str() {
             "/md" => Some(0),
             "/lock" => Some(1),
@@ -899,6 +983,137 @@ impl App {
         };
         let _ = cmd.send(Cmd::Send { chat, text: body, markdown: self.markdown, delay_minutes: delay });
         self.clear_input();
+    }
+
+    fn start_find(&mut self) {
+        self.input = "/find ".to_string();
+        self.cursor = self.input_len();
+    }
+
+    fn set_filter(&mut self, q: &str) {
+        self.filter = q.trim().to_string();
+        self.ensure_selection();
+        self.status = if self.filter.is_empty() {
+            "Поиск сброшен".to_string()
+        } else {
+            format!("Найдено чатов: {}", self.visible_idx().len())
+        };
+    }
+
+    /// Последнее своё сообщение в открытом чате.
+    fn last_own(&self) -> Option<&ChatMsg> {
+        self.histories.get(&self.sel?)?.iter().rev().find(|m| m.outgoing && m.id > 0)
+    }
+
+    /// Команды, зависящие от списка чатов и истории. Возвращает true, если `text` — команда.
+    fn try_command(&mut self, text: &str, cmd: &mpsc::UnboundedSender<Cmd>, saver: &Arc<Saver>) -> bool {
+        let (name, arg) = match text.split_once(char::is_whitespace) {
+            Some((n, a)) => (n, a.trim()),
+            None => (text, ""),
+        };
+        match name {
+            "/find" | "/search" => {
+                self.clear_input();
+                self.set_filter(arg);
+            }
+            "/pin" => {
+                self.clear_input();
+                let Some(id) = self.selected().and_then(|c| c.id.bot_api_dialog_id()) else {
+                    self.status = "Сначала выберите чат".into();
+                    return true;
+                };
+                let pinned = &mut self.settings.pinned;
+                if let Some(pos) = pinned.iter().position(|x| *x == id) {
+                    pinned.remove(pos);
+                    self.status = "Чат откреплён".into();
+                } else {
+                    pinned.push(id);
+                    self.status = "Чат закреплён наверху списка".into();
+                }
+                self.apply_settings(saver);
+            }
+            "/readall" => {
+                self.clear_input();
+                let mut n = 0;
+                for c in self.chats.iter_mut().filter(|c| c.unread > 0) {
+                    c.unread = 0;
+                    n += 1;
+                    let _ = cmd.send(Cmd::MarkRead(c.clone()));
+                }
+                self.status = format!("Прочитано чатов: {n}");
+            }
+            "/export" => {
+                self.clear_input();
+                let Some(c) = self.selected().cloned() else {
+                    self.status = "Сначала выберите чат".into();
+                    return true;
+                };
+                match self.histories.get(&c.id) {
+                    Some(h) if !h.is_empty() => {
+                        self.status = match crate::util::write_export(&c.name, &export_text(&c.name, h)) {
+                            Ok(p) => format!("Сохранено: {}", p.display()),
+                            Err(e) => format!("Ошибка: не удалось сохранить файл: {e}"),
+                        };
+                    }
+                    _ => self.status = "В этом чате пока нечего сохранять".into(),
+                }
+            }
+            "/note" => {
+                if arg.is_empty() {
+                    self.clear_input();
+                    self.status = "Использование: /note текст — быстрая заметка в «Избранное»".into();
+                    return true;
+                }
+                let Some(me) = self.chats.iter().find(|c| c.is_self).cloned() else {
+                    self.clear_input();
+                    self.status = "Чат «Избранное» ещё не загружен".into();
+                    return true;
+                };
+                let _ = cmd.send(Cmd::Send { chat: me, text: arg.to_string(), markdown: self.markdown, delay_minutes: None });
+                self.status = "Сохраняю в «Избранное»…".into();
+                self.clear_input();
+            }
+            "/edit" => {
+                let Some(chat) = self.selected().cloned() else {
+                    self.clear_input();
+                    self.status = "Сначала выберите чат".into();
+                    return true;
+                };
+                let Some(last) = self.last_own().cloned() else {
+                    self.clear_input();
+                    self.status = "Нет вашего сообщения, которое можно исправить".into();
+                    return true;
+                };
+                if arg.is_empty() {
+                    // Без текста: подставляем старый текст, чтобы его можно было поправить.
+                    self.input = format!("/edit {}", last.text);
+                    self.cursor = self.input_len();
+                } else {
+                    let _ = cmd.send(Cmd::Edit { chat, id: last.id, text: arg.to_string(), markdown: self.markdown });
+                    self.status = "Исправляю сообщение…".into();
+                    self.clear_input();
+                }
+            }
+            "/del" | "/delete" => {
+                self.clear_input();
+                let (Some(chat), Some(last)) = (self.selected().cloned(), self.last_own().cloned()) else {
+                    self.status = "Нет вашего сообщения, которое можно удалить".into();
+                    return true;
+                };
+                if self.pending_delete == Some((chat.id, last.id)) {
+                    self.pending_delete = None;
+                    let _ = cmd.send(Cmd::Delete { chat, id: last.id });
+                    self.status = "Удаляю…".into();
+                } else {
+                    self.pending_delete = Some((chat.id, last.id));
+                    self.status = format!("Удалить «{}»? Повторите /del для подтверждения", truncate(&last.text.replace('\n', " "), 30));
+                }
+                return true; // pending_delete сохраняется до следующей другой команды
+            }
+            _ => return false,
+        }
+        self.pending_delete = None;
+        true
     }
 
     fn proxy_command(&mut self, arg: &str, saver: &Arc<Saver>) {
@@ -1027,10 +1242,13 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_w = area.width.saturating_sub(2) as usize;
     let now = jiff::Timestamp::now().as_second();
     let show_status = app.settings.show_status;
-    let visible: Vec<&ChatInfo> = app.chats.iter().filter(|c| app.in_tab(&app.tab, c)).collect();
+    let idx = app.visible_idx();
+    let visible: Vec<&ChatInfo> = idx.iter().map(|&i| &app.chats[i]).collect();
+    let pinned: Vec<bool> = visible.iter().map(|c| app.is_pinned(c)).collect();
     let items: Vec<ListItem> = visible
         .iter()
-        .map(|c| {
+        .zip(pinned.iter())
+        .map(|(c, &pin)| {
             let online = show_status && c.presence.is_some_and(|p| tg::is_online(p, now));
             let (tag, tag_color) = match c.kind {
                 Kind::User if online => ("●", ONLINE),
@@ -1044,7 +1262,7 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
             let pad = name_w.saturating_sub(display_width(&name));
             let mut spans = vec![
                 Span::styled(tag.to_string(), Style::new().fg(tag_color).add_modifier(Modifier::BOLD)),
-                Span::raw(" "),
+                if pin { Span::styled("*", Style::new().fg(app.theme.accent)) } else { Span::raw(" ") },
                 Span::styled(
                     format!("{name}{}", " ".repeat(pad)),
                     if c.unread > 0 { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() },
@@ -1058,6 +1276,7 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let sel_pos = app.sel.and_then(|s| visible.iter().position(|c| c.id == s));
     let count = visible.len();
+    let list_title = if app.filter.is_empty() { " Tg-Lite ".to_string() } else { format!(" поиск: {} ", truncate(&app.filter, 14)) };
     app.list_state.select(sel_pos);
 
     let list = List::new(items)
@@ -1065,7 +1284,7 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(MUTED))
-                .title(Span::styled(" Tg-Lite ", Style::new().fg(app.theme.accent).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(list_title, Style::new().fg(app.theme.accent).add_modifier(Modifier::BOLD)))
                 .title_bottom(Span::styled(format!(" {count} "), Style::new().fg(MUTED))),
         )
         .highlight_style(Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD));
@@ -1143,7 +1362,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLayout, rows: 
     let skip = if layout.cur_row >= rows { layout.cur_row + 1 - rows } else { 0 };
     let shown: Vec<Line> = if app.input.is_empty() {
         vec![Line::from(Span::styled(
-            "Enter — отправить · Shift+Enter — новая строка · /later 30 текст — отложить",
+            "Enter — отправить · Shift+Enter — новая строка · F1 — все команды",
             Style::new().fg(MUTED),
         ))]
     } else {
@@ -1197,11 +1416,10 @@ fn draw_help(f: &mut Frame, app: &App) {
         ])
     };
     let lines = vec![
-        Line::from(""),
         key("Enter", "отправить"),
         key("Shift+Enter", "новая строка (вставка текста целиком тоже работает)"),
         key("↑ ↓", "выбрать чат"),
-        key("Tab / Shift+Tab", "вкладки: Все, Личные, Группы, Каналы, ваши папки"),
+        key("Tab / Shift+Tab", "вкладки: Все, Новые, Личные, Группы, Каналы, папки"),
         key("PgUp / PgDn", "прокрутка переписки"),
         key("← → Home End", "двигаться по тексту"),
         key("Esc", "очистить поле ввода"),
@@ -1211,12 +1429,18 @@ fn draw_help(f: &mut Frame, app: &App) {
         key("F4  или /settings", "настройки"),
         key("F5  или /refresh", "обновить список чатов"),
         key("F10 или /quit", "выход"),
+        key("F6 / Ctrl+F", "поиск по чатам (/find текст; Esc сбрасывает)"),
         key("/later 30 текст", "отложенная публикация через 30 минут"),
+        key("/note текст", "быстрая заметка в «Избранное» из любого чата"),
+        key("/edit [текст]", "исправить своё последнее сообщение"),
+        key("/del", "удалить своё последнее сообщение (повтор — подтвердить)"),
+        key("/pin", "закрепить / открепить чат наверху списка"),
+        key("/readall", "отметить все чаты прочитанными"),
+        key("/export", "сохранить переписку в файл export/…txt"),
         key("/proxy адрес", "прокси вручную; /proxy auto, /proxy off"),
         key("/passwd", "сменить пароль"),
         Line::from(""),
-        Line::from(Span::styled(" Ctrl+L, Ctrl+Q, Ctrl+T, Ctrl+R тоже работают.", Style::new().fg(MUTED))),
-        Line::from(Span::styled(format!(" Tg-Lite {VERSION} · нажмите любую клавишу, чтобы закрыть."), Style::new().fg(MUTED))),
+        Line::from(Span::styled(format!(" Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает"), Style::new().fg(MUTED))),
     ];
     let rect = centered_rect(f.area(), 72, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
@@ -1642,6 +1866,9 @@ mod tests {
         assert_eq!(app.visible_ids().len(), 3);
         assert_eq!(app.selected().unwrap().name, "Мама");
 
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &tx, &s); // Новые
+        assert!(app.tab == Tab::Unread);
+        slow(&mut app);
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &tx, &s); // Личные
         assert!(app.tab == Tab::Users);
         assert_eq!(app.visible_ids().len(), 1);
@@ -1671,8 +1898,8 @@ mod tests {
             &tx,
         );
         let titles: Vec<String> = app.tabs().into_iter().map(|t| t.1).collect();
-        assert_eq!(titles, vec!["Все", "Личные", "Группы", "Каналы", "Новости"]);
-        for _ in 0..4 {
+        assert_eq!(titles, vec!["Все", "Новые", "Личные", "Группы", "Каналы", "Новости"]);
+        for _ in 0..5 {
             slow(&mut app);
             app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &tx, &s);
         }
@@ -1920,5 +2147,224 @@ mod tests {
         let first_line = out.lines().next().unwrap();
         assert!(first_line.starts_with('‹'), "слева есть скрытые вкладки: {first_line}");
         assert!(first_line.contains("Очень длинное н…"), "активная вкладка должна быть видна: {first_line}");
+    }
+
+    fn drain(rx: &mut mpsc::UnboundedReceiver<Cmd>) -> Vec<Cmd> {
+        let mut v = Vec::new();
+        while let Ok(c) = rx.try_recv() {
+            v.push(c);
+        }
+        v
+    }
+
+    fn submit_text(app: &mut App, text: &str, tx: &mpsc::UnboundedSender<Cmd>, s: &Arc<Saver>) {
+        app.clear_input();
+        type_text(app, text, tx, s);
+        slow(app);
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), tx, s);
+    }
+
+    #[test]
+    fn find_filters_chats_and_esc_resets() {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        submit_text(&mut app, "/find кана", &tx, &s);
+        assert_eq!(app.visible_ids().len(), 1);
+        assert_eq!(app.selected().unwrap().name, "Мой канал", "выбор переходит на найденный чат");
+        // регистр не важен
+        submit_text(&mut app, "/find МАМ", &tx, &s);
+        assert_eq!(app.selected().unwrap().name, "Мама");
+        // ничего не найдено
+        submit_text(&mut app, "/find zzz", &tx, &s);
+        assert!(app.visible_ids().is_empty());
+        assert!(app.selected().is_none());
+        // Esc при пустом поле сбрасывает поиск
+        slow(&mut app);
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &tx, &s);
+        assert!(app.filter.is_empty());
+        assert_eq!(app.visible_ids().len(), 3);
+        assert!(app.selected().is_some());
+    }
+
+    #[test]
+    fn f6_prepares_find_command() {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.handle_key(key(KeyCode::F(6), KeyModifiers::NONE), &tx, &s);
+        assert_eq!(app.input, "/find ");
+        app.clear_input();
+        app.handle_key(key(KeyCode::Char('а'), KeyModifiers::CONTROL), &tx, &s); // Ctrl+F в русской раскладке
+        assert_eq!(app.input, "/find ");
+    }
+
+    #[test]
+    fn unread_tab_shows_only_unread() {
+        let mut app = app_with_chats(); // у «Мамы» 2 непрочитанных
+        app.tab = Tab::Unread;
+        app.ensure_selection();
+        assert_eq!(app.visible_ids().len(), 1);
+        assert_eq!(app.selected().unwrap().name, "Мама");
+        assert_eq!(app.unread_in(&Tab::Unread), 1);
+    }
+
+    #[test]
+    fn pinned_chats_go_first_and_persist_in_settings() {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.move_selection(2); // «Рабочий чат»
+        submit_text(&mut app, "/pin", &tx, &s);
+        let names: Vec<String> = app.visible_idx().iter().map(|&i| app.chats[i].name.clone()).collect();
+        assert_eq!(names, vec!["Рабочий чат", "Мама", "Мой канал"]);
+        assert_eq!(app.settings.pinned.len(), 1);
+        assert_eq!(s.settings().pinned, app.settings.pinned, "закрепление сохраняется в хранилище");
+        // повторный /pin открепляет
+        submit_text(&mut app, "/pin", &tx, &s);
+        assert!(app.settings.pinned.is_empty());
+        let names: Vec<String> = app.visible_idx().iter().map(|&i| app.chats[i].name.clone()).collect();
+        assert_eq!(names, vec!["Мама", "Мой канал", "Рабочий чат"]);
+    }
+
+    #[test]
+    fn drafts_are_kept_per_chat() {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        type_text(&mut app, "черновик для мамы", &tx, &s);
+        app.move_selection(1); // канал
+        assert_eq!(app.input, "", "в другом чате поле пустое");
+        type_text(&mut app, "пост", &tx, &s);
+        app.move_selection(-1);
+        assert_eq!(app.input, "черновик для мамы");
+        assert_eq!(app.cursor, app.input_len());
+        app.move_selection(1);
+        assert_eq!(app.input, "пост");
+    }
+
+    #[test]
+    fn typed_text_survives_when_no_chat_selected() {
+        let mut app = App::new(Settings::default());
+        app.input = "/find".into();
+        app.cursor = 5;
+        app.chats = vec![chat(1, "Мама", Kind::User, 0)];
+        app.ensure_selection();
+        assert_eq!(app.input, "/find", "текст не должен пропадать, когда чат появляется");
+    }
+
+    #[test]
+    fn edit_and_delete_last_own_message() {
+        let mut app = app_with_chats(); // у «Мамы» последнее своё сообщение: id 2
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = saver();
+        // /edit без текста подставляет старый текст
+        submit_text(&mut app, "/edit", &tx, &s);
+        assert_eq!(app.input, "/edit Всё хорошо!");
+        // правка
+        submit_text(&mut app, "/edit Всё отлично!", &tx, &s);
+        match drain(&mut rx).pop() {
+            Some(Cmd::Edit { id, text, .. }) => assert_eq!((id, text.as_str()), (2, "Всё отлично!")),
+            _ => panic!("ожидалась команда Edit"),
+        }
+        // удаление требует подтверждения
+        submit_text(&mut app, "/del", &tx, &s);
+        assert!(drain(&mut rx).is_empty(), "первый /del только спрашивает");
+        assert!(app.status.contains("Повторите /del"));
+        submit_text(&mut app, "/del", &tx, &s);
+        match drain(&mut rx).pop() {
+            Some(Cmd::Delete { id, .. }) => assert_eq!(id, 2),
+            _ => panic!("ожидалась команда Delete"),
+        }
+    }
+
+    #[test]
+    fn delete_confirmation_resets_after_other_input() {
+        let mut app = app_with_chats();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = saver();
+        submit_text(&mut app, "/del", &tx, &s);
+        submit_text(&mut app, "обычное сообщение", &tx, &s); // сбрасывает ожидание
+        drain(&mut rx);
+        submit_text(&mut app, "/del", &tx, &s);
+        assert!(drain(&mut rx).is_empty(), "после другого действия снова нужно подтверждение");
+    }
+
+    #[test]
+    fn del_without_own_messages_is_refused() {
+        let mut app = app_with_chats();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.move_selection(1); // канал без загруженной истории
+        submit_text(&mut app, "/del", &tx, &s);
+        assert!(drain(&mut rx).is_empty());
+        assert!(app.status.contains("Нет вашего сообщения"));
+    }
+
+    #[test]
+    fn note_goes_to_saved_messages_from_any_chat() {
+        let mut app = app_with_chats();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = saver();
+        let mut me = chat(77, "Избранное", Kind::User, 0);
+        me.is_self = true;
+        app.chats.push(me.clone());
+        submit_text(&mut app, "/note купить хлеб", &tx, &s);
+        match drain(&mut rx).pop() {
+            Some(Cmd::Send { chat, text, .. }) => {
+                assert_eq!(chat.id, me.id);
+                assert_eq!(text, "купить хлеб");
+            }
+            _ => panic!("ожидалась отправка в Избранное"),
+        }
+    }
+
+    #[test]
+    fn readall_marks_everything_read() {
+        let mut app = app_with_chats();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.chats[1].unread = 5;
+        submit_text(&mut app, "/readall", &tx, &s);
+        assert_eq!(app.total_unread(), 0);
+        let reads = drain(&mut rx).into_iter().filter(|c| matches!(c, Cmd::MarkRead(_))).count();
+        assert_eq!(reads, 2);
+    }
+
+    #[test]
+    fn sent_message_does_not_create_partial_history() {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let channel = app.chats[1].id; // история не загружена
+        app.handle_event(Event::Sent { chat: channel, msg: msg(5, true, "Я", "пост"), scheduled: false }, &tx);
+        assert!(!app.histories.contains_key(&channel), "иначе история канала уже не загрузилась бы целиком");
+    }
+
+    #[test]
+    fn lock_forgets_half_entered_password() {
+        let mut app = app_with_chats();
+        app.mode = Mode::NewPassword;
+        app.pw_stage = 1;
+        app.pw_first = "secret".into();
+        app.lock();
+        assert!(app.pw_first.is_empty());
+        assert_eq!(app.pw_stage, 0);
+    }
+
+    #[test]
+    fn export_contains_messages() {
+        let text = export_text("Мама", &[msg(1, false, "Мама", "Привет\nкак дела"), msg(2, true, "Я", "хорошо")]);
+        assert!(text.starts_with("Переписка: Мама"));
+        assert!(text.contains("Мама: Привет\n    как дела"));
+        assert!(text.contains("Я: хорошо"));
+    }
+
+    #[test]
+    fn unknown_slash_text_is_still_a_message() {
+        let mut app = app_with_chats();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = saver();
+        submit_text(&mut app, "/привет всем", &tx, &s);
+        assert!(matches!(drain(&mut rx).pop(), Some(Cmd::Send { .. })));
     }
 }

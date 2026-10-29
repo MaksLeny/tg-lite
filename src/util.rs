@@ -32,6 +32,25 @@ pub fn log(msg: &str) {
     }
 }
 
+/// Имя файла из названия чата: только буквы, цифры, пробел, `-` и `_`.
+pub fn safe_filename(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let s = s.trim().chars().take(40).collect::<String>();
+    if s.is_empty() { "chat".to_string() } else { s }
+}
+
+/// Сохраняет текст в `export/<имя>.txt` рядом с программой. Возвращает путь к файлу.
+pub fn write_export(chat_name: &str, text: &str) -> std::io::Result<PathBuf> {
+    let dir = data_dir().join("export");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.txt", safe_filename(chat_name)));
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
 /// Можно ли безопасно вывести символ в консоль Windows. Эмодзи, флаги, невидимые символы
 /// (склейки, вариационные селекторы) в её шрифте не рисуются: вместо них появляются
 /// квадратики, а разная трактовка ширины сдвигает и стирает соседний текст.
@@ -85,6 +104,14 @@ mod tests {
         assert_eq!(clean_or("😀😀", "[эмодзи]"), "[эмодзи]");
         assert_eq!(clean_or("", "[эмодзи]"), "");
         assert_eq!(clean_or("ok", "[эмодзи]"), "ok");
+    }
+
+    #[test]
+    fn filenames_are_safe() {
+        assert_eq!(safe_filename("Мама"), "Мама");
+        assert_eq!(safe_filename("a/b\\c:d*?"), "a_b_c_d__");
+        assert_eq!(safe_filename("   "), "chat");
+        assert_eq!(safe_filename(&"я".repeat(100)).chars().count(), 40);
     }
 
     #[test]
