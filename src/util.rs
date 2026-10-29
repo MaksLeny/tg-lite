@@ -14,6 +14,28 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Звуковой сигнал о новом сообщении. На Windows играет тон через звуковую карту (функция Beep),
+/// поэтому работает независимо от схемы системных звуков и от консоли; в отдельном потоке,
+/// чтобы не задерживать интерфейс.
+pub fn play_alert() {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn Beep(freq: u32, millis: u32) -> i32;
+        }
+        std::thread::spawn(|| unsafe {
+            Beep(988, 80);
+            Beep(1319, 120);
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x07");
+        let _ = out.flush();
+    }
+}
+
 const MAX_LOG_BYTES: u64 = 200 * 1024;
 
 /// Дописывает строку в `tglite.log` рядом с exe. Пишутся только служебные сообщения об ошибках,

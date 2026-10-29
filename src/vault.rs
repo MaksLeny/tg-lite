@@ -299,6 +299,26 @@ mod tests {
     }
 
     #[test]
+    fn wipe_removes_file_and_blocks_later_saves() {
+        let path = std::env::temp_dir().join(format!("tglt-wipe-{}.vault", std::process::id()));
+        let saver = Saver::new(
+            VaultFile::new(path.clone()),
+            1,
+            "abcdef0123456789".into(),
+            std::sync::Arc::new(VaultSession::from_blob(SessionBlob::default())),
+            "pw".into(),
+            Settings::default(),
+        );
+        saver.save().unwrap();
+        assert!(path.exists());
+        saver.wipe();
+        assert!(!path.exists());
+        assert!(saver.is_wiped());
+        saver.save().unwrap(); // не должен вернуть файл
+        assert!(!path.exists(), "после самоуничтожения хранилище не пишется");
+    }
+
+    #[test]
     fn tampering_is_detected() {
         let mut enc = encrypt(&sample(), "pw").unwrap();
         let last = enc.len() - 1;
@@ -334,6 +354,8 @@ pub struct Saver {
     state: Mutex<SaverState>,
     /// Не даёт двум сохранениям одновременно писать один и тот же временный файл.
     write_lock: Mutex<()>,
+    /// После самоуничтожения хранилище больше не пишется (иначе файл появился бы снова).
+    wiped: std::sync::atomic::AtomicBool,
 }
 
 struct SaverState {
@@ -357,7 +379,24 @@ impl Saver {
             session,
             state: Mutex::new(SaverState { password, settings }),
             write_lock: Mutex::new(()),
+            wiped: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn is_wiped(&self) -> bool {
+        self.wiped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Самоуничтожение: файл перезаписывается нулями и удаляется, дальнейшие сохранения отключаются.
+    pub fn wipe(&self) {
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.wiped.store(true, std::sync::atomic::Ordering::SeqCst);
+        let path = self.vault.path();
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::write(path, vec![0u8; meta.len() as usize]);
+        }
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("tmp"));
     }
 
     fn state(&self) -> MutexGuard<'_, SaverState> {
@@ -381,6 +420,9 @@ impl Saver {
     }
 
     pub fn save(&self) -> Result<()> {
+        if self.is_wiped() {
+            return Ok(());
+        }
         let (password, settings) = {
             let st = self.state();
             (st.password.clone(), st.settings.clone())
@@ -392,6 +434,9 @@ impl Saver {
             settings,
         };
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_wiped() {
+            return Ok(());
+        }
         self.vault.save(&secrets, &password)
     }
 

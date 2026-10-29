@@ -1,6 +1,8 @@
 //! Работа с Telegram: подключение и фоновый обработчик команд интерфейса.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow};
@@ -10,7 +12,7 @@ use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::tl;
 use grammers_client::update::Update;
 use grammers_client::{Client, SenderPool};
-use grammers_mtsender::UpdatesConfiguration;
+use grammers_mtsender::{InvocationError, RetryContext, RetryPolicy, RpcError, UpdatesConfiguration};
 use tokio::sync::mpsc;
 
 use crate::util::log;
@@ -137,7 +139,16 @@ impl Folder {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Откуда переслано сообщение.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Fwd {
+    /// Имя, если Telegram его прислал (скрытый автор, подпись канала).
+    pub name: Option<String>,
+    /// Отправитель, если он известен: имя подставляется из списка чатов.
+    pub from: Option<PeerId>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct ChatMsg {
     pub id: i32,
     /// Unix-время (секунды) для разделителей по датам.
@@ -145,7 +156,14 @@ pub struct ChatMsg {
     pub outgoing: bool,
     pub sender: String,
     pub text: String,
+    /// Текст без подписи вложения (для правки): `Some`, если у сообщения есть вложение.
+    pub caption: Option<String>,
     pub time: String,
+    /// Сообщение исправлено после отправки.
+    pub edited: bool,
+    /// Номер сообщения, на которое это является ответом.
+    pub reply_to: Option<i32>,
+    pub fwd: Option<Fwd>,
 }
 
 /// Команды от интерфейса к фоновому обработчику.
@@ -159,7 +177,11 @@ pub enum Cmd {
         markdown: bool,
         /// Отложенная публикация: через сколько минут отправить.
         delay_minutes: Option<u32>,
+        /// Ответ на сообщение с этим номером.
+        reply_to: Option<i32>,
     },
+    /// Переслать сообщение `id` из `src` в `dst`.
+    Forward { src: ChatInfo, dst: ChatInfo, id: i32 },
     MarkRead(ChatInfo),
     /// Исправить своё сообщение.
     Edit { chat: ChatInfo, id: i32, text: String, markdown: bool },
@@ -193,7 +215,11 @@ pub struct Connection {
 /// Подключается к Telegram, используя сессию из хранилища.
 /// `proxy` — необязательный SOCKS5-прокси вида `socks5://127.0.0.1:1080`.
 pub fn connect(session: Arc<VaultSession>, api_id: i32, proxy: Option<String>) -> Connection {
-    let params = grammers_mtsender::ConnectionParams { proxy_url: proxy, ..Default::default() };
+    let params = grammers_mtsender::ConnectionParams {
+        proxy_url: proxy,
+        retry_policy: Box::new(FloodPolicy),
+        ..Default::default()
+    };
     let SenderPool { runner, updates, handle } = SenderPool::with_configuration(session, api_id, params);
     let client = Client::new(handle.clone());
     tokio::spawn(runner.run());
@@ -221,21 +247,194 @@ fn kind_of(peer: &Peer) -> Kind {
     }
 }
 
+// ------------------------------------------------------------ ограничения Telegram
+
+/// До какого момента (unix, секунды) Telegram просит подождать (FLOOD_WAIT).
+static FLOOD_UNTIL: AtomicI64 = AtomicI64::new(0);
+
+/// Сколько секунд ещё нужно ждать из-за ограничения Telegram (0 — ограничений нет).
+pub fn flood_left() -> i64 {
+    (FLOOD_UNTIL.load(Ordering::Relaxed) - jiff::Timestamp::now().as_second()).max(0)
+}
+
+/// Тихое ожидание при FLOOD_WAIT: до пяти минут запрос просто повторяется,
+/// а интерфейс показывает обратный отсчёт вместо ошибки.
+struct FloodPolicy;
+
+impl RetryPolicy for FloodPolicy {
+    fn should_retry(&self, ctx: &RetryContext) -> ControlFlow<(), Duration> {
+        match &ctx.error {
+            InvocationError::Rpc(RpcError { code: 420, value: Some(secs), .. })
+                if ctx.fail_count.get() <= 2 && *secs <= 300 =>
+            {
+                FLOOD_UNTIL.store(jiff::Timestamp::now().as_second() + i64::from(*secs), Ordering::Relaxed);
+                ControlFlow::Continue(Duration::from_secs(u64::from(*secs)))
+            }
+            InvocationError::Io(_) if ctx.fail_count.get() <= 1 => ControlFlow::Continue(Duration::from_secs(1)),
+            _ => ControlFlow::Break(()),
+        }
+    }
+}
+
+/// Понятное сообщение вместо технического кода ошибки Telegram.
+pub fn friendly_error(e: &str) -> String {
+    let wait = || {
+        e.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).next_back().unwrap_or("?").to_string()
+    };
+    if e.contains("FLOOD_WAIT") || e.contains("SLOWMODE_WAIT") {
+        return format!("Telegram просит подождать {} с и не принимает запросы", wait());
+    }
+    let known = [
+        ("MESSAGE_TOO_LONG", "сообщение слишком длинное (лимит Telegram 4096 символов)"),
+        ("CHAT_WRITE_FORBIDDEN", "в этот чат писать нельзя"),
+        ("CHAT_ADMIN_REQUIRED", "нужны права администратора"),
+        ("USER_BANNED_IN_CHANNEL", "вам запрещено писать в этот чат"),
+        ("MESSAGE_NOT_MODIFIED", "текст не изменился"),
+        ("MESSAGE_EDIT_TIME_EXPIRED", "время для правки сообщения истекло"),
+        ("MESSAGE_ID_INVALID", "такого сообщения уже нет"),
+        ("PEER_FLOOD", "Telegram ограничил отправку, попробуйте позже"),
+    ];
+    for (code, text) in known {
+        if e.contains(code) {
+            return text.to_string();
+        }
+    }
+    e.to_string()
+}
+
+// ------------------------------------------------------------ подписи вложений
+
+fn trim_zero(s: String) -> String {
+    s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
+}
+
+/// «340 КБ», «2 МБ», «1.5 ГБ».
+pub fn fmt_size(bytes: usize) -> String {
+    let b = bytes as f64;
+    let (kb, mb, gb) = (1024.0, 1024.0 * 1024.0, 1024.0 * 1024.0 * 1024.0);
+    if b >= gb {
+        format!("{} ГБ", trim_zero(format!("{:.1}", b / gb)))
+    } else if b >= mb {
+        format!("{} МБ", trim_zero(format!("{:.1}", b / mb)))
+    } else if b >= kb {
+        format!("{:.0} КБ", b / kb)
+    } else {
+        format!("{bytes} Б")
+    }
+}
+
+/// «0:12», «3:05», «1:02:03».
+pub fn fmt_duration(secs: f64) -> String {
+    let t = secs.max(0.0).round() as u64;
+    let (h, m, s) = (t / 3600, t % 3600 / 60, t % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// Подпись файла-документа по его атрибутам: голосовое, видео, GIF, аудио или просто файл.
+pub fn doc_label(attrs: &[tl::enums::DocumentAttribute], mime: &str, size: Option<usize>) -> String {
+    use tl::enums::DocumentAttribute as A;
+    let size_s = size.map(fmt_size);
+    let with_size = |base: String| match &size_s {
+        Some(sz) => format!("[{base}, {sz}]"),
+        None => format!("[{base}]"),
+    };
+    if attrs.iter().any(|a| matches!(a, A::Animated)) {
+        return with_size("GIF".into());
+    }
+    for a in attrs {
+        match a {
+            A::Audio(au) if au.voice => return format!("[голосовое {}]", fmt_duration(f64::from(au.duration))),
+            A::Audio(au) => {
+                let who = match (&au.performer, &au.title) {
+                    (Some(p), Some(t)) => format!(" {} — {}", crate::util::clean(p), crate::util::clean(t)),
+                    (None, Some(t)) => format!(" {}", crate::util::clean(t)),
+                    _ => String::new(),
+                };
+                return with_size(format!("аудио {}{who}", fmt_duration(f64::from(au.duration))));
+            }
+            A::Video(v) if v.round_message => return format!("[видеосообщение {}]", fmt_duration(v.duration)),
+            A::Video(v) => return with_size(format!("видео {}", fmt_duration(v.duration))),
+            _ => {}
+        }
+    }
+    let name = attrs.iter().find_map(|a| match a {
+        A::Filename(f) => Some(crate::util::clean(&f.file_name)),
+        _ => None,
+    });
+    if mime.starts_with("image/") && name.is_none() {
+        return with_size("изображение".into());
+    }
+    match name {
+        Some(n) if !n.trim().is_empty() => with_size(format!("файл {}", n.trim())),
+        _ => with_size("файл".into()),
+    }
+}
+
+/// Подпись вложения. Пустая строка — подписывать нечего (например, превью ссылки).
+pub fn media_label(media: &grammers_client::media::Media) -> String {
+    use grammers_client::media::Media as M;
+    match media {
+        M::Photo(_) => "[фото]".into(),
+        M::Sticker(_) => "[стикер]".into(),
+        M::Document(d) => match &d.raw.document {
+            Some(tl::enums::Document::Document(doc)) => doc_label(&doc.attributes, &doc.mime_type, Some(doc.size.max(0) as usize)),
+            _ => "[файл]".into(),
+        },
+        M::Contact(c) => {
+            let name = crate::util::clean(&format!("{} {}", c.first_name(), c.last_name()));
+            format!("[контакт {}]", name.trim()).replace("[контакт ]", "[контакт]")
+        }
+        M::Poll(p) => {
+            let tl::enums::TextWithEntities::Entities(q) = p.question();
+            format!("[опрос: {}]", crate::util::clean(&q.text).trim())
+        }
+        M::Geo(_) | M::GeoLive(_) => "[геопозиция]".into(),
+        M::Venue(v) => format!("[место: {}]", crate::util::clean(v.title()).trim()),
+        M::Dice(_) => "[кубик]".into(),
+        M::WebPage(_) => String::new(),
+        _ => "[вложение]".into(),
+    }
+}
+
+/// Склеивает подпись вложения и текст сообщения.
+pub fn compose_text(label: &str, text: &str) -> String {
+    match (label.is_empty(), text.is_empty()) {
+        (true, true) => "[служебное сообщение]".to_string(),
+        (true, false) => text.to_string(),
+        (false, true) => label.to_string(),
+        (false, false) => format!("{label} {text}"),
+    }
+}
+
 pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
     let text = crate::util::clean_or(m.text(), "[эмодзи]");
-    let has_media = m.media().is_some();
-    let text = match (text.is_empty(), has_media) {
-        (true, true) => "[вложение]".to_string(),
-        (true, false) => "[служебное сообщение]".to_string(),
-        (false, true) => format!("[вложение] {text}"),
-        (false, false) => text,
+    let label = m.media().map(|md| media_label(&md)).unwrap_or_default();
+    let caption = if label.is_empty() { None } else { Some(text.clone()) };
+    let text = compose_text(&label, &text);
+    let fwd = match m.forward_header() {
+        Some(tl::enums::MessageFwdHeader::Header(h)) => Some(Fwd {
+            name: h.from_name.as_deref().or(h.post_author.as_deref()).map(|n| crate::util::clean(n).trim().to_string()),
+            from: h.from_id.clone().map(PeerId::from),
+        }),
+        None => None,
     };
     let sender = if m.outgoing() {
         "Я".to_string()
     } else {
         m.sender().and_then(|p| p.name().map(crate::util::clean)).unwrap_or_else(|| fallback_name.to_string())
     };
-    ChatMsg { id: m.id(), ts: m.date().as_second(), outgoing: m.outgoing(), sender, text, time: format_time(m.date()) }
+    ChatMsg {
+        id: m.id(),
+        ts: m.date().as_second(),
+        outgoing: m.outgoing(),
+        sender,
+        text,
+        caption,
+        time: format_time(m.date()),
+        edited: m.edit_date().is_some() && !m.edit_hide(),
+        reply_to: m.reply_to_message_id(),
+        fwd,
+    }
 }
 
 fn dialog_unread(d: &grammers_client::peer::Dialog) -> i32 {
@@ -347,8 +546,12 @@ pub async fn send(
     text: &str,
     markdown: bool,
     delay_minutes: Option<u32>,
+    reply_to: Option<i32>,
 ) -> Result<ChatMsg> {
     let mut msg = if markdown { InputMessage::new().markdown(text) } else { InputMessage::new().text(text) };
+    if let Some(id) = reply_to {
+        msg = msg.reply_to(Some(id));
+    }
     if let Some(min) = delay_minutes {
         let when = SystemTime::now() + Duration::from_secs(u64::from(min) * 60);
         msg = msg.schedule_date(Some(when));
@@ -461,14 +664,25 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                     });
                 }
-                Cmd::Send { chat, text, markdown, delay_minutes } => {
-                    match send(&client, &chat, &text, markdown, delay_minutes).await {
+                Cmd::Forward { src, dst, id } => {
+                    match client.forward_messages(dst.peer, &[id], src.peer).await {
+                        Ok(_) => {
+                            let _ = events.send(Event::Status(format!("Переслано в «{}»", dst.name)));
+                        }
+                        Err(e) => {
+                            log(&format!("forward: {e}"));
+                            let _ = events.send(Event::Error(format!("не переслано: {}", friendly_error(&e.to_string()))));
+                        }
+                    }
+                }
+                Cmd::Send { chat, text, markdown, delay_minutes, reply_to } => {
+                    match send(&client, &chat, &text, markdown, delay_minutes, reply_to).await {
                         Ok(msg) => {
                             let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: delay_minutes.is_some() });
                         }
                         Err(e) => {
                             log(&format!("send: {e}"));
-                            let _ = events.send(Event::Error(format!("не отправлено: {e}")));
+                            let _ = events.send(Event::Error(format!("не отправлено: {}", friendly_error(&e.to_string()))));
                             let _ = events.send(Event::SendFailed { text });
                         }
                     }
@@ -479,18 +693,18 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         Ok(()) => {
                             let m = ChatMsg {
                                 id,
-                                ts: 0,
                                 outgoing: true,
                                 sender: "Я".into(),
                                 text: crate::util::clean_or(&text, "[эмодзи]"),
-                                time: String::new(),
+                                edited: true,
+                                ..Default::default()
                             };
                             let _ = events.send(Event::Edited { chat: chat.id, msg: m });
                             let _ = events.send(Event::Status("Сообщение исправлено".into()));
                         }
                         Err(e) => {
                             log(&format!("edit: {e}"));
-                            let _ = events.send(Event::Error(format!("не исправлено: {e}")));
+                            let _ = events.send(Event::Error(format!("не исправлено: {}", friendly_error(&e.to_string()))));
                         }
                     }
                 }
@@ -501,7 +715,7 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                     }
                     Err(e) => {
                         log(&format!("delete: {e}"));
-                        let _ = events.send(Event::Error(format!("не удалено: {e}")));
+                        let _ = events.send(Event::Error(format!("не удалено: {}", friendly_error(&e.to_string()))));
                     }
                 },
                 Cmd::MarkRead(chat) => {
@@ -594,5 +808,82 @@ mod tests {
         let off = tl::enums::UserStatus::Offline(tl::types::UserStatusOffline { was_online: 123 });
         assert_eq!(presence_from(&off), Presence::Offline(123));
         assert_eq!(presence_from(&tl::enums::UserStatus::Empty), Presence::Hidden);
+    }
+
+    #[test]
+    fn sizes_and_durations() {
+        assert_eq!(fmt_size(500), "500 Б");
+        assert_eq!(fmt_size(340 * 1024), "340 КБ");
+        assert_eq!(fmt_size(2 * 1024 * 1024), "2 МБ");
+        assert_eq!(fmt_size(1_572_864), "1.5 МБ");
+        assert_eq!(fmt_size(3 * 1024 * 1024 * 1024), "3 ГБ");
+        assert_eq!(fmt_duration(12.0), "0:12");
+        assert_eq!(fmt_duration(185.4), "3:05");
+        assert_eq!(fmt_duration(3723.0), "1:02:03");
+    }
+
+    #[test]
+    fn document_labels() {
+        use tl::enums::DocumentAttribute as A;
+        let voice = A::Audio(tl::types::DocumentAttributeAudio { voice: true, duration: 12, title: None, performer: None, waveform: None });
+        assert_eq!(doc_label(&[voice], "audio/ogg", Some(20_000)), "[голосовое 0:12]");
+        let song = A::Audio(tl::types::DocumentAttributeAudio {
+            voice: false,
+            duration: 200,
+            title: Some("Песня".into()),
+            performer: Some("Группа".into()),
+            waveform: None,
+        });
+        assert_eq!(doc_label(&[song], "audio/mpeg", Some(3 * 1024 * 1024)), "[аудио 3:20 Группа — Песня, 3 МБ]");
+        let video = |round| {
+            A::Video(tl::types::DocumentAttributeVideo {
+                round_message: round,
+                supports_streaming: false,
+                nosound: false,
+                duration: 30.0,
+                w: 640,
+                h: 480,
+                preload_prefix_size: None,
+                video_start_ts: None,
+                video_codec: None,
+            })
+        };
+        assert_eq!(doc_label(&[video(false)], "video/mp4", Some(5 * 1024 * 1024)), "[видео 0:30, 5 МБ]");
+        assert_eq!(doc_label(&[video(true)], "video/mp4", Some(1000)), "[видеосообщение 0:30]");
+        assert_eq!(doc_label(&[A::Animated, video(false)], "video/mp4", Some(1024 * 1024)), "[GIF, 1 МБ]");
+        let name = A::Filename(tl::types::DocumentAttributeFilename { file_name: "отчёт.pdf".into() });
+        assert_eq!(doc_label(&[name], "application/pdf", Some(2 * 1024 * 1024)), "[файл отчёт.pdf, 2 МБ]");
+        assert_eq!(doc_label(&[], "application/zip", None), "[файл]");
+        assert_eq!(doc_label(&[], "image/png", Some(1024)), "[изображение, 1 КБ]");
+    }
+
+    #[test]
+    fn label_and_text_are_combined() {
+        assert_eq!(compose_text("[фото]", ""), "[фото]");
+        assert_eq!(compose_text("[фото]", "смотри"), "[фото] смотри");
+        assert_eq!(compose_text("", "просто текст"), "просто текст");
+        assert_eq!(compose_text("", ""), "[служебное сообщение]");
+    }
+
+    #[test]
+    fn telegram_errors_are_explained() {
+        assert!(friendly_error("rpc error 420: FLOOD_WAIT (value: 31)").contains("31"));
+        assert!(friendly_error("MESSAGE_TOO_LONG").contains("4096"));
+        assert!(friendly_error("CHAT_WRITE_FORBIDDEN").contains("нельзя"));
+        assert_eq!(friendly_error("что-то непонятное"), "что-то непонятное");
+    }
+
+    #[test]
+    fn flood_policy_waits_quietly_but_not_forever() {
+        use std::num::NonZeroU32;
+        let ctx = |secs: u32, fails: u32| RetryContext {
+            fail_count: NonZeroU32::new(fails).unwrap(),
+            slept_so_far: Duration::ZERO,
+            error: InvocationError::Rpc(RpcError { code: 420, name: "FLOOD_WAIT".into(), value: Some(secs), caused_by: None }),
+        };
+        assert_eq!(FloodPolicy.should_retry(&ctx(30, 1)), ControlFlow::Continue(Duration::from_secs(30)));
+        assert!(flood_left() > 0, "обратный отсчёт запущен");
+        assert_eq!(FloodPolicy.should_retry(&ctx(30, 3)), ControlFlow::Break(()), "после двух попыток сдаёмся");
+        assert_eq!(FloodPolicy.should_retry(&ctx(900, 1)), ControlFlow::Break(()), "слишком долго: показываем ошибку");
     }
 }

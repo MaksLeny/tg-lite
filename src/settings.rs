@@ -29,6 +29,8 @@ pub struct Settings {
     pub accent: u8,
     /// Закреплённые чаты (bot-API id), показываются в списке первыми.
     pub pinned: Vec<i64>,
+    /// Стереть данные после стольких неверных паролей подряд на экране блокировки (0 — выключено).
+    pub wipe_after: u32,
 }
 
 impl Default for Settings {
@@ -42,11 +44,13 @@ impl Default for Settings {
             history_limit: 60,
             accent: 0,
             pinned: Vec::new(),
+            wipe_after: 0,
         }
     }
 }
 
 pub const LOCK_CHOICES: [u32; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
+pub const WIPE_CHOICES: [u32; 4] = [0, 3, 5, 10];
 pub const HISTORY_CHOICES: [u32; 4] = [30, 60, 100, 150];
 pub const ACCENT_NAMES: [&str; 5] = ["Голубой", "Зелёный", "Янтарный", "Розовый", "Фиолетовый"];
 
@@ -74,6 +78,13 @@ impl Settings {
             ProxyMode::Off => "выключен".to_string(),
             ProxyMode::Manual if self.proxy_manual.is_empty() => "вручную (адрес не задан)".to_string(),
             ProxyMode::Manual => format!("вручную: {}", self.proxy_manual),
+        }
+    }
+
+    pub fn wipe_label(&self) -> String {
+        match self.wipe_after {
+            0 => "выключено".to_string(),
+            n => format!("после {n} неверных паролей"),
         }
     }
 

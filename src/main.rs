@@ -207,6 +207,11 @@ async fn run() -> Result<()> {
     // 4. Сохранение и выход.
     let _ = saver.save();
     quit_handle.quit();
+    if saver.is_wiped() {
+        println!("Данные Tg-Lite удалены (слишком много неверных паролей).");
+        println!("Чтобы закрыть доступ к аккаунту, завершите эту сессию в Telegram: Настройки → Устройства.");
+        std::thread::sleep(Duration::from_secs(4));
+    }
     result
 }
 
