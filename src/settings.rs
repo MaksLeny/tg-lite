@@ -31,6 +31,12 @@ pub struct Settings {
     pub pinned: Vec<i64>,
     /// Стереть данные после стольких неверных паролей подряд на экране блокировки (0 — выключено).
     pub wipe_after: u32,
+    /// Фон экрана блокировки (номер из `lock::BG_NAMES`).
+    pub lock_bg: u8,
+    /// Ширина списка чатов: 0 узкий, 1 обычный, 2 широкий.
+    pub list_width: u8,
+    /// Ширина сообщений в ленте: 0 узкие, 1 обычные, 2 широкие.
+    pub bubble_width: u8,
 }
 
 impl Default for Settings {
@@ -45,6 +51,9 @@ impl Default for Settings {
             accent: 0,
             pinned: Vec::new(),
             wipe_after: 0,
+            lock_bg: 0,
+            list_width: 1,
+            bubble_width: 1,
         }
     }
 }
@@ -86,6 +95,32 @@ impl Settings {
             0 => "выключено".to_string(),
             n => format!("после {n} неверных паролей"),
         }
+    }
+
+    pub fn lock_bg_name(&self) -> &'static str {
+        crate::lock::BG_NAMES[(self.lock_bg as usize).min(crate::lock::BG_NAMES.len() - 1)]
+    }
+
+    /// Доля ширины окна под список чатов и предел в клетках.
+    pub fn list_dims(&self) -> (u16, u16) {
+        match self.list_width {
+            0 => (22, 26),
+            2 => (36, 46),
+            _ => (28, 34),
+        }
+    }
+
+    /// Доля ширины ленты, которую занимает сообщение, в процентах.
+    pub fn bubble_pct(&self) -> usize {
+        match self.bubble_width {
+            0 => 60,
+            2 => 88,
+            _ => 72,
+        }
+    }
+
+    pub fn width_name(v: u8, names: [&'static str; 3]) -> &'static str {
+        names[(v as usize).min(2)]
     }
 
     pub fn accent_name(&self) -> &'static str {

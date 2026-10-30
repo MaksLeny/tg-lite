@@ -1,3 +1,4 @@
+mod lock;
 mod proxy;
 mod settings;
 mod tg;
@@ -112,6 +113,7 @@ async fn connect_auto(
             },
         };
         println!("Подключаюсь к Telegram {}…", route.label());
+        util::debug(&format!("trying route {}", route.label()));
         let conn = tg::connect(Arc::clone(session), api_id, url);
         match tokio::time::timeout(Duration::from_secs(12), conn.client.is_authorized()).await {
             Ok(Ok(authorized)) => {
@@ -126,26 +128,39 @@ async fn connect_auto(
     None
 }
 
-async fn run() -> Result<()> {
-    let vault = VaultFile::new(data_dir().join("tglite.vault"));
-
-    // 1. Пароль, ключи и настройки.
-    let (api_id, api_hash, password, blob, mut settings) = if vault.exists() {
-        println!("Tg-Lite {} · файл данных: {}", env!("CARGO_PKG_VERSION"), vault.path().display());
-        let mut tries = 0;
-        loop {
-            let pw = ask_secret("Пароль: ")?;
-            match vault.load(&pw) {
-                Ok(s) => break (s.api_id, s.api_hash, pw, s.session, s.settings),
-                Err(e) => {
-                    tries += 1;
-                    println!("{e}");
-                    if tries >= 5 {
-                        return Err(anyhow!("слишком много неверных попыток"));
-                    }
+/// Запрос пароля обычной строкой (запасной вариант без экрана входа).
+fn console_login(vault: &VaultFile) -> Result<(vault::Secrets, String)> {
+    println!("Tg-Lite {} · файл данных: {}", env!("CARGO_PKG_VERSION"), vault.path().display());
+    let mut tries = 0;
+    loop {
+        let pw = ask_secret("Пароль: ")?;
+        match vault.load(&pw) {
+            Ok(s) => return Ok((s, pw)),
+            Err(e) => {
+                tries += 1;
+                println!("{e}");
+                if tries >= 5 {
+                    return Err(anyhow!("слишком много неверных попыток"));
                 }
             }
         }
+    }
+}
+
+async fn run() -> Result<()> {
+    let vault = VaultFile::new(data_dir().join("tglite.vault"));
+
+    // 1. Пароль, ключи и настройки. Вход идёт на экране с анимированным фоном;
+    // если он недоступен (ввод перенаправлен), пароль спрашивается обычной строкой.
+    let (api_id, api_hash, password, blob, mut settings) = if vault.exists() {
+        let accent = ratatui::style::Color::Rgb(42, 171, 238);
+        let (s, pw) = match lock::login(&vault, env!("CARGO_PKG_VERSION"), accent)? {
+            lock::Login::Ok(s, pw) => (*s, pw),
+            lock::Login::Quit => return Ok(()),
+            lock::Login::TooMany => return Err(anyhow!("слишком много неверных попыток")),
+            lock::Login::NoTerminal => console_login(&vault)?,
+        };
+        (s.api_id, s.api_hash, pw, s.session, s.settings)
     } else {
         let (id, hash, pw) = first_run_setup()?;
         (id, hash, pw, SessionBlob::default(), Settings::default())
@@ -215,8 +230,36 @@ async fn run() -> Result<()> {
     result
 }
 
+const HELP: &str = "Tg-Lite: лёгкий клиент Telegram для терминала.
+
+Использование: tg-lite [параметры]
+  --debug      подробный журнал в tglite.log (без текстов переписки)
+  --version    показать версию
+  --help       эта справка
+
+Папка данных (tglite.vault, tglite.log, downloads, export) рядом с программой;
+другую можно задать переменной окружения TGLITE_DIR.";
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "--version" | "-V" => {
+                println!("tg-lite {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--help" | "-h" | "/?" => {
+                println!("{HELP}");
+                return;
+            }
+            "--debug" => util::set_debug(true),
+            other => {
+                eprintln!("Неизвестный параметр: {other}\n\n{HELP}");
+                return;
+            }
+        }
+    }
+    util::debug(&format!("start {}", env!("CARGO_PKG_VERSION")));
     if let Err(e) = run().await {
         log(&format!("fatal: {e}"));
         eprintln!("\nОшибка: {e}");

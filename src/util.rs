@@ -64,6 +64,110 @@ pub fn safe_filename(name: &str) -> String {
     if s.is_empty() { "chat".to_string() } else { s }
 }
 
+/// Имя файла для скачивания: точки и расширение сохраняются, недопустимые для Windows символы заменяются.
+pub fn safe_file_name(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .collect();
+    let s = s.trim().trim_start_matches('.').trim().to_string();
+    let s: String = if s.chars().count() > 100 {
+        // Длинное имя укорачиваем, сохраняя расширение.
+        let ext: String = s.rsplit_once('.').map(|(_, e)| e.chars().take(10).collect()).unwrap_or_default();
+        let stem: String = s.chars().take(90).collect();
+        if ext.is_empty() { stem } else { format!("{stem}.{ext}") }
+    } else {
+        s
+    };
+    let stem = s.split('.').next().unwrap_or("").to_uppercase();
+    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"];
+    if s.is_empty() {
+        "file".to_string()
+    } else if reserved.contains(&stem.as_str()) {
+        format!("_{s}")
+    } else {
+        s
+    }
+}
+
+/// Свободное имя в папке: `a.pdf`, затем `a (1).pdf`, `a (2).pdf`…
+pub fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for n in 1..1000 {
+        let p = dir.join(format!("{stem} ({n}){ext}"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    first
+}
+
+/// Находит ссылки в тексте (http, https, t.me, www), без хвостовой пунктуации и без повторов.
+pub fn extract_links(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '«' | '»')) {
+        let t = tok.trim_start_matches(['(', '[', '\'']);
+        let lower = t.to_lowercase();
+        let is_link = lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("t.me/") || lower.starts_with("www.");
+        if !is_link {
+            continue;
+        }
+        let mut t = t.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '\'']).to_string();
+        if !lower.starts_with("http") {
+            t = format!("https://{t}");
+        }
+        if t.len() > 10 && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Открывает ссылку в браузере по умолчанию. Только http и https, без участия командной строки.
+pub fn open_url(url: &str) -> bool {
+    if !(url.starts_with("http://") || url.starts_with("https://")) || url.chars().any(|c| c.is_control() || c == ' ') {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .creation_flags(0x0800_0000) // без окна консоли
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn().is_ok()
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn().is_ok()
+    }
+}
+
+static DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Включает подробный журнал (`tg-lite --debug`).
+pub fn set_debug(on: bool) {
+    DEBUG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Подробная запись в журнал: только при `--debug`. Тексты сообщений сюда не передаются.
+pub fn debug(msg: &str) {
+    if DEBUG.load(std::sync::atomic::Ordering::Relaxed) {
+        log(&format!("debug: {msg}"));
+    }
+}
+
 /// Сохраняет текст в `export/<имя>.txt` рядом с программой. Возвращает путь к файлу.
 pub fn write_export(chat_name: &str, text: &str) -> std::io::Result<PathBuf> {
     let dir = data_dir().join("export");
@@ -134,6 +238,53 @@ mod tests {
         assert_eq!(safe_filename("a/b\\c:d*?"), "a_b_c_d__");
         assert_eq!(safe_filename("   "), "chat");
         assert_eq!(safe_filename(&"я".repeat(100)).chars().count(), 40);
+    }
+
+    #[test]
+    fn download_names_keep_extension_and_avoid_windows_traps() {
+        assert_eq!(safe_file_name("отчёт 2026.pdf"), "отчёт 2026.pdf");
+        assert_eq!(safe_file_name("a/b\\c:d.txt"), "a_b_c_d.txt");
+        assert_eq!(safe_file_name("..\\..\\evil.exe"), "_.._evil.exe");
+        assert_eq!(safe_file_name(".hidden"), "hidden");
+        assert_eq!(safe_file_name("   "), "file");
+        assert_eq!(safe_file_name("con.txt"), "_con.txt");
+        let long = format!("{}.mp4", "я".repeat(200));
+        let n = safe_file_name(&long);
+        assert!(n.chars().count() <= 100 && n.ends_with(".mp4"), "{n}");
+    }
+
+    #[test]
+    fn unique_path_adds_counter() {
+        let dir = std::env::temp_dir().join(format!("tglt-uniq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = unique_path(&dir, "a.pdf");
+        assert_eq!(a, dir.join("a.pdf"));
+        std::fs::write(&a, b"x").unwrap();
+        let b = unique_path(&dir, "a.pdf");
+        assert_eq!(b, dir.join("a (1).pdf"));
+        std::fs::write(&b, b"x").unwrap();
+        assert_eq!(unique_path(&dir, "a.pdf"), dir.join("a (2).pdf"));
+        assert_eq!(unique_path(&dir, "noext"), dir.join("noext"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn links_are_extracted_cleanly() {
+        let t = "Смотри https://example.com/a?b=1&c=2, ещё (https://rust-lang.org). и t.me/durov! www.site.ru/x https://example.com/a?b=1&c=2";
+        assert_eq!(
+            extract_links(t),
+            vec!["https://example.com/a?b=1&c=2", "https://rust-lang.org", "https://t.me/durov", "https://www.site.ru/x"]
+        );
+        assert!(extract_links("просто текст без ссылок").is_empty());
+        assert!(extract_links("ftp://x.y/z javascript:alert(1)").is_empty());
+    }
+
+    #[test]
+    fn only_web_links_are_opened() {
+        assert!(!open_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!open_url("javascript:alert(1)"));
+        assert!(!open_url("https://a.b/c d"));
+        assert!(!open_url("calc.exe"));
     }
 
     #[test]
