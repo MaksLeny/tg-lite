@@ -318,8 +318,21 @@ fn login_loop(terminal: &mut DefaultTerminal, vault: &VaultFile, version: &str, 
         if !event::poll(Duration::from_millis(90))? {
             continue;
         }
-        let TermEvent::Key(k) = event::read()? else { continue };
+        let k = match event::read()? {
+            TermEvent::Key(k) => k,
+            TermEvent::Paste(text) => {
+                input.push_str(&crate::util::paste_line(&text));
+                continue;
+            }
+            _ => continue,
+        };
         if k.kind != KeyEventKind::Press {
+            continue;
+        }
+        if crate::ui::is_paste_key(&k) {
+            if let Some(text) = crate::util::clipboard_text() {
+                input.push_str(&crate::util::paste_line(&text));
+            }
             continue;
         }
         match k.code {

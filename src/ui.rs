@@ -42,7 +42,18 @@ const MAX_MESSAGE_CHARS: usize = 4096;
 /// Команды для автодополнения по Tab.
 const COMMANDS: &[&str] = &[
     "/find", "/pin", "/readall", "/export", "/note", "/edit", "/del", "/later", "/md", "/lock", "/settings", "/passwd",
-    "/proxy", "/refresh", "/help", "/quit", "/search", "/save", "/send", "/links", "/scheduled",
+    "/proxy", "/refresh", "/help", "/quit", "/search", "/save", "/send", "/links", "/scheduled", "/paste", "/faq",
+];
+
+/// Частые вопросы: показываются командой /faq.
+const FAQ: &[(&str, &str)] = &[
+    ("Не вставляется текст", "Ctrl+V, Shift+Insert или команда /paste; в старой консоли Windows можно ещё правой кнопкой мыши"),
+    ("Вместо букв квадраты", "включите в консоли шрифт Consolas или запустите в Windows Terminal; эмодзи программа скрывает сама"),
+    ("Нет подключения", "Telegram может быть заблокирован: включите VPN или задайте /proxy 127.0.0.1:порт, затем перезапустите"),
+    ("Антивирус ругается", "exe без подписи, собран из открытого кода; сверьте SHA256 с релизом или соберите сами"),
+    ("Забыл пароль", "восстановить нельзя: удалите tglite.vault рядом с exe и войдите заново"),
+    ("Нет звука", "F4 → Звук: включить; сигнал идёт через звуковую карту, проверьте громкость"),
+    ("Что-то сломалось", "запустите tg-lite --debug и пришлите tglite.log (в нём нет текстов переписки)"),
 ];
 
 const MUTED: Color = Color::Rgb(120, 135, 150);
@@ -95,6 +106,8 @@ enum Mode {
 enum OverlayKind {
     Links,
     Scheduled,
+    /// Подсказки «Если не работает».
+    Faq,
 }
 
 struct OverlayItem {
@@ -191,7 +204,7 @@ pub struct App {
 // ------------------------------------------------------------------ вспомогательное
 
 /// Буква Ctrl-комбинации независимо от раскладки (русские буквы приводятся к латинским).
-fn ctrl_letter(key: &KeyEvent) -> Option<char> {
+pub(crate) fn ctrl_letter(key: &KeyEvent) -> Option<char> {
     if key.modifiers.contains(KeyModifiers::ALT) {
         return None; // AltGr (Ctrl+Alt) вводит обычные символы
     }
@@ -231,6 +244,11 @@ fn ctrl_letter(key: &KeyEvent) -> Option<char> {
         'ь' => 'm',
         other => other,
     })
+}
+
+/// Ctrl+V (в любой раскладке), Ctrl+Shift+V или Shift+Insert — вставка из буфера обмена.
+pub(crate) fn is_paste_key(key: &KeyEvent) -> bool {
+    ctrl_letter(key) == Some('v') || (key.code == KeyCode::Insert && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
 /// Разбирает `/later 30 текст` -> (30, "текст").
@@ -710,6 +728,29 @@ impl App {
         self.input.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(self.input.len())
     }
 
+    /// Вставка текста (из буфера обмена или из события терминала) в зависимости от экрана.
+    fn paste(&mut self, text: Option<String>) {
+        let Some(text) = text.or_else(crate::util::clipboard_text) else {
+            self.status = "Буфер обмена пуст или недоступен".into();
+            return;
+        };
+        match self.mode {
+            Mode::Chat => {
+                let room = MAX_MESSAGE_CHARS.saturating_sub(self.input_len());
+                let clean = crate::util::paste_clean(&text, room);
+                if clean.is_empty() {
+                    self.status = "Нечего вставлять".into();
+                    return;
+                }
+                for c in clean.chars() {
+                    self.insert_char(c);
+                }
+            }
+            Mode::Locked | Mode::NewPassword => self.lock_input.push_str(&crate::util::paste_line(&text)),
+            _ => {}
+        }
+    }
+
     fn input_len(&self) -> usize {
         self.input.chars().count()
     }
@@ -1054,6 +1095,11 @@ impl App {
         self.last_key_at = Instant::now();
         self.last_activity = Instant::now();
 
+        if is_paste_key(&key) && matches!(self.mode, Mode::Chat | Mode::Locked | Mode::NewPassword) {
+            self.paste(None);
+            return;
+        }
+
         match self.mode {
             Mode::Locked => {
                 match key.code {
@@ -1332,6 +1378,7 @@ impl App {
                     let url = ov.items[ov.sel].data.clone();
                     self.status = if util::open_url(&url) { format!("Открываю в браузере: {url}") } else { "Не удалось открыть ссылку".into() };
                 }
+                OverlayKind::Faq => {}
                 OverlayKind::Scheduled => {
                     if ov.confirm == Some(ov.sel) {
                         let item = ov.items.remove(ov.sel);
@@ -1701,6 +1748,18 @@ impl App {
                     self.open_overlay(OverlayKind::Links, " Ссылки чата ", items);
                 }
             }
+            "/paste" => {
+                self.clear_input();
+                self.paste(None);
+            }
+            "/faq" => {
+                self.clear_input();
+                let items = FAQ
+                    .iter()
+                    .map(|(q, a)| OverlayItem { label: format!("{q} — {a}"), data: String::new(), id: 0 })
+                    .collect();
+                self.open_overlay(OverlayKind::Faq, " Если не работает ", items);
+            }
             "/scheduled" => {
                 self.clear_input();
                 match self.selected().cloned() {
@@ -2026,6 +2085,7 @@ fn draw_overlay(f: &mut Frame, app: &App) {
     let hint = match ov.kind {
         OverlayKind::Links if ov.confirm.is_none() => " ↑ ↓ выбрать · Enter — открыть в браузере · Esc — закрыть",
         OverlayKind::Links => "",
+        OverlayKind::Faq => " ↑ ↓ — читать · Esc — закрыть · связь с автором: @maks1m_salov",
         OverlayKind::Scheduled if ov.confirm.is_some() => " Enter ещё раз — отменить отправку · любая другая клавиша — нет",
         OverlayKind::Scheduled => " ↑ ↓ выбрать · Enter — отменить отправку · Esc — закрыть",
     };
@@ -2148,6 +2208,7 @@ fn draw_help(f: &mut Frame, app: &App) {
         key("/export", "сохранить переписку в файл export/…txt"),
         key("/send путь [текст]", "отправить файл (можно перетащить файл в окно)"),
         key("/save", "скачать последнее вложение (или S в режиме F7)"),
+        key("Ctrl+V / /paste", "вставить из буфера обмена (также Shift+Insert); /faq — если не работает"),
         key("/links, /scheduled", "ссылки чата (L для сообщения); отложенные, отмена"),
         key("/proxy, /passwd", "прокси вручную (auto, off); смена пароля"),
         Line::from(Span::styled(format!(" Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает"), Style::new().fg(MUTED))),
@@ -2253,6 +2314,9 @@ pub async fn run(
         }
     });
 
+    // Терминалы с «bracketed paste» присылают вставку одним событием (на старой консоли Windows
+    // это не поддерживается, там работает чтение буфера по Ctrl+V).
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
     let mut app = App::new(saver.settings());
     let _ = cmd.send(Cmd::LoadDialogs);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -2283,6 +2347,11 @@ pub async fn run(
                     if refresh || before != std::mem::discriminant(&app.mode) {
                         let _ = terminal.clear();
                     }
+                    dirty = true;
+                }
+                TermEvent::Paste(text) => {
+                    app.last_activity = Instant::now();
+                    app.paste(Some(text));
                     dirty = true;
                 }
                 TermEvent::Resize(..) => {
@@ -2560,6 +2629,67 @@ mod tests {
         app.handle_key(key(KeyCode::Enter, none), &tx, &s);
         assert!(matches!(rx.try_recv(), Ok(Cmd::Send { .. })));
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn paste_event_and_keys() {
+        let mut app = app_with_chats();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = saver();
+        // вставка одним событием: переводы строк \r\n нормализуются, эмодзи убираются
+        app.paste(Some("C:\\папка\\файл.txt\r\nвторая 😀 строка".into()));
+        assert_eq!(app.input, "C:\\папка\\файл.txt\nвторая  строка");
+        assert_eq!(app.cursor, app.input_len());
+        assert!(rx.try_recv().is_err(), "вставка ничего не отправляет");
+        // вставка в середину
+        app.clear_input();
+        type_text(&mut app, "ac", &tx, &s);
+        app.cursor = 1;
+        app.paste(Some("b".into()));
+        assert_eq!(app.input, "abc");
+        // лимит длины
+        app.clear_input();
+        app.paste(Some("x".repeat(MAX_MESSAGE_CHARS + 500)));
+        assert_eq!(app.input_len(), MAX_MESSAGE_CHARS);
+        // клавиши вставки распознаются в любой раскладке
+        let c = KeyModifiers::CONTROL;
+        assert!(is_paste_key(&key(KeyCode::Char('v'), c)));
+        assert!(is_paste_key(&key(KeyCode::Char('м'), c)));
+        assert!(is_paste_key(&key(KeyCode::Char('\u{16}'), KeyModifiers::NONE)));
+        assert!(is_paste_key(&key(KeyCode::Insert, KeyModifiers::SHIFT)));
+        assert!(!is_paste_key(&key(KeyCode::Char('v'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn faq_and_paste_commands() {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.input = "/faq".into();
+        app.cursor = 4;
+        assert!(app.try_command("/faq", &tx, &s));
+        assert!(app.mode == Mode::Overlay);
+        assert_eq!(app.overlay.as_ref().unwrap().items.len(), FAQ.len());
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(dump(&term).contains("Если не работает"));
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &tx, &s);
+        app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &tx, &s); // Enter ничего не ломает
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &tx, &s);
+        assert!(app.mode == Mode::Chat);
+        assert!(COMMANDS.contains(&"/paste") && COMMANDS.contains(&"/faq"));
+    }
+
+    #[test]
+    fn paste_into_password_fields_is_single_line() {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.lock();
+        app.paste(Some("секрет\r\n".into()));
+        assert_eq!(app.lock_input, "секрет");
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &tx, &s);
+        assert!(app.lock_input.is_empty());
     }
 
     #[test]

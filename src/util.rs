@@ -208,6 +208,86 @@ pub fn clean(s: &str) -> String {
     out
 }
 
+/// Текст из буфера обмена (только текст). На Windows читается напрямую через WinAPI,
+/// на других системах пробуем wl-paste / xclip / pbpaste.
+pub fn clipboard_text() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        unsafe extern "system" {
+            fn OpenClipboard(owner: *mut c_void) -> i32;
+            fn CloseClipboard() -> i32;
+            fn IsClipboardFormatAvailable(format: u32) -> i32;
+            fn GetClipboardData(format: u32) -> *mut c_void;
+            fn GlobalLock(mem: *mut c_void) -> *mut c_void;
+            fn GlobalUnlock(mem: *mut c_void) -> i32;
+            fn GlobalSize(mem: *mut c_void) -> usize;
+        }
+        const CF_UNICODETEXT: u32 = 13;
+        // Буфер может быть занят другой программой: пробуем несколько раз.
+        let mut opened = false;
+        for _ in 0..10 {
+            if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        if !opened {
+            return None;
+        }
+        let mut result = None;
+        unsafe {
+            if IsClipboardFormatAvailable(CF_UNICODETEXT) != 0 {
+                let h = GetClipboardData(CF_UNICODETEXT);
+                if !h.is_null() {
+                    let size = GlobalSize(h) / 2;
+                    let p = GlobalLock(h) as *const u16;
+                    if !p.is_null() {
+                        let mut len = 0;
+                        while len < size && *p.add(len) != 0 {
+                            len += 1;
+                        }
+                        result = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, len)));
+                        GlobalUnlock(h);
+                    }
+                }
+            }
+            CloseClipboard();
+        }
+        result
+    }
+    #[cfg(not(windows))]
+    {
+        let tools: [(&str, &[&str]); 4] = [
+            ("wl-paste", &["--no-newline"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("xsel", &["--clipboard", "--output"]),
+            ("pbpaste", &[]),
+        ];
+        for (prog, args) in tools {
+            if let Ok(out) = std::process::Command::new(prog).args(args).output() {
+                if out.status.success() {
+                    return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Приводит вставленный текст к виду для поля ввода: переводы строк `\n`, без символов,
+/// которые консоль не рисует, не длиннее `max` символов.
+pub fn paste_clean(s: &str, max: usize) -> String {
+    let s = s.replace("\r\n", "\n").replace('\r', "\n");
+    clean(&s).chars().take(max).collect()
+}
+
+/// Вставленный текст для однострочного поля (пароль, адрес): без переводов строк по краям.
+pub fn paste_line(s: &str) -> String {
+    s.trim_matches(|c| c == '\r' || c == '\n').replace(['\r', '\n'], "")
+}
+
 /// То же, но если после очистки ничего не осталось (например, одни эмодзи), возвращает `placeholder`.
 pub fn clean_or(s: &str, placeholder: &str) -> String {
     let c = clean(s);
@@ -217,6 +297,14 @@ pub fn clean_or(s: &str, placeholder: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_helpers() {
+        assert_eq!(paste_clean("a\r\nb\rc", 100), "a\nb\nc");
+        assert_eq!(paste_clean("abcdef", 3), "abc");
+        assert_eq!(paste_line("pass\r\n"), "pass");
+        assert_eq!(paste_line("a\nb"), "ab");
+    }
 
     #[test]
     fn strips_emoji_and_invisibles() {

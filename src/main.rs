@@ -218,6 +218,7 @@ async fn run() -> Result<()> {
     let _ = crossterm::execute!(io::stdout(), crossterm::terminal::SetTitle("Tg-Lite"));
     let result = ui::run(terminal, cmd_tx, ev_rx, Arc::clone(&saver)).await;
     ratatui::restore();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
 
     // 4. Сохранение и выход.
     let _ = saver.save();
