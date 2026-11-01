@@ -16,11 +16,14 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::vault::{Secrets, VaultFile};
+use crate::{tr, trf};
 
 /// Названия фонов для настроек.
-pub const BG_NAMES: [&str; 4] = ["Аврора", "Матрица", "Звёзды", "Выключен"];
+pub fn bg_names() -> [&'static str; 4] {
+    [tr!("Аврора", "Aurora"), tr!("Матрица", "Matrix"), tr!("Звёзды", "Stars"), tr!("Выключен", "Off")]
+}
 /// Сколько фонов (последний — «выключен»).
-pub const BG_COUNT: u8 = BG_NAMES.len() as u8;
+pub const BG_COUNT: u8 = 4;
 
 const VOID: (u8, u8, u8) = (5, 7, 16);
 const PANEL: Color = Color::Rgb(9, 12, 26);
@@ -121,7 +124,7 @@ fn matrix(buf: &mut Buffer, area: Rect, t: f32, acc: (u8, u8, u8)) {
     for col in 0..area.width {
         let x = area.left() + col;
         // Каждая вторая колонка пустая: так читаемее и дешевле.
-        if hash(u32::from(col), 77) % 3 == 0 {
+        if hash(u32::from(col), 77).is_multiple_of(3) {
             continue;
         }
         let hc = hash(u32::from(col), 1);
@@ -137,11 +140,7 @@ fn matrix(buf: &mut Buffer, area: Rect, t: f32, acc: (u8, u8, u8)) {
             let k = 1.0 - d / len as f32; // 1 у головы, 0 на конце хвоста
             let step = (t * 3.0) as u32;
             let ch = CHARS[(hash(u32::from(col) * 131 + row as u32, step / 3 + (d as u32)) as usize) % CHARS.len()];
-            let fg = if d < 1.0 {
-                mix(acc, (235, 255, 250), 0.85)
-            } else {
-                mix((4, 8, 14), acc, quant(k * k, 8.0) * 0.8)
-            };
+            let fg = if d < 1.0 { mix(acc, (235, 255, 250), 0.85) } else { mix((4, 8, 14), acc, quant(k * k, 8.0) * 0.8) };
             let sym = (ch as char).to_string();
             set(buf, x, area.top() + row as u16, &sym, fg, bg);
         }
@@ -179,8 +178,14 @@ fn sprinkle_stars(buf: &mut Buffer, area: Rect, t: f32, density: f32, acc: (u8, 
         if tw < 0.25 {
             continue;
         }
-        let sym = if tw > 0.9 { "*" } else if tw > 0.55 { "+" } else { "·" };
-        let base = if hash(i, 16) % 5 == 0 { acc } else { (200, 210, 235) };
+        let sym = if tw > 0.9 {
+            "*"
+        } else if tw > 0.55 {
+            "+"
+        } else {
+            "·"
+        };
+        let base = if hash(i, 16).is_multiple_of(5) { acc } else { (200, 210, 235) };
         let fg = mix((30, 36, 60), base, tw);
         let (px, py) = (area.left() + x as u16, area.top() + y as u16);
         if let Some(cell) = buf.cell_mut((px, py)) {
@@ -195,7 +200,7 @@ fn sprinkle_stars(buf: &mut Buffer, area: Rect, t: f32, density: f32, acc: (u8, 
 /// Всё, что нужно для отрисовки экрана блокировки.
 pub struct LockView<'a> {
     pub accent: Color,
-    /// Номер фона (см. [`BG_NAMES`]).
+    /// Номер фона (см. [`bg_names`]).
     pub bg: u8,
     /// Секунды анимации.
     pub t: f32,
@@ -223,7 +228,7 @@ pub fn draw(f: &mut Frame, v: &LockView) {
     let accent = Style::new().fg(v.accent).add_modifier(Modifier::BOLD);
     let muted = Style::new().fg(Color::Rgb(130, 145, 165));
 
-    let cursor_on = (v.t * 2.0) as u32 % 2 == 0;
+    let cursor_on = ((v.t * 2.0) as u32).is_multiple_of(2);
     let dots: String = "●".repeat(v.dots.min(inner_w.saturating_sub(4)));
     let field = format!("{dots}{}", if cursor_on && !v.busy { "▌" } else { " " });
 
@@ -232,7 +237,7 @@ pub fn draw(f: &mut Frame, v: &LockView) {
         Line::from(Span::styled(format!("Tg-Lite {}", v.version), accent)).centered(),
         Line::from(Span::styled(v.title.to_string(), muted)).centered(),
         Line::from(""),
-        Line::from(if v.busy { "Проверяю пароль…" } else { v.prompt }.to_string()).centered(),
+        Line::from(if v.busy { tr!("Проверяю пароль…", "Checking password…") } else { v.prompt }.to_string()).centered(),
         Line::from(""),
         Line::from(vec![Span::styled("› ", muted), Span::styled(field, Style::new().fg(v.accent))]).centered(),
     ];
@@ -307,11 +312,11 @@ fn login_loop(terminal: &mut DefaultTerminal, vault: &VaultFile, version: &str, 
             bg: 0,
             t,
             version,
-            title: "Вход",
-            prompt: "Введите пароль и нажмите Enter",
+            title: tr!("Вход", "Sign in"),
+            prompt: tr!("Введите пароль и нажмите Enter", "Enter your password and press Enter"),
             dots: input.chars().count(),
             error: &error,
-            footer: "Esc — выйти",
+            footer: tr!("Esc — выйти", "Esc - quit"),
             busy: false,
         };
         terminal.draw(|f| draw(f, &view))?;
@@ -352,7 +357,7 @@ fn login_loop(terminal: &mut DefaultTerminal, vault: &VaultFile, version: &str, 
                         if tries >= MAX_TRIES {
                             return Ok(Login::TooMany);
                         }
-                        error = format!("{e} (попытка {tries} из {MAX_TRIES})");
+                        error = trf!("{e} (попытка {tries} из {MAX_TRIES})", "{e} (attempt {tries} of {MAX_TRIES})");
                         input.clear();
                     }
                 }
@@ -379,21 +384,22 @@ mod tests {
             accent: Color::Rgb(42, 171, 238),
             bg,
             t,
-            version: "0.0.7",
-            title: "Заблокировано",
-            prompt: "Введите пароль и нажмите Enter",
+            version: env!("CARGO_PKG_VERSION"),
+            title: tr!("Заблокировано", "Locked"),
+            prompt: tr!("Введите пароль и нажмите Enter", "Enter your password and press Enter"),
             dots: 5,
-            error: "Неверный пароль. Осталось попыток до удаления данных: 2",
-            footer: "F10 — выйти",
+            error: tr!(
+                "Неверный пароль. Осталось попыток до удаления данных: 2",
+                "Wrong password. Attempts left before data is deleted: 2"
+            ),
+            footer: tr!("F10 — выйти", "F10 — quit"),
             busy: false,
         }
     }
 
     fn dump(term: &Terminal<TestBackend>) -> String {
         let buf = term.backend().buffer();
-        (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
-            .collect()
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect()
     }
 
     #[test]
@@ -414,7 +420,7 @@ mod tests {
         term.draw(|f| draw(f, &view(0, 1.0))).unwrap();
         let out = dump(&term);
         assert!(out.contains("Осталось попыток") && out.contains("данных: 2"), "текст ошибки обрезан:\n{out}");
-        assert!(out.contains("Tg-Lite 0.0.7"));
+        assert!(out.contains(&format!("Tg-Lite {}", env!("CARGO_PKG_VERSION"))));
         assert!(out.contains("F10"));
     }
 
@@ -452,10 +458,10 @@ mod tests {
             let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
             for t in [0.0, 5.0, 20.0] {
                 term.draw(|f| {
-                let area = f.area();
-                paint_background(f.buffer_mut(), area, bg, t, Color::Rgb(42, 171, 238));
-            })
-            .unwrap();
+                    let area = f.area();
+                    paint_background(f.buffer_mut(), area, bg, t, Color::Rgb(42, 171, 238));
+                })
+                .unwrap();
                 let buf = term.backend().buffer();
                 for y in 0..20 {
                     for x in 0..60 {
@@ -480,6 +486,7 @@ mod tests {
     fn dump_frames() {
         let Some(dir) = std::env::var_os("TGLITE_SHOTS") else { return };
         std::fs::create_dir_all(&dir).unwrap();
+        crate::i18n::set(u8::from(std::env::var("TGLITE_LANG").is_ok_and(|v| v == "en")));
         let col = |c: Color| match c {
             Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
             _ => String::new(),

@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{tr, trf};
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProxyMode {
     /// Системный прокси Windows и переменные окружения, иначе напрямую.
@@ -25,18 +27,20 @@ pub struct Settings {
     pub show_status: bool,
     /// Сколько последних сообщений загружать при открытии чата.
     pub history_limit: u32,
-    /// Номер цвета акцента (см. ACCENT_NAMES).
+    /// Номер цвета акцента (см. accent_names()).
     pub accent: u8,
     /// Закреплённые чаты (bot-API id), показываются в списке первыми.
     pub pinned: Vec<i64>,
     /// Стереть данные после стольких неверных паролей подряд на экране блокировки (0 — выключено).
     pub wipe_after: u32,
-    /// Фон экрана блокировки (номер из `lock::BG_NAMES`).
+    /// Фон экрана блокировки (номер из `lock::bg_names()`).
     pub lock_bg: u8,
     /// Ширина списка чатов: 0 узкий, 1 обычный, 2 широкий.
     pub list_width: u8,
     /// Ширина сообщений в ленте: 0 узкие, 1 обычные, 2 широкие.
     pub bubble_width: u8,
+    /// Язык интерфейса: 0 русский, 1 английский.
+    pub lang: u8,
 }
 
 impl Default for Settings {
@@ -54,6 +58,7 @@ impl Default for Settings {
             lock_bg: 0,
             list_width: 1,
             bubble_width: 1,
+            lang: 0,
         }
     }
 }
@@ -61,7 +66,9 @@ impl Default for Settings {
 pub const LOCK_CHOICES: [u32; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
 pub const WIPE_CHOICES: [u32; 4] = [0, 3, 5, 10];
 pub const HISTORY_CHOICES: [u32; 4] = [30, 60, 100, 150];
-pub const ACCENT_NAMES: [&str; 5] = ["Голубой", "Зелёный", "Янтарный", "Розовый", "Фиолетовый"];
+pub fn accent_names() -> [&'static str; 5] {
+    [tr!("Голубой", "Blue"), tr!("Зелёный", "Green"), tr!("Янтарный", "Amber"), tr!("Розовый", "Pink"), tr!("Фиолетовый", "Purple")]
+}
 
 /// Переключает значение по кругу вперёд (`dir > 0`) или назад.
 pub fn cycle<T: PartialEq + Copy>(list: &[T], cur: T, dir: i32) -> T {
@@ -74,31 +81,31 @@ pub fn cycle<T: PartialEq + Copy>(list: &[T], cur: T, dir: i32) -> T {
 impl Settings {
     pub fn lock_label(&self) -> String {
         match self.lock_minutes {
-            0 => "никогда".to_string(),
-            1 => "1 минута".to_string(),
-            m @ 2..=4 => format!("{m} минуты"),
-            m => format!("{m} минут"),
+            0 => tr!("никогда", "never").to_string(),
+            1 => tr!("1 минута", "1 minute").to_string(),
+            m @ 2..=4 => trf!("{m} минуты", "{m} minutes"),
+            m => trf!("{m} минут", "{m} minutes"),
         }
     }
 
     pub fn proxy_label(&self) -> String {
         match self.proxy_mode {
-            ProxyMode::Auto => "авто (системный)".to_string(),
-            ProxyMode::Off => "выключен".to_string(),
-            ProxyMode::Manual if self.proxy_manual.is_empty() => "вручную (адрес не задан)".to_string(),
-            ProxyMode::Manual => format!("вручную: {}", self.proxy_manual),
+            ProxyMode::Auto => tr!("авто (системный)", "auto (system)").to_string(),
+            ProxyMode::Off => tr!("выключен", "off").to_string(),
+            ProxyMode::Manual if self.proxy_manual.is_empty() => tr!("вручную (адрес не задан)", "manual (no address set)").to_string(),
+            ProxyMode::Manual => trf!("вручную: {}", "manual: {}", self.proxy_manual),
         }
     }
 
     pub fn wipe_label(&self) -> String {
         match self.wipe_after {
-            0 => "выключено".to_string(),
-            n => format!("после {n} неверных паролей"),
+            0 => tr!("выключено", "off").to_string(),
+            n => trf!("после {n} неверных паролей", "after {n} wrong passwords"),
         }
     }
 
     pub fn lock_bg_name(&self) -> &'static str {
-        crate::lock::BG_NAMES[(self.lock_bg as usize).min(crate::lock::BG_NAMES.len() - 1)]
+        crate::lock::bg_names()[(self.lock_bg as usize).min(crate::lock::BG_COUNT as usize - 1)]
     }
 
     /// Доля ширины окна под список чатов и предел в клетках.
@@ -124,7 +131,7 @@ impl Settings {
     }
 
     pub fn accent_name(&self) -> &'static str {
-        ACCENT_NAMES[(self.accent as usize).min(ACCENT_NAMES.len() - 1)]
+        accent_names()[(self.accent as usize).min(accent_names().len() - 1)]
     }
 }
 

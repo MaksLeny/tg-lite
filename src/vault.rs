@@ -5,6 +5,7 @@ use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use crate::{tr, trf};
 use anyhow::{Context, Result, anyhow};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -78,15 +79,13 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     let params = Params::new(19 * 1024, 2, 1, Some(32)).map_err(|e| anyhow!("argon2: {e}"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
-    argon
-        .hash_password_into(password.as_bytes(), salt, &mut key)
-        .map_err(|e| anyhow!("argon2: {e}"))?;
+    argon.hash_password_into(password.as_bytes(), salt, &mut key).map_err(|e| anyhow!("argon2: {e}"))?;
     Ok(key)
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut buf = [0u8; N];
-    getrandom::fill(&mut buf).map_err(|e| anyhow!("не удалось получить случайные байты: {e}"))?;
+    getrandom::fill(&mut buf).map_err(|e| anyhow!(trf!("не удалось получить случайные байты: {e}", "failed to get random bytes: {e}")))?;
     Ok(buf)
 }
 
@@ -95,18 +94,15 @@ pub fn encrypt(secrets: &Secrets, password: &str) -> Result<Vec<u8>> {
     let salt = random_bytes::<SALT_LEN>()?;
     let nonce = random_bytes::<NONCE_LEN>()?;
     let mut key = derive_key(password, &salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow!("неверная длина ключа"))?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow!(tr!("неверная длина ключа", "invalid key length")))?;
     // Заголовок (магия + соль + nonce) защищён как associated data: подмена заметна.
     let mut header = Vec::with_capacity(MAGIC.len() + SALT_LEN + NONCE_LEN);
     header.extend_from_slice(MAGIC);
     header.extend_from_slice(&salt);
     header.extend_from_slice(&nonce);
     let ct = cipher
-        .encrypt(
-            &Nonce::try_from(&nonce[..]).map_err(|_| anyhow!("nonce"))?,
-            Payload { msg: plain.as_slice(), aad: &header },
-        )
-        .map_err(|_| anyhow!("ошибка шифрования"))?;
+        .encrypt(&Nonce::try_from(&nonce[..]).map_err(|_| anyhow!("nonce"))?, Payload { msg: plain.as_slice(), aad: &header })
+        .map_err(|_| anyhow!(tr!("ошибка шифрования", "encryption error")))?;
     key.zeroize();
     plain.zeroize();
 
@@ -118,19 +114,19 @@ pub fn encrypt(secrets: &Secrets, password: &str) -> Result<Vec<u8>> {
 pub fn decrypt(data: &[u8], password: &str) -> Result<Secrets> {
     let head = MAGIC.len() + SALT_LEN + NONCE_LEN;
     if data.len() < head + 16 || &data[..MAGIC.len()] != MAGIC {
-        return Err(anyhow!("файл хранилища повреждён или имеет неизвестный формат"));
+        return Err(anyhow!(tr!(
+            "файл хранилища повреждён или имеет неизвестный формат",
+            "the vault file is corrupted or has an unknown format"
+        )));
     }
     let salt = &data[MAGIC.len()..MAGIC.len() + SALT_LEN];
     let nonce = &data[MAGIC.len() + SALT_LEN..head];
     let mut key = derive_key(password, salt)?;
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow!("неверная длина ключа"))?;
-    let plain = cipher.decrypt(
-        &Nonce::try_from(nonce).map_err(|_| anyhow!("nonce"))?,
-        Payload { msg: &data[head..], aad: &data[..head] },
-    );
+    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow!(tr!("неверная длина ключа", "invalid key length")))?;
+    let plain = cipher.decrypt(&Nonce::try_from(nonce).map_err(|_| anyhow!("nonce"))?, Payload { msg: &data[head..], aad: &data[..head] });
     key.zeroize();
-    let mut plain = plain.map_err(|_| anyhow!("неверный пароль"))?;
-    let secrets = serde_json::from_slice(&plain).context("содержимое хранилища не читается");
+    let mut plain = plain.map_err(|_| anyhow!(tr!("неверный пароль", "wrong password")))?;
+    let secrets = serde_json::from_slice(&plain).context(tr!("содержимое хранилища не читается", "the vault contents cannot be read"));
     plain.zeroize();
     secrets
 }
@@ -155,8 +151,7 @@ impl VaultFile {
     }
 
     pub fn load(&self, password: &str) -> Result<Secrets> {
-        let data = std::fs::read(&self.path)
-            .with_context(|| format!("не удалось прочитать {}", self.path.display()))?;
+        let data = std::fs::read(&self.path).with_context(|| trf!("не удалось прочитать {}", "failed to read {}", self.path.display()))?;
         decrypt(&data, password)
     }
 
@@ -226,10 +221,7 @@ impl Session for VaultSession {
     fn cache_peer(&self, peer: PeerInfo) -> BoxFuture<'_, Result<(), Infallible>> {
         Box::pin(async move {
             let mut data = self.data();
-            data.peer_infos
-                .entry(peer.id())
-                .or_insert_with(|| peer.clone())
-                .extend_info(&peer);
+            data.peer_infos.entry(peer.id()).or_insert_with(|| peer.clone()).extend_info(&peer);
             Ok(())
         })
     }
@@ -256,91 +248,6 @@ impl Session for VaultSession {
             }
             Ok(())
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample() -> Secrets {
-        Secrets {
-            api_id: 12345,
-            api_hash: "abcdef0123456789".into(),
-            session: SessionBlob::default(),
-            settings: Settings::default(),
-        }
-    }
-
-    #[test]
-    fn roundtrip_with_right_password() {
-        let enc = encrypt(&sample(), "correct horse").unwrap();
-        let dec = decrypt(&enc, "correct horse").unwrap();
-        assert_eq!(dec.api_id, 12345);
-        assert_eq!(dec.api_hash, "abcdef0123456789");
-        assert_eq!(dec.session.dc_options.len(), 5);
-    }
-
-    #[test]
-    fn old_format_without_settings_loads() {
-        // Секреты, записанные версиями 0.0.1/0.0.2, не содержат поля settings.
-        let mut v = serde_json::to_value(sample()).unwrap();
-        v.as_object_mut().unwrap().remove("settings");
-        let s: Secrets = serde_json::from_value(v).unwrap();
-        assert_eq!(s.settings, Settings::default());
-        assert_eq!(s.api_id, 12345);
-    }
-
-    #[test]
-    fn wrong_password_is_rejected() {
-        let enc = encrypt(&sample(), "correct horse").unwrap();
-        let err = decrypt(&enc, "wrong").err().unwrap();
-        assert!(err.to_string().contains("неверный пароль"));
-    }
-
-    #[test]
-    fn wipe_removes_file_and_blocks_later_saves() {
-        let path = std::env::temp_dir().join(format!("tglt-wipe-{}.vault", std::process::id()));
-        let saver = Saver::new(
-            VaultFile::new(path.clone()),
-            1,
-            "abcdef0123456789".into(),
-            std::sync::Arc::new(VaultSession::from_blob(SessionBlob::default())),
-            "pw".into(),
-            Settings::default(),
-        );
-        saver.save().unwrap();
-        assert!(path.exists());
-        saver.wipe();
-        assert!(!path.exists());
-        assert!(saver.is_wiped());
-        saver.save().unwrap(); // не должен вернуть файл
-        assert!(!path.exists(), "после самоуничтожения хранилище не пишется");
-    }
-
-    #[test]
-    fn tampering_is_detected() {
-        let mut enc = encrypt(&sample(), "pw").unwrap();
-        let last = enc.len() - 1;
-        enc[last] ^= 1;
-        assert!(decrypt(&enc, "pw").is_err());
-    }
-
-    #[test]
-    fn api_hash_not_visible_in_file() {
-        let enc = encrypt(&sample(), "pw").unwrap();
-        let hay = String::from_utf8_lossy(&enc);
-        assert!(!hay.contains("abcdef0123456789"));
-    }
-
-    #[test]
-    fn file_save_and_load() {
-        let dir = std::env::temp_dir().join(format!("tglt-test-{}", std::process::id()));
-        let f = VaultFile::new(dir.join("vault.bin"));
-        f.save(&sample(), "pw").unwrap();
-        assert!(f.exists());
-        assert_eq!(f.load("pw").unwrap().api_id, 12345);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -427,12 +334,7 @@ impl Saver {
             let st = self.state();
             (st.password.clone(), st.settings.clone())
         };
-        let secrets = Secrets {
-            api_id: self.api_id,
-            api_hash: self.api_hash.clone(),
-            session: self.session.snapshot(),
-            settings,
-        };
+        let secrets = Secrets { api_id: self.api_id, api_hash: self.api_hash.clone(), session: self.session.snapshot(), settings };
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         if self.is_wiped() {
             return Ok(());
@@ -446,5 +348,85 @@ impl Saver {
         std::thread::spawn(move || {
             let _ = s.save();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Secrets {
+        Secrets { api_id: 12345, api_hash: "abcdef0123456789".into(), session: SessionBlob::default(), settings: Settings::default() }
+    }
+
+    #[test]
+    fn roundtrip_with_right_password() {
+        let enc = encrypt(&sample(), "correct horse").unwrap();
+        let dec = decrypt(&enc, "correct horse").unwrap();
+        assert_eq!(dec.api_id, 12345);
+        assert_eq!(dec.api_hash, "abcdef0123456789");
+        assert_eq!(dec.session.dc_options.len(), 5);
+    }
+
+    #[test]
+    fn old_format_without_settings_loads() {
+        // Секреты, записанные версиями 0.0.1/0.0.2, не содержат поля settings.
+        let mut v = serde_json::to_value(sample()).unwrap();
+        v.as_object_mut().unwrap().remove("settings");
+        let s: Secrets = serde_json::from_value(v).unwrap();
+        assert_eq!(s.settings, Settings::default());
+        assert_eq!(s.api_id, 12345);
+    }
+
+    #[test]
+    fn wrong_password_is_rejected() {
+        let enc = encrypt(&sample(), "correct horse").unwrap();
+        let err = decrypt(&enc, "wrong").err().unwrap();
+        assert!(err.to_string().contains("неверный пароль"));
+    }
+
+    #[test]
+    fn wipe_removes_file_and_blocks_later_saves() {
+        let path = std::env::temp_dir().join(format!("tglt-wipe-{}.vault", std::process::id()));
+        let saver = Saver::new(
+            VaultFile::new(path.clone()),
+            1,
+            "abcdef0123456789".into(),
+            std::sync::Arc::new(VaultSession::from_blob(SessionBlob::default())),
+            "pw".into(),
+            Settings::default(),
+        );
+        saver.save().unwrap();
+        assert!(path.exists());
+        saver.wipe();
+        assert!(!path.exists());
+        assert!(saver.is_wiped());
+        saver.save().unwrap(); // не должен вернуть файл
+        assert!(!path.exists(), "после самоуничтожения хранилище не пишется");
+    }
+
+    #[test]
+    fn tampering_is_detected() {
+        let mut enc = encrypt(&sample(), "pw").unwrap();
+        let last = enc.len() - 1;
+        enc[last] ^= 1;
+        assert!(decrypt(&enc, "pw").is_err());
+    }
+
+    #[test]
+    fn api_hash_not_visible_in_file() {
+        let enc = encrypt(&sample(), "pw").unwrap();
+        let hay = String::from_utf8_lossy(&enc);
+        assert!(!hay.contains("abcdef0123456789"));
+    }
+
+    #[test]
+    fn file_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("tglt-test-{}", std::process::id()));
+        let f = VaultFile::new(dir.join("vault.bin"));
+        f.save(&sample(), "pw").unwrap();
+        assert!(f.exists());
+        assert_eq!(f.load("pw").unwrap().api_id, 12345);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

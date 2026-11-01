@@ -23,6 +23,7 @@ use crate::settings::{HISTORY_CHOICES, LOCK_CHOICES, ProxyMode, Settings, WIPE_C
 use crate::tg::{self, ChatInfo, ChatMsg, Cmd, Event, Folder, Kind};
 use crate::util;
 use crate::vault::Saver;
+use crate::{tr, trf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -41,20 +42,85 @@ const MAX_MESSAGE_CHARS: usize = 4096;
 
 /// Команды для автодополнения по Tab.
 const COMMANDS: &[&str] = &[
-    "/find", "/pin", "/readall", "/export", "/note", "/edit", "/del", "/later", "/md", "/lock", "/settings", "/passwd",
-    "/proxy", "/refresh", "/help", "/quit", "/search", "/save", "/send", "/links", "/scheduled", "/paste", "/faq",
+    "/find",
+    "/pin",
+    "/readall",
+    "/export",
+    "/note",
+    "/edit",
+    "/del",
+    "/later",
+    "/md",
+    "/lock",
+    "/settings",
+    "/passwd",
+    "/proxy",
+    "/refresh",
+    "/help",
+    "/quit",
+    "/search",
+    "/save",
+    "/send",
+    "/links",
+    "/scheduled",
+    "/paste",
+    "/faq",
 ];
 
 /// Частые вопросы: показываются командой /faq.
-const FAQ: &[(&str, &str)] = &[
-    ("Не вставляется текст", "Ctrl+V, Shift+Insert или команда /paste; в старой консоли Windows можно ещё правой кнопкой мыши"),
-    ("Вместо букв квадраты", "включите в консоли шрифт Consolas или запустите в Windows Terminal; эмодзи программа скрывает сама"),
-    ("Нет подключения", "Telegram может быть заблокирован: включите VPN или задайте /proxy 127.0.0.1:порт, затем перезапустите"),
-    ("Антивирус ругается", "exe без подписи, собран из открытого кода; сверьте SHA256 с релизом или соберите сами"),
-    ("Забыл пароль", "восстановить нельзя: удалите tglite.vault рядом с exe и войдите заново"),
-    ("Нет звука", "F4 → Звук: включить; сигнал идёт через звуковую карту, проверьте громкость"),
-    ("Что-то сломалось", "запустите tg-lite --debug и пришлите tglite.log (в нём нет текстов переписки)"),
-];
+fn faq() -> [(&'static str, &'static str); 7] {
+    [
+        (
+            tr!("Не вставляется текст", "Text will not paste"),
+            tr!(
+                "Ctrl+V, Shift+Insert или команда /paste; в старой консоли Windows можно ещё правой кнопкой мыши",
+                "Ctrl+V, Shift+Insert or the /paste command; in the old Windows console you can also right-click"
+            ),
+        ),
+        (
+            tr!("Вместо букв квадраты", "Boxes instead of letters"),
+            tr!(
+                "включите в консоли шрифт Consolas или запустите в Windows Terminal; эмодзи программа скрывает сама",
+                "set the console font to Consolas or run in Windows Terminal; the program hides emoji itself"
+            ),
+        ),
+        (
+            tr!("Нет подключения", "No connection"),
+            tr!(
+                "Telegram может быть заблокирован: включите VPN или задайте /proxy 127.0.0.1:порт, затем перезапустите",
+                "Telegram may be blocked: turn on a VPN or set /proxy 127.0.0.1:port, then restart"
+            ),
+        ),
+        (
+            tr!("Антивирус ругается", "Antivirus complains"),
+            tr!(
+                "exe без подписи, собран из открытого кода; сверьте SHA256 с релизом или соберите сами",
+                "the exe is unsigned and built from open source; compare the SHA256 with the release or build it yourself"
+            ),
+        ),
+        (
+            tr!("Забыл пароль", "Forgot the password"),
+            tr!(
+                "восстановить нельзя: удалите tglite.vault рядом с exe и войдите заново",
+                "it cannot be recovered: delete tglite.vault next to the exe and sign in again"
+            ),
+        ),
+        (
+            tr!("Нет звука", "No sound"),
+            tr!(
+                "F4 → Звук: включить; сигнал идёт через звуковую карту, проверьте громкость",
+                "F4 → Sound: on; the beep goes through the sound card, check the volume"
+            ),
+        ),
+        (
+            tr!("Что-то сломалось", "Something broke"),
+            tr!(
+                "запустите tg-lite --debug и пришлите tglite.log (в нём нет текстов переписки)",
+                "run tg-lite --debug and send tglite.log (it contains no message text)"
+            ),
+        ),
+    ]
+}
 
 const MUTED: Color = Color::Rgb(120, 135, 150);
 const OWN: Color = Color::Rgb(110, 214, 130);
@@ -143,7 +209,7 @@ enum Tab {
     Folder(i32),
 }
 
-const SETTINGS_ROWS: usize = 11;
+const SETTINGS_ROWS: usize = 12;
 
 pub struct App {
     chats: Vec<ChatInfo>,
@@ -374,10 +440,13 @@ fn layout_input(text: &str, cursor: usize, width: usize) -> InputLayout {
     InputLayout { lines, cur_row, cur_col }
 }
 
-const MONTHS: [&str; 12] = [
-    "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября",
-    "декабря",
-];
+fn months() -> [&'static str; 12] {
+    if crate::i18n::en() {
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    } else {
+        ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+    }
+}
 
 fn local_date(ts: i64, tz: &jiff::tz::TimeZone) -> Option<(i16, i8, i8)> {
     let t = jiff::Timestamp::from_second(ts).ok()?;
@@ -387,11 +456,11 @@ fn local_date(ts: i64, tz: &jiff::tz::TimeZone) -> Option<(i16, i8, i8)> {
 
 fn day_label(date: (i16, i8, i8), today: Option<(i16, i8, i8)>) -> String {
     let (y, m, d) = date;
-    let month = MONTHS.get((m as usize).wrapping_sub(1)).copied().unwrap_or("");
+    let month = months().get((m as usize).wrapping_sub(1)).copied().unwrap_or("");
     match today {
-        Some((ty, tm, td)) if (ty, tm, td) == (y, m, d) => "Сегодня".to_string(),
-        Some((ty, _, _)) if ty == y => format!("{d} {month}"),
-        _ => format!("{d} {month} {y}"),
+        Some((ty, tm, td)) if (ty, tm, td) == (y, m, d) => tr!("Сегодня", "Today").to_string(),
+        Some((ty, _, _)) if ty == y => trf!("{d} {month}", "{month} {d}"),
+        _ => trf!("{d} {month} {y}", "{month} {d}, {y}"),
     }
 }
 
@@ -413,15 +482,15 @@ fn build_message_lines(
 
     for (idx, m) in msgs.iter().enumerate() {
         let day = local_date(m.ts, &tz);
-        if let Some(d) = day {
-            if Some(d) != prev_day {
-                let label = format!("── {} ──", day_label(d, today));
-                lines.push(Line::from(Span::styled(label, Style::new().fg(MUTED))).centered());
-                prev_day = day;
-            }
+        if let Some(d) = day
+            && Some(d) != prev_day
+        {
+            let label = format!("── {} ──", day_label(d, today));
+            lines.push(Line::from(Span::styled(label, Style::new().fg(MUTED))).centered());
+            prev_day = day;
         }
         let first = lines.len();
-        let time = if m.edited { format!("{} (изм.)", m.time) } else { m.time.clone() };
+        let time = if m.edited { trf!("{} (изм.)", "{} (edited)", m.time) } else { m.time.clone() };
         let note = |text: String| Span::styled(text, Style::new().fg(MUTED).add_modifier(Modifier::ITALIC));
         let inner = bubble.saturating_sub(2);
 
@@ -429,18 +498,18 @@ fn build_message_lines(
         let mut notes: Vec<String> = Vec::new();
         if let Some(f) = &m.fwd {
             notes.push(match &f.name {
-                Some(n) if !n.is_empty() => format!("↪ переслано от {n}"),
-                _ => "↪ переслано".to_string(),
+                Some(n) if !n.is_empty() => trf!("↪ переслано от {n}", "↪ forwarded from {n}"),
+                _ => tr!("↪ переслано", "↪ forwarded").to_string(),
             });
         }
         if let Some(rid) = m.reply_to {
             let quoted = msgs.iter().find(|x| x.id == rid);
             notes.push(match quoted {
                 Some(q) => {
-                    let who = if q.outgoing { "Я" } else { q.sender.as_str() };
+                    let who = if q.outgoing { tr!("Я", "Me") } else { q.sender.as_str() };
                     format!("┌ {who}: {}", truncate(&q.text.replace('\n', " "), inner.saturating_sub(display_width(who) + 4)))
                 }
-                None => "┌ ответ на сообщение".to_string(),
+                None => tr!("┌ ответ на сообщение", "┌ reply to a message").to_string(),
             });
         }
 
@@ -448,7 +517,7 @@ fn build_message_lines(
             lines.push(
                 Line::from(vec![
                     Span::styled(format!("{time} "), Style::new().fg(MUTED)),
-                    Span::styled("Я", Style::new().fg(OWN).add_modifier(Modifier::BOLD)),
+                    Span::styled(tr!("Я", "Me"), Style::new().fg(OWN).add_modifier(Modifier::BOLD)),
                 ])
                 .right_aligned(),
             );
@@ -488,11 +557,10 @@ fn build_message_lines(
 /// Текст переписки для сохранения в файл: «дата время имя: текст».
 fn export_text(chat_name: &str, msgs: &[ChatMsg]) -> String {
     let tz = jiff::tz::TimeZone::system();
-    let mut out = format!("Переписка: {chat_name}\nСохранено Tg-Lite {VERSION}\n\n");
+    let mut out = trf!("Переписка: {chat_name}\nСохранено Tg-Lite {VERSION}\n\n", "Chat: {chat_name}\nSaved by Tg-Lite {VERSION}\n\n");
     for m in msgs {
-        let when = jiff::Timestamp::from_second(m.ts)
-            .map(|t| t.to_zoned(tz.clone()).strftime("%d.%m.%Y %H:%M").to_string())
-            .unwrap_or_default();
+        let when =
+            jiff::Timestamp::from_second(m.ts).map(|t| t.to_zoned(tz.clone()).strftime("%d.%m.%Y %H:%M").to_string()).unwrap_or_default();
         out.push_str(&format!("[{when}] {}: {}\n", m.sender, m.text.replace('\n', "\n    ")));
     }
     out
@@ -506,8 +574,8 @@ fn when_label(minutes: u32) -> String {
     let tz = jiff::tz::TimeZone::system();
     let ts = jiff::Timestamp::now().as_second() + i64::from(minutes) * 60;
     match jiff::Timestamp::from_second(ts) {
-        Ok(t) => t.to_zoned(tz).strftime("%d.%m в %H:%M").to_string(),
-        Err(_) => format!("через {minutes} мин."),
+        Ok(t) => t.to_zoned(tz).strftime(tr!("%d.%m в %H:%M", "%d.%m at %H:%M")).to_string(),
+        Err(_) => trf!("через {minutes} мин.", "in {minutes} min"),
     }
 }
 
@@ -524,7 +592,7 @@ impl App {
             histories: HashMap::new(),
             input: String::new(),
             cursor: 0,
-            status: "Загружаю чаты…".into(),
+            status: tr!("Загружаю чаты…", "Loading chats…").into(),
             markdown: false,
             scroll: 0,
             mode: Mode::Chat,
@@ -576,11 +644,11 @@ impl App {
 
     fn tabs(&self) -> Vec<(Tab, String)> {
         let mut v = vec![
-            (Tab::All, "Все".to_string()),
-            (Tab::Unread, "Новые".to_string()),
-            (Tab::Users, "Личные".to_string()),
-            (Tab::Groups, "Группы".to_string()),
-            (Tab::Channels, "Каналы".to_string()),
+            (Tab::All, tr!("Все", "All").to_string()),
+            (Tab::Unread, tr!("Новые", "New").to_string()),
+            (Tab::Users, tr!("Личные", "Users").to_string()),
+            (Tab::Groups, tr!("Группы", "Groups").to_string()),
+            (Tab::Channels, tr!("Каналы", "Channels").to_string()),
         ];
         for f in &self.folders {
             v.push((Tab::Folder(f.id), f.title.clone()));
@@ -617,12 +685,11 @@ impl App {
     fn resolve_fwd(&mut self, chat: PeerId) {
         let Some(h) = self.histories.get_mut(&chat) else { return };
         for m in h.iter_mut() {
-            if let Some(f) = m.fwd.as_mut() {
-                if f.name.is_none() {
-                    if let Some(c) = f.from.and_then(|from| self.chats.iter().find(|c| c.id == from)) {
-                        f.name = Some(c.name.clone());
-                    }
-                }
+            if let Some(f) = m.fwd.as_mut()
+                && f.name.is_none()
+                && let Some(c) = f.from.and_then(|from| self.chats.iter().find(|c| c.id == from))
+            {
+                f.name = Some(c.name.clone());
             }
         }
     }
@@ -660,10 +727,10 @@ impl App {
     /// Следит, чтобы выбранный чат был виден в текущей вкладке. Возвращает true, если выбор сменился.
     fn ensure_selection(&mut self) -> bool {
         let vis = self.visible_ids();
-        if let Some(s) = self.sel {
-            if vis.contains(&s) {
-                return false;
-            }
+        if let Some(s) = self.sel
+            && vis.contains(&s)
+        {
+            return false;
         }
         self.set_sel(vis.first().copied());
         self.scroll = 0;
@@ -699,11 +766,7 @@ impl App {
 
     fn title(&self) -> String {
         let n = self.total_unread();
-        if self.mode == Mode::Locked || n == 0 {
-            "Tg-Lite".to_string()
-        } else {
-            format!("Tg-Lite ({n})")
-        }
+        if self.mode == Mode::Locked || n == 0 { "Tg-Lite".to_string() } else { format!("Tg-Lite ({n})") }
     }
 
     fn lock(&mut self) {
@@ -731,7 +794,7 @@ impl App {
     /// Вставка текста (из буфера обмена или из события терминала) в зависимости от экрана.
     fn paste(&mut self, text: Option<String>) {
         let Some(text) = text.or_else(crate::util::clipboard_text) else {
-            self.status = "Буфер обмена пуст или недоступен".into();
+            self.status = tr!("Буфер обмена пуст или недоступен", "Clipboard is empty or unavailable").into();
             return;
         };
         match self.mode {
@@ -739,7 +802,7 @@ impl App {
                 let room = MAX_MESSAGE_CHARS.saturating_sub(self.input_len());
                 let clean = crate::util::paste_clean(&text, room);
                 if clean.is_empty() {
-                    self.status = "Нечего вставлять".into();
+                    self.status = tr!("Нечего вставлять", "Nothing to paste").into();
                     return;
                 }
                 for c in clean.chars() {
@@ -787,7 +850,7 @@ impl App {
 
     fn toggle_markdown(&mut self) {
         self.markdown = !self.markdown;
-        self.status = format!("Markdown: {}", if self.markdown { "включён" } else { "выключен" });
+        self.status = format!("Markdown: {}", if self.markdown { tr!("включён", "on") } else { tr!("выключен", "off") });
     }
 
     // --- сообщения
@@ -822,20 +885,21 @@ impl App {
                 }
                 self.reload_pending = false;
                 self.ensure_selection();
-                self.status = format!("Чатов: {}", self.chats.len());
+                self.status = trf!("Чатов: {}", "Chats: {}", self.chats.len());
                 // Историю подгружаем, только если её ещё нет: иначе каждое обновление списка было бы запросом.
-                if let Some(id) = self.sel {
-                    if !self.histories.contains_key(&id) && self.pending_load.is_none() {
-                        self.pending_load = Some(Instant::now());
-                    }
+                if let Some(id) = self.sel
+                    && !self.histories.contains_key(&id)
+                    && self.pending_load.is_none()
+                {
+                    self.pending_load = Some(Instant::now());
                 }
             }
             Event::Folders(list) => {
                 self.folders = list;
-                if let Tab::Folder(id) = self.tab {
-                    if !self.folders.iter().any(|f| f.id == id) {
-                        self.tab = Tab::All;
-                    }
+                if let Tab::Folder(id) = self.tab
+                    && !self.folders.iter().any(|f| f.id == id)
+                {
+                    self.tab = Tab::All;
                 }
                 self.ensure_selection();
             }
@@ -844,11 +908,12 @@ impl App {
                 self.resolve_fwd(chat);
                 if self.sel == Some(chat) {
                     self.scroll = 0;
-                    if let Some(pos) = self.chats.iter().position(|c| c.id == chat) {
-                        if self.chats[pos].unread > 0 && self.mode != Mode::Locked {
-                            let _ = cmd.send(Cmd::MarkRead(self.chats[pos].clone()));
-                            self.chats[pos].unread = 0;
-                        }
+                    if let Some(pos) = self.chats.iter().position(|c| c.id == chat)
+                        && self.chats[pos].unread > 0
+                        && self.mode != Mode::Locked
+                    {
+                        let _ = cmd.send(Cmd::MarkRead(self.chats[pos].clone()));
+                        self.chats[pos].unread = 0;
                     }
                 }
             }
@@ -875,9 +940,9 @@ impl App {
                             beep();
                         }
                         self.status = if self.mode == Mode::Locked {
-                            "Новое сообщение".into()
+                            tr!("Новое сообщение", "New message").into()
                         } else {
-                            format!("Новое сообщение: {chat_name}")
+                            trf!("Новое сообщение: {chat_name}", "New message: {chat_name}")
                         };
                     }
                     if added {
@@ -896,9 +961,9 @@ impl App {
             }
             Event::Sent { chat, msg, scheduled } => {
                 if scheduled {
-                    self.status = "Отложенное сообщение запланировано".into();
+                    self.status = tr!("Отложенное сообщение запланировано", "Scheduled message set").into();
                 } else {
-                    self.status = "Отправлено".into();
+                    self.status = tr!("Отправлено", "Sent").into();
                     // Если история чата ещё не загружена, сообщение подтянется вместе с ней.
                     self.push_unique(chat, msg, false);
                     if self.sel == Some(chat) {
@@ -914,22 +979,22 @@ impl App {
                 }
             }
             Event::Edited { chat, msg } => {
-                if let Some(h) = self.histories.get_mut(&chat) {
-                    if let Some(m) = h.iter_mut().find(|m| m.id == msg.id) {
-                        match (&m.caption, &msg.caption) {
-                            // Правка нашего текста у сообщения с вложением: подпись вложения остаётся.
-                            (Some(old), None) => {
-                                let label = m.text.strip_suffix(old.as_str()).unwrap_or("").trim_end().to_string();
-                                m.text = tg::compose_text(&label, &msg.text);
-                                m.caption = Some(msg.text.clone());
-                            }
-                            _ => {
-                                m.text = msg.text;
-                                m.caption = msg.caption;
-                            }
+                if let Some(h) = self.histories.get_mut(&chat)
+                    && let Some(m) = h.iter_mut().find(|m| m.id == msg.id)
+                {
+                    match (&m.caption, &msg.caption) {
+                        // Правка нашего текста у сообщения с вложением: подпись вложения остаётся.
+                        (Some(old), None) => {
+                            let label = m.text.strip_suffix(old.as_str()).unwrap_or("").trim_end().to_string();
+                            m.text = tg::compose_text(&label, &msg.text);
+                            m.caption = Some(msg.text.clone());
                         }
-                        m.edited = true;
+                        _ => {
+                            m.text = msg.text;
+                            m.caption = msg.caption;
+                        }
                     }
+                    m.edited = true;
                 }
             }
             Event::Deleted { chat, ids } => {
@@ -952,7 +1017,7 @@ impl App {
                     let label = match (chat.kind(), who) {
                         (grammers_client::session::types::PeerKind::User, _) => kind.label().to_string(),
                         (_, Some(n)) => format!("{n} {}", kind.label()),
-                        (_, None) => format!("кто-то {}", kind.label()),
+                        (_, None) => trf!("кто-то {}", "someone {}", kind.label()),
                     };
                     self.typing.insert(chat, (Instant::now(), label));
                 }
@@ -970,7 +1035,7 @@ impl App {
                     return;
                 }
                 if items.is_empty() {
-                    self.status = "Отложенных сообщений в этом чате нет".into();
+                    self.status = tr!("Отложенных сообщений в этом чате нет", "No scheduled messages in this chat").into();
                     return;
                 }
                 let tz = jiff::tz::TimeZone::system();
@@ -986,7 +1051,7 @@ impl App {
                 self.overlay = Some(Overlay {
                     kind: OverlayKind::Scheduled,
                     chat: self.selected().cloned(),
-                    title: " Отложенные сообщения ".into(),
+                    title: tr!(" Отложенные сообщения ", " Scheduled messages ").into(),
                     items: list,
                     sel: 0,
                     confirm: None,
@@ -994,7 +1059,7 @@ impl App {
                 self.mode = Mode::Overlay;
             }
             Event::Status(s) => self.status = s,
-            Event::Error(e) => self.status = format!("Ошибка: {e}"),
+            Event::Error(e) => self.status = trf!("Ошибка: {e}", "Error: {e}"),
         }
     }
 
@@ -1024,6 +1089,12 @@ impl App {
             7 => s.lock_bg = cycle(&[0u8, 1, 2, 3], s.lock_bg, dir),
             8 => s.list_width = cycle(&[0u8, 1, 2], s.list_width, dir),
             9 => s.bubble_width = cycle(&[0u8, 1, 2], s.bubble_width, dir),
+            10 => {
+                s.lang = cycle(&[0u8, 1], s.lang, dir);
+                crate::i18n::set(s.lang);
+                crate::i18n::save();
+                self.status = tr!("Язык: русский", "Language: English").into();
+            }
             _ => {
                 if activate {
                     self.mode = Mode::NewPassword;
@@ -1062,7 +1133,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.lock_input.is_empty() {
-                    self.lock_error = "Пароль не может быть пустым".into();
+                    self.lock_error = tr!("Пароль не может быть пустым", "Password cannot be empty").into();
                 } else if self.pw_stage == 0 {
                     self.pw_first = std::mem::take(&mut self.lock_input);
                     self.pw_stage = 1;
@@ -1072,9 +1143,9 @@ impl App {
                     saver.save_in_background();
                     self.lock_input.clear();
                     self.mode = Mode::Settings;
-                    self.status = "Пароль изменён".into();
+                    self.status = tr!("Пароль изменён", "Password changed").into();
                 } else {
-                    self.lock_error = "Пароли не совпали, введите заново".into();
+                    self.lock_error = tr!("Пароли не совпали, введите заново", "Passwords do not match, try again").into();
                     self.lock_input.clear();
                     self.pw_first.clear();
                     self.pw_stage = 0;
@@ -1110,12 +1181,12 @@ impl App {
                             self.wrong_attempts = 0;
                             self.lock_input.clear();
                             // Всё, что пришло за время блокировки в открытый чат, теперь прочитано.
-                            if let Some(c) = self.selected().cloned() {
-                                if c.unread > 0 {
-                                    let _ = cmd.send(Cmd::MarkRead(c));
-                                    if let Some(c) = self.chats.iter_mut().find(|c| Some(c.id) == self.sel) {
-                                        c.unread = 0;
-                                    }
+                            if let Some(c) = self.selected().cloned()
+                                && c.unread > 0
+                            {
+                                let _ = cmd.send(Cmd::MarkRead(c));
+                                if let Some(c) = self.chats.iter_mut().find(|c| Some(c.id) == self.sel) {
+                                    c.unread = 0;
                                 }
                             }
                         } else {
@@ -1126,12 +1197,13 @@ impl App {
                                 saver.wipe();
                                 self.should_quit = true;
                             } else if limit > 0 {
-                                self.lock_error = format!(
+                                self.lock_error = trf!(
                                     "Неверный пароль. Осталось попыток до удаления данных: {}",
+                                    "Wrong password. Attempts left before data is wiped: {}",
                                     limit - self.wrong_attempts
                                 );
                             } else {
-                                self.lock_error = "Неверный пароль".into();
+                                self.lock_error = tr!("Неверный пароль", "Wrong password").into();
                             }
                         }
                     }
@@ -1221,9 +1293,9 @@ impl App {
                 if !self.input.is_empty() {
                     self.clear_input();
                 } else if self.edit_target.take().is_some() {
-                    self.status = "Правка отменена".into();
+                    self.status = tr!("Правка отменена", "Edit cancelled").into();
                 } else if self.reply.take().is_some() {
-                    self.status = "Ответ отменён".into();
+                    self.status = tr!("Ответ отменён", "Reply cancelled").into();
                 } else if !self.filter.is_empty() {
                     self.set_filter("");
                 }
@@ -1234,7 +1306,7 @@ impl App {
     }
 
     fn refresh(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) {
-        self.status = "Обновляю список чатов…".into();
+        self.status = tr!("Обновляю список чатов…", "Refreshing chat list…").into();
         let _ = cmd.send(Cmd::LoadDialogs);
     }
 
@@ -1245,12 +1317,12 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if let Some(rest) = text.strip_prefix("/proxy") {
-            if rest.is_empty() || rest.starts_with(' ') {
-                self.clear_input();
-                self.proxy_command(rest.trim(), saver);
-                return;
-            }
+        if let Some(rest) = text.strip_prefix("/proxy")
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            self.clear_input();
+            self.proxy_command(rest.trim(), saver);
+            return;
         }
         if self.try_command(&text, cmd, saver) {
             return;
@@ -1284,12 +1356,12 @@ impl App {
             return;
         }
         let Some(chat) = self.selected().cloned() else {
-            self.status = "Сначала выберите чат".into();
+            self.status = tr!("Сначала выберите чат", "Select a chat first").into();
             return;
         };
         if let Some(id) = self.edit_target {
             let _ = cmd.send(Cmd::Edit { chat, id, text, markdown: self.markdown });
-            self.status = "Исправляю сообщение…".into();
+            self.status = tr!("Исправляю сообщение…", "Editing message…").into();
             self.clear_input();
             return;
         }
@@ -1298,19 +1370,20 @@ impl App {
             None => (text, None),
         };
         if body.is_empty() {
-            self.status = "Пустое сообщение".into();
+            self.status = tr!("Пустое сообщение", "Empty message").into();
             return;
         }
         if !self.markdown && body.chars().count() > MAX_MESSAGE_CHARS {
-            self.status = format!(
+            self.status = trf!(
                 "Ошибка: сообщение длиннее {MAX_MESSAGE_CHARS} символов ({}), Telegram его не примет. Сократите текст",
+                "Error: message is longer than {MAX_MESSAGE_CHARS} characters ({}), Telegram will not accept it. Shorten the text",
                 body.chars().count()
             );
             return;
         }
         self.status = match delay {
-            Some(min) => format!("Планирую на {}…", when_label(min)),
-            None => "Отправляю…".into(),
+            Some(min) => trf!("Планирую на {}…", "Scheduling for {}…", when_label(min)),
+            None => tr!("Отправляю…", "Sending…").into(),
         };
         let reply_to = self.reply.take().map(|(id, _)| id);
         let _ = cmd.send(Cmd::Send { chat, text: body, markdown: self.markdown, delay_minutes: delay, reply_to });
@@ -1322,7 +1395,7 @@ impl App {
         let part = self.input.clone();
         let matches: Vec<&str> = COMMANDS.iter().copied().filter(|c| c.starts_with(part.as_str())).collect();
         match matches.as_slice() {
-            [] => self.status = "Такой команды нет. F1 — справка".into(),
+            [] => self.status = tr!("Такой команды нет. F1 — справка", "No such command. F1 for help").into(),
             [one] => {
                 self.input = format!("{one} ");
                 self.cursor = self.input_len();
@@ -1335,7 +1408,7 @@ impl App {
                 }
                 self.input = first[..common].to_string();
                 self.cursor = self.input_len();
-                self.status = format!("Варианты: {}", many.join(" "));
+                self.status = trf!("Варианты: {}", "Options: {}", many.join(" "));
             }
         }
     }
@@ -1376,7 +1449,11 @@ impl App {
             KeyCode::Enter => match ov.kind {
                 OverlayKind::Links => {
                     let url = ov.items[ov.sel].data.clone();
-                    self.status = if util::open_url(&url) { format!("Открываю в браузере: {url}") } else { "Не удалось открыть ссылку".into() };
+                    self.status = if util::open_url(&url) {
+                        trf!("Открываю в браузере: {url}", "Opening in browser: {url}")
+                    } else {
+                        tr!("Не удалось открыть ссылку", "Could not open the link").into()
+                    };
                 }
                 OverlayKind::Faq => {}
                 OverlayKind::Scheduled => {
@@ -1386,7 +1463,7 @@ impl App {
                         if let Some(chat) = ov.chat.clone() {
                             let _ = cmd.send(Cmd::DeleteScheduled { chat, id: item.id });
                         }
-                        self.status = "Отменяю отложенное сообщение…".into();
+                        self.status = tr!("Отменяю отложенное сообщение…", "Cancelling scheduled message…").into();
                         if ov.items.is_empty() {
                             self.overlay = None;
                             self.mode = Mode::Chat;
@@ -1419,7 +1496,7 @@ impl App {
                 self.mode = Mode::Pick;
                 self.pending_delete = None;
             }
-            _ => self.status = "В этом чате пока нет сообщений".into(),
+            _ => self.status = tr!("В этом чате пока нет сообщений", "No messages in this chat yet").into(),
         }
     }
 
@@ -1462,50 +1539,58 @@ impl App {
             (KeyCode::End, _) => self.pick = len - 1,
             (_, Some('r')) => {
                 if let Some(m) = self.picked().cloned() {
-                    let who = if m.outgoing { "Я".to_string() } else { m.sender.clone() };
+                    let who = if m.outgoing { tr!("Я", "Me").to_string() } else { m.sender.clone() };
                     self.reply = Some((m.id, format!("{who}: {}", truncate(&m.text.replace('\n', " "), 40))));
                     self.mode = Mode::Chat;
                     self.scroll = 0;
-                    self.status = "Пишите ответ и нажмите Enter (Esc — отмена)".into();
+                    self.status =
+                        tr!("Пишите ответ и нажмите Enter (Esc — отмена)", "Type your reply and press Enter (Esc to cancel)").into();
                 }
             }
             (_, Some('e')) => {
                 if let Some(m) = self.picked().cloned() {
                     if !m.outgoing {
-                        self.status = "Можно править только свои сообщения".into();
-                        self.pick_note = "Это чужое сообщение: править можно только свои".into();
+                        self.status = tr!("Можно править только свои сообщения", "You can only edit your own messages").into();
+                        self.pick_note =
+                            tr!("Это чужое сообщение: править можно только свои", "Not your message: you can only edit your own").into();
                     } else {
                         self.input = m.caption.clone().unwrap_or_else(|| m.text.clone());
                         self.cursor = self.input_len();
                         self.edit_target = Some(m.id);
                         self.mode = Mode::Chat;
-                        self.status = "Правка: измените текст и нажмите Enter (Esc — отмена)".into();
+                        self.status = tr!(
+                            "Правка: измените текст и нажмите Enter (Esc — отмена)",
+                            "Edit: change the text and press Enter (Esc to cancel)"
+                        )
+                        .into();
                     }
                 }
             }
             (_, Some('d')) => {
                 let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) else { return };
                 if !m.outgoing {
-                    self.status = "Можно удалять только свои сообщения".into();
-                    self.pick_note = "Это чужое сообщение: удалять можно только свои".into();
+                    self.status = tr!("Можно удалять только свои сообщения", "You can only delete your own messages").into();
+                    self.pick_note =
+                        tr!("Это чужое сообщение: удалять можно только свои", "Not your message: you can only delete your own").into();
                 } else if self.pending_delete == Some((chat.id, m.id)) {
                     self.pending_delete = None;
                     let _ = cmd.send(Cmd::Delete { chat, id: m.id });
-                    self.status = "Удаляю…".into();
+                    self.status = tr!("Удаляю…", "Deleting…").into();
                     self.mode = Mode::Chat;
                 } else {
                     self.pending_delete = Some((chat.id, m.id));
-                    self.status = format!("Удалить «{}»? Нажмите D ещё раз", truncate(&m.text.replace('\n', " "), 30));
+                    self.status =
+                        trf!("Удалить «{}»? Нажмите D ещё раз", "Delete \"{}\"? Press D again", truncate(&m.text.replace('\n', " "), 30));
                     self.pick_note = self.status.clone();
                 }
             }
             (_, Some('s')) => {
                 if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
                     if m.caption.is_none() {
-                        self.pick_note = "В этом сообщении нет вложения".into();
+                        self.pick_note = tr!("В этом сообщении нет вложения", "This message has no attachment").into();
                     } else {
                         let _ = cmd.send(Cmd::Save { chat, id: m.id });
-                        self.status = "Скачиваю…".into();
+                        self.status = tr!("Скачиваю…", "Downloading…").into();
                         self.mode = Mode::Chat;
                     }
                 }
@@ -1514,10 +1599,10 @@ impl App {
                 if let Some(m) = self.picked().cloned() {
                     let links = util::extract_links(&m.text);
                     if links.is_empty() {
-                        self.pick_note = "В этом сообщении нет ссылок".into();
+                        self.pick_note = tr!("В этом сообщении нет ссылок", "This message has no links").into();
                     } else {
                         let items = links.into_iter().map(|u| OverlayItem { label: u.clone(), data: u, id: 0 }).collect();
-                        self.open_overlay(OverlayKind::Links, " Ссылки сообщения ", items);
+                        self.open_overlay(OverlayKind::Links, tr!(" Ссылки сообщения ", " Message links "), items);
                     }
                 }
             }
@@ -1525,7 +1610,11 @@ impl App {
                 if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
                     self.fwd_src = Some((chat, m.id));
                     self.mode = Mode::Forward;
-                    self.status = "Выберите чат (↑ ↓, Tab) и нажмите Enter, Esc — отмена".into();
+                    self.status = tr!(
+                        "Выберите чат (↑ ↓, Tab) и нажмите Enter, Esc — отмена",
+                        "Select a chat (↑ ↓, Tab) and press Enter, Esc to cancel"
+                    )
+                    .into();
                 }
             }
             _ => {}
@@ -1546,12 +1635,12 @@ impl App {
             KeyCode::Enter => {
                 if let Some(dst) = self.selected().cloned() {
                     let _ = cmd.send(Cmd::Forward { src: src.clone(), dst, id });
-                    self.status = "Пересылаю…".into();
+                    self.status = tr!("Пересылаю…", "Forwarding…").into();
                     self.finish_forward(&src);
                 }
             }
             KeyCode::Esc => {
-                self.status = "Пересылка отменена".into();
+                self.status = tr!("Пересылка отменена", "Forwarding cancelled").into();
                 self.finish_forward(&src);
             }
             _ => {}
@@ -1579,9 +1668,9 @@ impl App {
         self.filter = q.trim().to_string();
         self.ensure_selection();
         self.status = if self.filter.is_empty() {
-            "Поиск сброшен".to_string()
+            tr!("Поиск сброшен", "Search cleared").to_string()
         } else {
-            format!("Найдено чатов: {}", self.visible_idx().len())
+            trf!("Найдено чатов: {}", "Chats found: {}", self.visible_idx().len())
         };
     }
 
@@ -1604,16 +1693,16 @@ impl App {
             "/pin" => {
                 self.clear_input();
                 let Some(id) = self.selected().and_then(|c| c.id.bot_api_dialog_id()) else {
-                    self.status = "Сначала выберите чат".into();
+                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
                     return true;
                 };
                 let pinned = &mut self.settings.pinned;
                 if let Some(pos) = pinned.iter().position(|x| *x == id) {
                     pinned.remove(pos);
-                    self.status = "Чат откреплён".into();
+                    self.status = tr!("Чат откреплён", "Chat unpinned").into();
                 } else {
                     pinned.push(id);
-                    self.status = "Чат закреплён наверху списка".into();
+                    self.status = tr!("Чат закреплён наверху списка", "Chat pinned to the top of the list").into();
                 }
                 self.apply_settings(saver);
             }
@@ -1625,48 +1714,53 @@ impl App {
                     n += 1;
                     let _ = cmd.send(Cmd::MarkRead(c.clone()));
                 }
-                self.status = format!("Прочитано чатов: {n}");
+                self.status = trf!("Прочитано чатов: {n}", "Chats marked read: {n}");
             }
             "/export" => {
                 self.clear_input();
                 let Some(c) = self.selected().cloned() else {
-                    self.status = "Сначала выберите чат".into();
+                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
                     return true;
                 };
                 match self.histories.get(&c.id) {
                     Some(h) if !h.is_empty() => {
                         self.status = match crate::util::write_export(&c.name, &export_text(&c.name, h)) {
-                            Ok(p) => format!("Сохранено: {}", p.display()),
-                            Err(e) => format!("Ошибка: не удалось сохранить файл: {e}"),
+                            Ok(p) => trf!("Сохранено: {}", "Saved: {}", p.display()),
+                            Err(e) => trf!("Ошибка: не удалось сохранить файл: {e}", "Error: could not save the file: {e}"),
                         };
                     }
-                    _ => self.status = "В этом чате пока нечего сохранять".into(),
+                    _ => self.status = tr!("В этом чате пока нечего сохранять", "Nothing to save in this chat yet").into(),
                 }
             }
             "/note" => {
                 if arg.is_empty() {
                     self.clear_input();
-                    self.status = "Использование: /note текст — быстрая заметка в «Избранное»".into();
+                    self.status = tr!(
+                        "Использование: /note текст — быстрая заметка в «Избранное»",
+                        "Usage: /note text — quick note to Saved Messages"
+                    )
+                    .into();
                     return true;
                 }
                 let Some(me) = self.chats.iter().find(|c| c.is_self).cloned() else {
                     self.clear_input();
-                    self.status = "Чат «Избранное» ещё не загружен".into();
+                    self.status = tr!("Чат «Избранное» ещё не загружен", "Saved Messages chat is not loaded yet").into();
                     return true;
                 };
-                let _ = cmd.send(Cmd::Send { chat: me, text: arg.to_string(), markdown: self.markdown, delay_minutes: None, reply_to: None });
-                self.status = "Сохраняю в «Избранное»…".into();
+                let _ =
+                    cmd.send(Cmd::Send { chat: me, text: arg.to_string(), markdown: self.markdown, delay_minutes: None, reply_to: None });
+                self.status = tr!("Сохраняю в «Избранное»…", "Saving to Saved Messages…").into();
                 self.clear_input();
             }
             "/edit" => {
                 let Some(chat) = self.selected().cloned() else {
                     self.clear_input();
-                    self.status = "Сначала выберите чат".into();
+                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
                     return true;
                 };
                 let Some(last) = self.last_own().cloned() else {
                     self.clear_input();
-                    self.status = "Нет вашего сообщения, которое можно исправить".into();
+                    self.status = tr!("Нет вашего сообщения, которое можно исправить", "You have no message that can be edited").into();
                     return true;
                 };
                 if arg.is_empty() {
@@ -1675,23 +1769,27 @@ impl App {
                     self.cursor = self.input_len();
                 } else {
                     let _ = cmd.send(Cmd::Edit { chat, id: last.id, text: arg.to_string(), markdown: self.markdown });
-                    self.status = "Исправляю сообщение…".into();
+                    self.status = tr!("Исправляю сообщение…", "Editing message…").into();
                     self.clear_input();
                 }
             }
             "/del" | "/delete" => {
                 self.clear_input();
                 let (Some(chat), Some(last)) = (self.selected().cloned(), self.last_own().cloned()) else {
-                    self.status = "Нет вашего сообщения, которое можно удалить".into();
+                    self.status = tr!("Нет вашего сообщения, которое можно удалить", "You have no message that can be deleted").into();
                     return true;
                 };
                 if self.pending_delete == Some((chat.id, last.id)) {
                     self.pending_delete = None;
                     let _ = cmd.send(Cmd::Delete { chat, id: last.id });
-                    self.status = "Удаляю…".into();
+                    self.status = tr!("Удаляю…", "Deleting…").into();
                 } else {
                     self.pending_delete = Some((chat.id, last.id));
-                    self.status = format!("Удалить «{}»? Повторите /del для подтверждения", truncate(&last.text.replace('\n', " "), 30));
+                    self.status = trf!(
+                        "Удалить «{}»? Повторите /del для подтверждения",
+                        "Delete \"{}\"? Repeat /del to confirm",
+                        truncate(&last.text.replace('\n', " "), 30)
+                    );
                 }
                 return true; // pending_delete сохраняется до следующей другой команды
             }
@@ -1701,29 +1799,33 @@ impl App {
                     self.selected().cloned(),
                     self.sel.and_then(|id| self.histories.get(&id)).and_then(|h| h.iter().rev().find(|m| m.caption.is_some())).cloned(),
                 ) else {
-                    self.status = "В загруженных сообщениях нет вложений".into();
+                    self.status = tr!("В загруженных сообщениях нет вложений", "No attachments in the loaded messages").into();
                     return true;
                 };
                 let _ = cmd.send(Cmd::Save { chat, id: m.id });
-                self.status = "Скачиваю последнее вложение…".into();
+                self.status = tr!("Скачиваю последнее вложение…", "Downloading the latest attachment…").into();
             }
             "/send" => {
                 let Some(chat) = self.selected().cloned() else {
                     self.clear_input();
-                    self.status = "Сначала выберите чат".into();
+                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
                     return true;
                 };
                 match parse_send(arg) {
                     Some((path, caption)) if std::path::Path::new(&path).is_file() => {
                         let _ = cmd.send(Cmd::SendFile { chat, path: path.into(), caption });
-                        self.status = "Отправляю файл…".into();
+                        self.status = tr!("Отправляю файл…", "Sending file…").into();
                         self.clear_input();
                     }
                     Some((path, _)) => {
-                        self.status = format!("Ошибка: файл не найден: {path}");
+                        self.status = trf!("Ошибка: файл не найден: {path}", "Error: file not found: {path}");
                     }
                     None => {
-                        self.status = "Использование: /send путь [подпись]. Можно перетащить файл в окно".into();
+                        self.status = tr!(
+                            "Использование: /send путь [подпись]. Можно перетащить файл в окно",
+                            "Usage: /send path [caption]. You can also drag a file into the window"
+                        )
+                        .into();
                     }
                 }
                 return true; // при ошибке текст остаётся в поле ввода
@@ -1731,7 +1833,7 @@ impl App {
             "/links" => {
                 self.clear_input();
                 let Some(h) = self.sel.and_then(|id| self.histories.get(&id)) else {
-                    self.status = "Сначала откройте чат".into();
+                    self.status = tr!("Сначала откройте чат", "Open a chat first").into();
                     return true;
                 };
                 let mut items: Vec<OverlayItem> = Vec::new();
@@ -1743,9 +1845,9 @@ impl App {
                     }
                 }
                 if items.is_empty() {
-                    self.status = "В загруженных сообщениях нет ссылок".into();
+                    self.status = tr!("В загруженных сообщениях нет ссылок", "No links in the loaded messages").into();
                 } else {
-                    self.open_overlay(OverlayKind::Links, " Ссылки чата ", items);
+                    self.open_overlay(OverlayKind::Links, tr!(" Ссылки чата ", " Chat links "), items);
                 }
             }
             "/paste" => {
@@ -1754,20 +1856,17 @@ impl App {
             }
             "/faq" => {
                 self.clear_input();
-                let items = FAQ
-                    .iter()
-                    .map(|(q, a)| OverlayItem { label: format!("{q} — {a}"), data: String::new(), id: 0 })
-                    .collect();
-                self.open_overlay(OverlayKind::Faq, " Если не работает ", items);
+                let items = faq().iter().map(|(q, a)| OverlayItem { label: format!("{q} — {a}"), data: String::new(), id: 0 }).collect();
+                self.open_overlay(OverlayKind::Faq, tr!(" Если не работает ", " If something doesn't work "), items);
             }
             "/scheduled" => {
                 self.clear_input();
                 match self.selected().cloned() {
                     Some(chat) => {
                         let _ = cmd.send(Cmd::ListScheduled(chat));
-                        self.status = "Загружаю отложенные…".into();
+                        self.status = tr!("Загружаю отложенные…", "Loading scheduled messages…").into();
                     }
-                    None => self.status = "Сначала выберите чат".into(),
+                    None => self.status = tr!("Сначала выберите чат", "Select a chat first").into(),
                 }
             }
             _ => return false,
@@ -1779,7 +1878,11 @@ impl App {
     fn proxy_command(&mut self, arg: &str, saver: &Arc<Saver>) {
         match arg {
             "" => {
-                self.status = format!("Прокси: {}. Задать: /proxy 127.0.0.1:10808, /proxy auto, /proxy off", self.settings.proxy_label());
+                self.status = trf!(
+                    "Прокси: {}. Задать: /proxy 127.0.0.1:10808, /proxy auto, /proxy off",
+                    "Proxy: {}. Set with: /proxy 127.0.0.1:10808, /proxy auto, /proxy off",
+                    self.settings.proxy_label()
+                );
                 return;
             }
             "auto" => self.settings.proxy_mode = ProxyMode::Auto,
@@ -1790,7 +1893,8 @@ impl App {
             }
         }
         self.apply_settings(saver);
-        self.status = format!("Прокси: {} (применится при следующем запуске)", self.settings.proxy_label());
+        self.status =
+            trf!("Прокси: {} (применится при следующем запуске)", "Proxy: {} (applies on next start)", self.settings.proxy_label());
     }
 }
 
@@ -1798,10 +1902,20 @@ impl App {
 
 fn draw(f: &mut Frame, app: &mut App) {
     match app.mode {
-        Mode::Locked => draw_lock(f, app, "Заблокировано", "Введите пароль и нажмите Enter", "F10 — выйти"),
+        Mode::Locked => draw_lock(
+            f,
+            app,
+            tr!("Заблокировано", "Locked"),
+            tr!("Введите пароль и нажмите Enter", "Enter the password and press Enter"),
+            tr!("F10 — выйти", "F10 — quit"),
+        ),
         Mode::NewPassword => {
-            let prompt = if app.pw_stage == 0 { "Введите новый пароль (любой длины)" } else { "Повторите новый пароль" };
-            draw_lock(f, app, "Смена пароля", prompt, "Esc — отмена");
+            let prompt = if app.pw_stage == 0 {
+                tr!("Введите новый пароль (любой длины)", "Enter a new password (any length)")
+            } else {
+                tr!("Повторите новый пароль", "Repeat the new password")
+            };
+            draw_lock(f, app, tr!("Смена пароля", "Change password"), prompt, tr!("Esc — отмена", "Esc — cancel"));
         }
         Mode::Help => {
             draw_main(f, app);
@@ -1821,19 +1935,14 @@ fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_main(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
-        .split(area);
+    let outer = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(3)]).split(area);
     draw_tabs(f, app, outer[0]);
 
     let area = outer[1];
     let (pct, max_w) = app.settings.list_dims();
     let left_w = (area.width * pct / 100).clamp(16, max_w);
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(left_w), Constraint::Min(10)])
-        .split(area);
+    let cols =
+        Layout::default().direction(Direction::Horizontal).constraints([Constraint::Length(left_w), Constraint::Min(10)]).split(area);
 
     draw_chat_list(f, app, cols[0]);
 
@@ -1918,8 +2027,8 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
             let (tag, tag_color) = match c.kind {
                 Kind::User if online => ("●", ONLINE),
                 Kind::User => (" ", MUTED),
-                Kind::Group => ("Г", Color::Rgb(255, 196, 90)),
-                Kind::Channel => ("К", app.theme.accent),
+                Kind::Group => (tr!("Г", "G"), Color::Rgb(255, 196, 90)),
+                Kind::Channel => (tr!("К", "C"), app.theme.accent),
             };
             let badge = if c.unread > 0 {
                 format!(" {}{} ", if c.mentions > 0 { "@" } else { "" }, c.unread.min(999))
@@ -1947,7 +2056,8 @@ fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let sel_pos = app.sel.and_then(|s| visible.iter().position(|c| c.id == s));
     let count = visible.len();
-    let list_title = if app.filter.is_empty() { " Tg-Lite ".to_string() } else { format!(" поиск: {} ", truncate(&app.filter, 14)) };
+    let list_title =
+        if app.filter.is_empty() { " Tg-Lite ".to_string() } else { trf!(" поиск: {} ", " search: {} ", truncate(&app.filter, 14)) };
     app.list_state.select(sel_pos);
 
     let list = List::new(items)
@@ -1969,8 +2079,8 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         Some(c) => {
             let kind = match c.kind {
                 Kind::User => "",
-                Kind::Group => " · группа",
-                Kind::Channel => " · канал",
+                Kind::Group => tr!(" · группа", " · group"),
+                Kind::Channel => tr!(" · канал", " · channel"),
             };
             let mut spans = vec![
                 Span::styled(format!(" {}", c.name), Style::new().add_modifier(Modifier::BOLD)),
@@ -1980,20 +2090,20 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             if let Some(t) = typing {
                 spans.push(Span::styled(" · ", Style::new().fg(MUTED)));
                 spans.push(Span::styled(t, Style::new().fg(app.theme.accent).add_modifier(Modifier::ITALIC)));
-            } else if app.settings.show_status {
-                if let Some(p) = c.presence {
-                    let label = tg::presence_label(p, now, &tz);
-                    if !label.is_empty() {
-                        let color = if tg::is_online(p, now) { ONLINE } else { MUTED };
-                        spans.push(Span::styled(" · ", Style::new().fg(MUTED)));
-                        spans.push(Span::styled(label, Style::new().fg(color)));
-                    }
+            } else if app.settings.show_status
+                && let Some(p) = c.presence
+            {
+                let label = tg::presence_label(p, now, &tz);
+                if !label.is_empty() {
+                    let color = if tg::is_online(p, now) { ONLINE } else { MUTED };
+                    spans.push(Span::styled(" · ", Style::new().fg(MUTED)));
+                    spans.push(Span::styled(label, Style::new().fg(color)));
                 }
             }
             spans.push(Span::raw(" "));
             Line::from(spans)
         }
-        None => Line::from(" Переписка "),
+        None => Line::from(tr!(" Переписка ", " Chat ")),
     };
     let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(MUTED)).title(title);
     let inner = block.inner(area);
@@ -2002,11 +2112,14 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     let picking = app.mode == Mode::Pick;
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let lines: Vec<Line> = match app.sel {
-        None => vec![Line::from(Span::styled("Выберите чат слева (↑ ↓), вкладки папок: Tab", Style::new().fg(MUTED)))],
+        None => vec![Line::from(Span::styled(
+            tr!("Выберите чат слева (↑ ↓), вкладки папок: Tab", "Pick a chat on the left (↑ ↓), folder tabs: Tab"),
+            Style::new().fg(MUTED),
+        ))],
         Some(id) => match app.histories.get(&id) {
-            None => vec![Line::from(Span::styled("Загрузка…", Style::new().fg(MUTED)))],
+            None => vec![Line::from(Span::styled(tr!("Загрузка…", "Loading…"), Style::new().fg(MUTED)))],
             Some(msgs) if msgs.is_empty() => {
-                vec![Line::from(Span::styled("Сообщений пока нет", Style::new().fg(MUTED)))]
+                vec![Line::from(Span::styled(tr!("Сообщений пока нет", "No messages yet"), Style::new().fg(MUTED)))]
             }
             Some(msgs) => {
                 let sel = if picking { Some(app.pick.min(msgs.len() - 1)) } else { None };
@@ -2045,7 +2158,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(block, area);
     if let Some(text) = banner {
         let line = Line::from(vec![
-            Span::styled("▌ закреплено: ", Style::new().fg(app.theme.accent)),
+            Span::styled(tr!("▌ закреплено: ", "▌ pinned: "), Style::new().fg(app.theme.accent)),
             Span::styled(truncate(&text, (inner.width as usize).saturating_sub(15)), Style::new().fg(MUTED)),
         ]);
         f.render_widget(Paragraph::new(line), Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
@@ -2053,7 +2166,7 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(visible), body);
 
     if app.scroll > 0 && area.width > 12 {
-        let tag = " ↑ выше · PgDn вниз ".to_string();
+        let tag = tr!(" ↑ выше · PgDn вниз ", " ↑ older · PgDn down ").to_string();
         let w = display_width(&tag) as u16;
         if area.width > w + 2 {
             let r = Rect { x: area.x + area.width - w - 2, y: area.y, width: w, height: 1 };
@@ -2062,8 +2175,56 @@ fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// «Если не работает»: вопрос выделен, ответ переносится по ширине окна целиком.
+fn draw_faq(f: &mut Frame, app: &App, ov: &Overlay) {
+    let accent = app.theme.accent;
+    let area = f.area();
+    let w = area.width.saturating_sub(4).clamp(20, 96);
+    let inner_w = (w as usize).saturating_sub(4).max(8);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut starts = Vec::new();
+    for (i, it) in ov.items.iter().enumerate() {
+        let (q, a) = it.label.split_once(" — ").unwrap_or((it.label.as_str(), ""));
+        starts.push(lines.len());
+        let qstyle = if i == ov.sel {
+            Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(accent).add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(Span::styled(format!(" {:<width$} ", truncate(q, inner_w), width = inner_w), qstyle)));
+        for part in textwrap::wrap(a, inner_w.saturating_sub(2)) {
+            lines.push(Line::from(format!("   {part}")));
+        }
+        lines.push(Line::from(""));
+    }
+    let total = lines.len();
+    let height = (area.height.saturating_sub(6) as usize).clamp(4, 40).min(total.max(1));
+    let first = starts.get(ov.sel).copied().unwrap_or(0).min(total.saturating_sub(height));
+    let mut shown: Vec<Line> = lines.into_iter().skip(first).take(height).collect();
+    shown.push(Line::from(Span::styled(
+        tr!(" ↑ ↓ — читать · Esc — закрыть · автор: @maks1m_salov", " ↑ ↓ — read · Esc — close · author: @maks1m_salov"),
+        Style::new().fg(MUTED),
+    )));
+    let rect = centered_rect(area, w, shown.len() as u16 + 2);
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(shown).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(accent))
+                .title(Span::styled(ov.title.clone(), Style::new().fg(accent).add_modifier(Modifier::BOLD)))
+                .title_bottom(Span::styled(format!(" {}/{} ", ov.sel + 1, ov.items.len()), Style::new().fg(MUTED))),
+        ),
+        rect,
+    );
+}
+
 fn draw_overlay(f: &mut Frame, app: &App) {
     let Some(ov) = &app.overlay else { return };
+    if ov.kind == OverlayKind::Faq {
+        draw_faq(f, app, ov);
+        return;
+    }
     let accent = app.theme.accent;
     let area = f.area();
     let w = area.width.saturating_sub(6).clamp(20, 90);
@@ -2078,16 +2239,26 @@ fn draw_overlay(f: &mut Frame, app: &App) {
         let selected = i == ov.sel;
         let mark = if ov.confirm == Some(i) { "✖ " } else { "  " };
         let text = truncate(&format!("{mark}{}", it.label), inner_w);
-        let style = if selected { Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD) } else { Style::new() };
+        let style =
+            if selected { Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD) } else { Style::new() };
         lines.push(Line::from(Span::styled(format!(" {text:<inner_w$} "), style)));
     }
     lines.push(Line::from(""));
     let hint = match ov.kind {
-        OverlayKind::Links if ov.confirm.is_none() => " ↑ ↓ выбрать · Enter — открыть в браузере · Esc — закрыть",
+        OverlayKind::Links if ov.confirm.is_none() => {
+            tr!(" ↑ ↓ выбрать · Enter — открыть в браузере · Esc — закрыть", " ↑ ↓ select · Enter — open in browser · Esc — close")
+        }
         OverlayKind::Links => "",
-        OverlayKind::Faq => " ↑ ↓ — читать · Esc — закрыть · связь с автором: @maks1m_salov",
-        OverlayKind::Scheduled if ov.confirm.is_some() => " Enter ещё раз — отменить отправку · любая другая клавиша — нет",
-        OverlayKind::Scheduled => " ↑ ↓ выбрать · Enter — отменить отправку · Esc — закрыть",
+        OverlayKind::Faq => tr!(
+            " ↑ ↓ — читать · Esc — закрыть · связь с автором: @maks1m_salov",
+            " ↑ ↓ — read · Esc — close · contact the author: @maks1m_salov"
+        ),
+        OverlayKind::Scheduled if ov.confirm.is_some() => {
+            tr!(" Enter ещё раз — отменить отправку · любая другая клавиша — нет", " Enter again — cancel sending · any other key — no")
+        }
+        OverlayKind::Scheduled => {
+            tr!(" ↑ ↓ выбрать · Enter — отменить отправку · Esc — закрыть", " ↑ ↓ select · Enter — cancel sending · Esc — close")
+        }
     };
     lines.push(Line::from(Span::styled(truncate(hint, rect.width as usize - 2), Style::new().fg(MUTED))));
     f.render_widget(Clear, rect);
@@ -2104,30 +2275,30 @@ fn draw_overlay(f: &mut Frame, app: &App) {
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLayout, rows: usize) {
-    let mut title = vec![Span::styled(" Сообщение ", Style::new().fg(app.theme.accent))];
+    let mut title = vec![Span::styled(tr!(" Сообщение ", " Message "), Style::new().fg(app.theme.accent))];
     if app.markdown {
         title.push(Span::styled("· Markdown ", Style::new().fg(OWN)));
     }
     if let Some((_, label)) = &app.reply {
-        title.push(Span::styled(format!("· ответ: {label} "), Style::new().fg(OWN)));
+        title.push(Span::styled(trf!("· ответ: {label} ", "· reply: {label} "), Style::new().fg(OWN)));
     }
     if app.edit_target.is_some() {
-        title.push(Span::styled("· правка сообщения ", Style::new().fg(OWN)));
+        title.push(Span::styled(tr!("· правка сообщения ", "· editing message "), Style::new().fg(OWN)));
     }
     let focus = Style::new().fg(app.theme.accent);
     let skip = if layout.cur_row >= rows { layout.cur_row + 1 - rows } else { 0 };
     let shown: Vec<Line> = if app.input.is_empty() {
         vec![Line::from(Span::styled(
-            "Enter — отправить · Shift+Enter — новая строка · F1 — все команды",
+            tr!(
+                "Enter — отправить · Shift+Enter — новая строка · F1 — все команды",
+                "Enter — send · Shift+Enter — new line · F1 — all commands"
+            ),
             Style::new().fg(MUTED),
         ))]
     } else {
         layout.lines.iter().skip(skip).take(rows).map(|l| Line::from(l.as_str())).collect()
     };
-    f.render_widget(
-        Paragraph::new(shown).block(Block::default().borders(Borders::ALL).border_style(focus).title(Line::from(title))),
-        area,
-    );
+    f.render_widget(Paragraph::new(shown).block(Block::default().borders(Borders::ALL).border_style(focus).title(Line::from(title))), area);
     let cy = area.y + 1 + (layout.cur_row - skip) as u16;
     let cx = area.x + 1 + layout.cur_col as u16;
     if cx < area.x + area.width.saturating_sub(1) {
@@ -2137,8 +2308,14 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLayout, rows: 
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mode_hint = match app.mode {
-        Mode::Pick => Some(" ↑ ↓ · R ответ · F переслать · E правка · D удалить · S скачать · L ссылки · Esc"),
-        Mode::Forward => Some(" Переслать: выберите чат ↑ ↓ / Tab · Enter — переслать · Esc — отмена"),
+        Mode::Pick => Some(tr!(
+            " ↑ ↓ · R ответ · F переслать · E правка · D удалить · S скачать · L ссылки · Esc",
+            " ↑ ↓ · R reply · F forward · E edit · D delete · S save · L links · Esc"
+        )),
+        Mode::Forward => Some(tr!(
+            " Переслать: выберите чат ↑ ↓ / Tab · Enter — переслать · Esc — отмена",
+            " Forward: pick a chat ↑ ↓ / Tab · Enter — forward · Esc — cancel"
+        )),
         _ => None,
     };
     if let Some(h) = mode_hint {
@@ -2152,7 +2329,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     // Подсказка подбирается под ширину окна, чтобы статус слева не вытеснялся.
-    let hints = [" Tab папки · F1 справка · F4 настройки · F2 замок · F10 выход ", " F1 справка · F10 выход ", " F1 справка "];
+    let hints = [
+        tr!(" Tab папки · F1 справка · F4 настройки · F2 замок · F10 выход ", " Tab folders · F1 help · F4 settings · F2 lock · F10 quit "),
+        tr!(" F1 справка · F10 выход ", " F1 help · F10 quit "),
+        tr!(" F1 справка ", " F1 help "),
+    ];
     let hint = hints.iter().find(|h| display_width(h) + 20 <= area.width as usize).copied();
     let (left, right) = match hint {
         Some(h) => {
@@ -2164,7 +2345,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
         None => (area, None),
     };
-    let color = if app.status.starts_with("Ошибка") { ERROR } else { MUTED };
+    let color = if app.status.starts_with("Ошибка") || app.status.starts_with("Error") { ERROR } else { MUTED };
     let status = truncate(&format!(" {}", app.status), left.width as usize);
     f.render_widget(Paragraph::new(status).style(Style::new().fg(color)), left);
     if let Some((r, h)) = right {
@@ -2181,37 +2362,61 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
 fn draw_help(f: &mut Frame, app: &App) {
     let accent = app.theme.accent;
     let key = |k: &str, d: &str| {
-        Line::from(vec![
-            Span::styled(format!(" {k:<17}"), Style::new().fg(accent).add_modifier(Modifier::BOLD)),
-            Span::raw(d.to_string()),
-        ])
+        Line::from(vec![Span::styled(format!(" {k:<17}"), Style::new().fg(accent).add_modifier(Modifier::BOLD)), Span::raw(d.to_string())])
     };
     let lines = vec![
-        key("Enter", "отправить"),
-        key("Shift+Enter", "новая строка (вставка текста целиком тоже работает)"),
-        key("↑ ↓", "выбрать чат"),
-        key("Tab / Shift+Tab", "вкладки; после «/» — дополнить команду"),
-        key("PgUp / PgDn", "прокрутка переписки"),
-        key("F7", "выбор сообщения: R ответить, F переслать, E править, D удалить"),
-        key("Esc", "очистить ввод; отменить ответ, правку, поиск"),
-        key("F2  или /lock", "заблокировать (запрос пароля)"),
-        key("F3  или /md", "Markdown вкл/выкл"),
-        key("F4  или /settings", "настройки"),
-        key("F5  или /refresh", "обновить список чатов"),
-        key("F6 / Ctrl+F", "поиск по чатам (/find текст; Esc сбрасывает)"),
-        key("F10 или /quit", "выход"),
-        key("/later 30 текст", "отложенная публикация через 30 минут"),
-        key("/note текст", "быстрая заметка в «Избранное» из любого чата"),
-        key("/edit [текст], /del", "править / удалить своё последнее сообщение"),
-        key("/pin", "закрепить / открепить чат наверху списка"),
-        key("/readall", "отметить все чаты прочитанными"),
-        key("/export", "сохранить переписку в файл export/…txt"),
-        key("/send путь [текст]", "отправить файл (можно перетащить файл в окно)"),
-        key("/save", "скачать последнее вложение (или S в режиме F7)"),
-        key("Ctrl+V / /paste", "вставить из буфера обмена (также Shift+Insert); /faq — если не работает"),
-        key("/links, /scheduled", "ссылки чата (L для сообщения); отложенные, отмена"),
-        key("/proxy, /passwd", "прокси вручную (auto, off); смена пароля"),
-        Line::from(Span::styled(format!(" Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает"), Style::new().fg(MUTED))),
+        key("Enter", tr!("отправить", "send")),
+        key("Shift+Enter", tr!("новая строка (вставка текста целиком тоже работает)", "new line (pasting whole text works too)")),
+        key("↑ ↓", tr!("выбрать чат", "select chat")),
+        key("Tab / Shift+Tab", tr!("вкладки; после «/» — дополнить команду", "tabs; after \"/\" — complete command")),
+        key("PgUp / PgDn", tr!("прокрутка переписки", "scroll the chat")),
+        key(
+            "F7",
+            tr!("выбор сообщения: R ответить, F переслать, E править, D удалить", "pick message: R reply, F forward, E edit, D delete"),
+        ),
+        key("Esc", tr!("очистить ввод; отменить ответ, правку, поиск", "clear input; cancel reply, edit, search")),
+        key(tr!("F2  или /lock", "F2  or /lock"), tr!("заблокировать (запрос пароля)", "lock (asks for password)")),
+        key(tr!("F3  или /md", "F3  or /md"), tr!("Markdown вкл/выкл", "Markdown on/off")),
+        key(tr!("F4  или /settings", "F4  or /settings"), tr!("настройки", "settings")),
+        key(tr!("F5  или /refresh", "F5  or /refresh"), tr!("обновить список чатов", "refresh chat list")),
+        key("F6 / Ctrl+F", tr!("поиск по чатам (/find текст; Esc сбрасывает)", "search chats (/find text; Esc resets)")),
+        key(tr!("F10 или /quit", "F10 or /quit"), tr!("выход", "quit")),
+        key(tr!("/later 30 текст", "/later 30 text"), tr!("отложенная публикация через 30 минут", "send in 30 minutes")),
+        key(
+            tr!("/note текст", "/note text"),
+            tr!("быстрая заметка в «Избранное» из любого чата", "quick note to Saved Messages from any chat"),
+        ),
+        key(
+            tr!("/edit [текст], /del", "/edit [text], /del"),
+            tr!("править / удалить своё последнее сообщение", "edit / delete your last message"),
+        ),
+        key("/pin", tr!("закрепить / открепить чат наверху списка", "pin / unpin chat at the top of the list")),
+        key("/readall", tr!("отметить все чаты прочитанными", "mark all chats as read")),
+        key("/export", tr!("сохранить переписку в файл export/…txt", "save the chat to a file export/…txt")),
+        key(
+            tr!("/send путь [текст]", "/send path [text]"),
+            tr!("отправить файл (можно перетащить файл в окно)", "send a file (you can drag a file into the window)"),
+        ),
+        key("/save", tr!("скачать последнее вложение (или S в режиме F7)", "download the last attachment (or S in F7 mode)")),
+        key(
+            "Ctrl+V / /paste",
+            tr!(
+                "вставить из буфера обмена (также Shift+Insert); /faq — если не работает",
+                "paste from clipboard (also Shift+Insert); /faq — if it fails"
+            ),
+        ),
+        key(
+            "/links, /scheduled",
+            tr!("ссылки чата (L для сообщения); отложенные, отмена", "chat links (L for a message); scheduled, cancel"),
+        ),
+        key("/proxy, /passwd", tr!("прокси вручную (auto, off); смена пароля", "set proxy (auto, off); change password")),
+        Line::from(Span::styled(
+            trf!(
+                " Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает",
+                " Ctrl+L/Q/T/R/F work too · Tg-Lite {VERSION} · any key closes"
+            ),
+            Style::new().fg(MUTED),
+        )),
     ];
     let rect = centered_rect(f.area(), 72, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
@@ -2220,31 +2425,38 @@ fn draw_help(f: &mut Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(accent))
-                .title(Span::styled(" Справка ", Style::new().fg(accent).add_modifier(Modifier::BOLD))),
+                .title(Span::styled(tr!(" Справка ", " Help "), Style::new().fg(accent).add_modifier(Modifier::BOLD))),
         ),
         rect,
     );
 }
 
 fn on_off(v: bool) -> &'static str {
-    if v { "включено" } else { "выключено" }
+    if v { tr!("включено", "on") } else { tr!("выключено", "off") }
 }
 
 fn draw_settings(f: &mut Frame, app: &App) {
     let accent = app.theme.accent;
     let s = &app.settings;
     let rows: [(&str, String); SETTINGS_ROWS] = [
-        ("Автоблокировка через", s.lock_label()),
-        ("Прокси", s.proxy_label()),
-        ("Звук при новом сообщении", on_off(s.sound).to_string()),
-        ("Статус «в сети / был(а)»", on_off(s.show_status).to_string()),
-        ("Сообщений при открытии", s.history_limit.to_string()),
-        ("Цвет интерфейса", s.accent_name().to_string()),
-        ("Самоуничтожение данных", s.wipe_label()),
-        ("Фон экрана блокировки", s.lock_bg_name().to_string()),
-        ("Ширина списка чатов", Settings::width_name(s.list_width, ["узкий", "обычный", "широкий"]).to_string()),
-        ("Ширина сообщений", Settings::width_name(s.bubble_width, ["узкие", "обычные", "широкие"]).to_string()),
-        ("Пароль приложения", "сменить…".to_string()),
+        (tr!("Автоблокировка через", "Auto-lock after"), s.lock_label()),
+        (tr!("Прокси", "Proxy"), s.proxy_label()),
+        (tr!("Звук при новом сообщении", "Sound on new message"), on_off(s.sound).to_string()),
+        (tr!("Статус «в сети / был(а)»", "Online / last seen status"), on_off(s.show_status).to_string()),
+        (tr!("Сообщений при открытии", "Messages on open"), s.history_limit.to_string()),
+        (tr!("Цвет интерфейса", "Interface color"), s.accent_name().to_string()),
+        (tr!("Самоуничтожение данных", "Data self-destruct"), s.wipe_label()),
+        (tr!("Фон экрана блокировки", "Lock screen background"), s.lock_bg_name().to_string()),
+        (
+            tr!("Ширина списка чатов", "Chat list width"),
+            Settings::width_name(s.list_width, [tr!("узкий", "narrow"), tr!("обычный", "normal"), tr!("широкий", "wide")]).to_string(),
+        ),
+        (
+            tr!("Ширина сообщений", "Message width"),
+            Settings::width_name(s.bubble_width, [tr!("узкие", "narrow"), tr!("обычные", "normal"), tr!("широкие", "wide")]).to_string(),
+        ),
+        (tr!("Язык интерфейса", "Interface language"), if s.lang == 0 { "Русский".to_string() } else { "English".to_string() }),
+        (tr!("Пароль приложения", "App password"), tr!("сменить…", "change…").to_string()),
     ];
     let width = 78u16;
     let label_w = 28usize;
@@ -2263,8 +2475,17 @@ fn draw_settings(f: &mut Frame, app: &App) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" ↑ ↓ выбрать · ← → изменить · Enter — действие · Esc — закрыть", Style::new().fg(MUTED))));
-    lines.push(Line::from(Span::styled(" Прокси применяется при следующем запуске. Задать вручную: /proxy 127.0.0.1:10808", Style::new().fg(MUTED))));
+    lines.push(Line::from(Span::styled(
+        tr!(" ↑ ↓ выбрать · ← → изменить · Enter — действие · Esc — закрыть", " ↑ ↓ select · ← → change · Enter — action · Esc — close"),
+        Style::new().fg(MUTED),
+    )));
+    lines.push(Line::from(Span::styled(
+        tr!(
+            " Прокси применяется при следующем запуске. Задать вручную: /proxy 127.0.0.1:10808",
+            " Proxy applies on next start. Set manually: /proxy 127.0.0.1:10808"
+        ),
+        Style::new().fg(MUTED),
+    )));
     let rect = centered_rect(f.area(), width, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
     f.render_widget(
@@ -2272,7 +2493,7 @@ fn draw_settings(f: &mut Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(accent))
-                .title(Span::styled(" Настройки ", Style::new().fg(accent).add_modifier(Modifier::BOLD))),
+                .title(Span::styled(tr!(" Настройки ", " Settings "), Style::new().fg(accent).add_modifier(Modifier::BOLD))),
         ),
         rect,
     );
@@ -2374,7 +2595,7 @@ pub async fn run(
                 }
                 let left = tg::flood_left();
                 if left > 0 {
-                    let text = format!("Telegram просит подождать {left} с, сообщение отправится само…");
+                    let text = trf!("Telegram просит подождать {left} с, сообщение отправится само…", "Telegram asks to wait {left} s, the message will be sent automatically…");
                     if app.status != text {
                         app.status = text;
                         dirty = true;
@@ -2382,7 +2603,7 @@ pub async fn run(
                     flood_shown = true;
                 } else if flood_shown {
                     flood_shown = false;
-                    app.status = "Готово".into();
+                    app.status = tr!("Готово", "Done").into();
                     dirty = true;
                 }
                 if app.should_autolock() {
@@ -2390,15 +2611,14 @@ pub async fn run(
                     let _ = terminal.clear();
                     dirty = true;
                 }
-                if let Some(t) = app.pending_load {
-                    if t.elapsed() >= LOAD_DELAY {
+                if let Some(t) = app.pending_load
+                    && t.elapsed() >= LOAD_DELAY {
                         app.pending_load = None;
                         if let Some(c) = app.selected().cloned() {
                             let _ = cmd.send(Cmd::LoadHistory(c, app.settings.history_limit as usize));
                         }
                         dirty = true;
                     }
-                }
                 if last_refresh.elapsed() >= REFRESH_EVERY {
                     last_refresh = Instant::now();
                     let _ = cmd.send(Cmd::LoadDialogs);
@@ -2660,6 +2880,49 @@ mod tests {
         assert!(!is_paste_key(&key(KeyCode::Char('v'), KeyModifiers::NONE)));
     }
 
+    fn has_cyrillic(s: &str) -> bool {
+        s.chars().any(|c| ('\u{400}'..='\u{4ff}').contains(&c))
+    }
+
+    #[test]
+    fn english_ui_has_no_russian_leftovers() {
+        crate::i18n::set(1);
+        let mut app = App::new(Settings::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        // чат без данных, справка, настройки, блокировка, смена пароля, FAQ
+        for mode in [Mode::Chat, Mode::Help, Mode::Settings, Mode::Locked, Mode::NewPassword] {
+            app.mode = mode;
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let text = dump(&term).replace("Русский", ""); // название языка в настройках
+            assert!(!has_cyrillic(&text), "русский текст на английском экране {mode:?}:\n{text}");
+        }
+        app.mode = Mode::Chat;
+        assert!(app.try_command("/faq", &tx, &s));
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let text = dump(&term);
+        assert!(!has_cyrillic(&text), "FAQ:\n{text}");
+        assert!(text.contains("If something doesn't work"));
+        crate::i18n::set(0);
+    }
+
+    #[test]
+    fn language_row_switches_and_persists_in_settings() {
+        let mut app = App::new(Settings::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.mode = Mode::Settings;
+        app.settings_row = 10;
+        app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+        assert_eq!(app.settings.lang, 1);
+        assert!(crate::i18n::en());
+        assert!(app.status.contains("English"));
+        app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+        assert_eq!(app.settings.lang, 0);
+        assert!(!crate::i18n::en());
+    }
+
     #[test]
     fn faq_and_paste_commands() {
         let mut app = app_with_chats();
@@ -2669,7 +2932,7 @@ mod tests {
         app.cursor = 4;
         assert!(app.try_command("/faq", &tx, &s));
         assert!(app.mode == Mode::Overlay);
-        assert_eq!(app.overlay.as_ref().unwrap().items.len(), FAQ.len());
+        assert_eq!(app.overlay.as_ref().unwrap().items.len(), faq().len());
         let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
         assert!(dump(&term).contains("Если не работает"));
@@ -2760,10 +3023,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let s = saver();
         let ch = app.chats[1].id;
-        app.handle_event(
-            Event::Folders(vec![Folder { id: 5, title: "Новости".into(), include: vec![ch], ..Default::default() }]),
-            &tx,
-        );
+        app.handle_event(Event::Folders(vec![Folder { id: 5, title: "Новости".into(), include: vec![ch], ..Default::default() }]), &tx);
         let titles: Vec<String> = app.tabs().into_iter().map(|t| t.1).collect();
         assert_eq!(titles, vec!["Все", "Новые", "Личные", "Группы", "Каналы", "Новости"]);
         for _ in 0..5 {
@@ -2969,21 +3229,38 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
         let out = dump(&term);
-        for needle in ["Tg-Lite", "Все", "Личные", "Группы", "Каналы", "Мама", "Мой канал", "Привет, как дела?", "Всё хорошо!", "набираю ответ", "F1 справка"] {
+        for needle in [
+            "Tg-Lite",
+            "Все",
+            "Личные",
+            "Группы",
+            "Каналы",
+            "Мама",
+            "Мой канал",
+            "Привет, как дела?",
+            "Всё хорошо!",
+            "набираю ответ",
+            "F1 справка",
+        ] {
             assert!(out.contains(needle), "нет «{needle}»:\n{out}");
         }
 
         // маленькие окна не должны паниковать (в том числе меньше стандартных 80x25)
         for (w, h) in [(80, 25), (40, 10), (20, 6), (12, 4)] {
             let mut small = Terminal::new(TestBackend::new(w, h)).unwrap();
-            for mode in [Mode::Chat, Mode::Pick, Mode::Forward, Mode::Overlay, Mode::Help, Mode::Settings, Mode::NewPassword, Mode::Locked] {
+            for mode in [Mode::Chat, Mode::Pick, Mode::Forward, Mode::Overlay, Mode::Help, Mode::Settings, Mode::NewPassword, Mode::Locked]
+            {
                 app.mode = mode;
                 app.reply = Some((1, "Мама: привет".into()));
                 app.overlay = Some(Overlay {
                     kind: OverlayKind::Links,
                     chat: None,
                     title: " Ссылки ".into(),
-                    items: vec![OverlayItem { label: "Мама: https://example.com/очень/длинная/ссылка".into(), data: "https://example.com".into(), id: 0 }],
+                    items: vec![OverlayItem {
+                        label: "Мама: https://example.com/очень/длинная/ссылка".into(),
+                        data: "https://example.com".into(),
+                        id: 0,
+                    }],
                     sel: 0,
                     confirm: None,
                 });
@@ -3013,7 +3290,9 @@ mod tests {
         let mut app = app_with_chats();
         let (tx, _rx) = mpsc::unbounded_channel();
         let folders: Vec<Folder> = (0..12)
-            .map(|i| Folder { id: i + 1, title: format!("Очень длинное название папки {i}"), groups: true, ..Default::default() })
+            .map(|i| Folder {
+                id: i + 1, title: format!("Очень длинное название папки {i}"), groups: true, ..Default::default()
+            })
             .collect();
         app.handle_event(Event::Folders(folders), &tx);
         app.tab = Tab::Folder(12);
@@ -3732,6 +4011,7 @@ mod tests {
     fn dump_ui_frames() {
         let Some(dir) = std::env::var_os("TGLITE_SHOTS") else { return };
         std::fs::create_dir_all(&dir).unwrap();
+        crate::i18n::set(u8::from(std::env::var("TGLITE_LANG").is_ok_and(|v| v == "en")));
         let col = |c: Color| match c {
             Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
             Color::Black => "#000000".to_string(),
@@ -3756,15 +4036,22 @@ mod tests {
         let mut help = demo_app();
         help.mode = Mode::Help;
         shots.push(("help", help));
+        let mut faq = demo_app();
+        submit_text(&mut faq, "/faq", &tx, &s);
+        shots.push(("faq", faq));
         for (name, mut a) in shots {
             let mut term = Terminal::new(TestBackend::new(110, 32)).unwrap();
             term.draw(|f| draw(f, &mut a)).unwrap();
             let buf = term.backend().buffer();
             let rows: Vec<Vec<String>> = (0..32)
-                .map(|y| (0..110).map(|x| {
-                    let c = &buf[(x, y)];
-                    format!("{}|{}|{}", c.symbol(), col(c.fg), col(c.bg))
-                }).collect())
+                .map(|y| {
+                    (0..110)
+                        .map(|x| {
+                            let c = &buf[(x, y)];
+                            format!("{}|{}|{}", c.symbol(), col(c.fg), col(c.bg))
+                        })
+                        .collect()
+                })
                 .collect();
             std::fs::write(std::path::Path::new(&dir).join(format!("ui_{name}.json")), serde_json::to_string(&rows).unwrap()).unwrap();
         }
@@ -3773,22 +4060,38 @@ mod tests {
     /// Демонстрационные данные для скриншотов: вымышленные имена и тексты.
     fn demo_app() -> App {
         let mut app = App::new(Settings::default());
-        let mut a = chat(1, "Анна", Kind::User, 2);
+        let anna = tr!("Анна", "Anna");
+        let me = tr!("Я", "Me");
+        let mut a = chat(1, anna, Kind::User, 2);
         a.presence = Some(crate::tg::Presence::Online(i64::MAX / 2));
-        let b = chat(2, "Новости техники", Kind::Channel, 5);
-        let g = chat(3, "Команда проекта", Kind::Group, 0);
-        let c = chat(4, "Рецепты", Kind::Channel, 0);
-        let d = chat(5, "Борис", Kind::User, 0);
-        let mut m1 = msg(1, false, "Анна", "Привет! Ты посмотрел отчёт, который я присылала?");
+        let b = chat(2, tr!("Новости техники", "Tech News"), Kind::Channel, 5);
+        let g = chat(3, tr!("Команда проекта", "Project Team"), Kind::Group, 0);
+        let c = chat(4, tr!("Рецепты", "Recipes"), Kind::Channel, 0);
+        let d = chat(5, tr!("Борис", "Boris"), Kind::User, 0);
+        let mut m1 = msg(1, false, anna, tr!("Привет! Ты посмотрел отчёт, который я присылала?", "Hi! Did you look at the report I sent?"));
         m1.edited = true;
-        let m2 = msg(2, true, "Я", "Да, почти закончил. Вот ссылка на черновик: https://example.com/draft");
-        let mut m3 = msg(3, false, "Анна", "Отлично, спасибо!");
+        let m2 = msg(
+            2,
+            true,
+            me,
+            tr!(
+                "Да, почти закончил. Вот ссылка на черновик: https://example.com/draft",
+                "Yes, almost done. Here is a link to the draft: https://example.com/draft"
+            ),
+        );
+        let mut m3 = msg(3, false, anna, tr!("Отлично, спасибо!", "Great, thanks!"));
         m3.reply_to = Some(2);
-        let mut m4 = msg(4, false, "Анна", "[файл итоги.pdf, 2 МБ] вот финальная версия");
-        m4.caption = Some("вот финальная версия".into());
-        let m5 = msg(5, true, "Я", "Получил. Перешлю команде, как только прочитаю.");
+        let cap = tr!("вот финальная версия", "here is the final version");
+        let mut m4 = msg(4, false, anna, &format!("{} {cap}", tr!("[файл итоги.pdf, 2 МБ]", "[file summary.pdf, 2 MB]")));
+        m4.caption = Some(cap.into());
+        let m5 = msg(
+            5,
+            true,
+            me,
+            tr!("Получил. Перешлю команде, как только прочитаю.", "Got it. I will forward it to the team once I have read it."),
+        );
         app.histories.insert(a.id, vec![m1, m2, m3, m4, m5]);
-        app.pinned_msg.insert(a.id, "Созвон по проекту в пятницу в 15:00".into());
+        app.pinned_msg.insert(a.id, tr!("Созвон по проекту в пятницу в 15:00", "Project call on Friday at 3 PM").into());
         app.chats = vec![a, b, g, c, d];
         app.ensure_selection();
         app

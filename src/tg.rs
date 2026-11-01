@@ -1,8 +1,8 @@
 //! Работа с Telegram: подключение и фоновый обработчик команд интерфейса.
 
 use std::ops::ControlFlow;
-use std::sync::Arc;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::util::log;
 use crate::vault::VaultSession;
+use crate::{tr, trf};
 
 /// Сколько диалогов держим в памяти. Небольшое число = мало ОЗУ.
 const MAX_DIALOGS: usize = 120;
@@ -67,24 +68,24 @@ fn local(ts: i64, tz: &jiff::tz::TimeZone) -> Option<jiff::Zoned> {
 /// Подпись для заголовка чата: «в сети», «был(а) в 14:32», «был(а) недавно».
 pub fn presence_label(p: Presence, now: i64, tz: &jiff::tz::TimeZone) -> String {
     match p {
-        Presence::Online(exp) if exp > now => "в сети".to_string(),
-        Presence::Online(_) => "был(а) только что".to_string(),
+        Presence::Online(exp) if exp > now => tr!("в сети", "online").to_string(),
+        Presence::Online(_) => tr!("был(а) только что", "last seen just now").to_string(),
         Presence::Offline(ts) => {
             let (Some(t), Some(n)) = (local(ts, tz), local(now, tz)) else {
-                return "был(а) в сети".to_string();
+                return tr!("был(а) в сети", "last seen online").to_string();
             };
             let hm = t.strftime("%H:%M");
             if t.date() == n.date() {
-                format!("был(а) в {hm}")
+                trf!("был(а) в {hm}", "last seen at {hm}")
             } else if n.date().yesterday().ok() == Some(t.date()) {
-                format!("был(а) вчера в {hm}")
+                trf!("был(а) вчера в {hm}", "last seen yesterday at {hm}")
             } else {
-                format!("был(а) {} в {hm}", t.strftime("%d.%m"))
+                trf!("был(а) {} в {hm}", "last seen {} at {hm}", t.strftime("%d.%m"))
             }
         }
-        Presence::Recently => "был(а) недавно".to_string(),
-        Presence::LastWeek => "был(а) на этой неделе".to_string(),
-        Presence::LastMonth => "был(а) в этом месяце".to_string(),
+        Presence::Recently => tr!("был(а) недавно", "last seen recently").to_string(),
+        Presence::LastWeek => tr!("был(а) на этой неделе", "last seen this week").to_string(),
+        Presence::LastMonth => tr!("был(а) в этом месяце", "last seen this month").to_string(),
         Presence::Hidden => String::new(),
     }
 }
@@ -155,9 +156,9 @@ pub enum TypingKind {
 impl TypingKind {
     pub fn label(self) -> &'static str {
         match self {
-            TypingKind::Text => "печатает…",
-            TypingKind::Voice => "записывает голосовое…",
-            TypingKind::File => "отправляет файл…",
+            TypingKind::Text => tr!("печатает…", "typing…"),
+            TypingKind::Voice => tr!("записывает голосовое…", "recording voice…"),
+            TypingKind::File => tr!("отправляет файл…", "sending a file…"),
             TypingKind::Stop => "",
         }
     }
@@ -184,9 +185,7 @@ pub fn typing_from_raw(u: &tl::enums::Update) -> Option<(PeerId, Option<PeerId>,
     };
     match u {
         tl::enums::Update::UserTyping(x) => Some((PeerId::user(x.user_id)?, None, kind(&x.action))),
-        tl::enums::Update::ChatUserTyping(x) => {
-            Some((PeerId::chat(x.chat_id)?, Some(PeerId::from(x.from_id.clone())), kind(&x.action)))
-        }
+        tl::enums::Update::ChatUserTyping(x) => Some((PeerId::chat(x.chat_id)?, Some(PeerId::from(x.from_id.clone())), kind(&x.action))),
         tl::enums::Update::ChannelUserTyping(x) if x.top_msg_id.is_none() => {
             Some((PeerId::channel(x.channel_id)?, Some(PeerId::from(x.from_id.clone())), kind(&x.action)))
         }
@@ -238,40 +237,94 @@ pub enum Cmd {
         reply_to: Option<i32>,
     },
     /// Переслать сообщение `id` из `src` в `dst`.
-    Forward { src: ChatInfo, dst: ChatInfo, id: i32 },
+    Forward {
+        src: ChatInfo,
+        dst: ChatInfo,
+        id: i32,
+    },
     MarkRead(ChatInfo),
     /// Скачать вложение сообщения `id` в папку `downloads` рядом с программой.
-    Save { chat: ChatInfo, id: i32 },
+    Save {
+        chat: ChatInfo,
+        id: i32,
+    },
     /// Отправить файл с диска.
-    SendFile { chat: ChatInfo, path: PathBuf, caption: String },
+    SendFile {
+        chat: ChatInfo,
+        path: PathBuf,
+        caption: String,
+    },
     /// Показать отложенные сообщения чата.
     ListScheduled(ChatInfo),
     /// Отменить отложенное сообщение.
-    DeleteScheduled { chat: ChatInfo, id: i32 },
+    DeleteScheduled {
+        chat: ChatInfo,
+        id: i32,
+    },
     /// Исправить своё сообщение.
-    Edit { chat: ChatInfo, id: i32, text: String, markdown: bool },
+    Edit {
+        chat: ChatInfo,
+        id: i32,
+        text: String,
+        markdown: bool,
+    },
     /// Удалить своё сообщение (у всех).
-    Delete { chat: ChatInfo, id: i32 },
+    Delete {
+        chat: ChatInfo,
+        id: i32,
+    },
 }
 
 /// События от обработчика к интерфейсу.
 pub enum Event {
     Dialogs(Vec<ChatInfo>),
     Folders(Vec<Folder>),
-    History { chat: PeerId, msgs: Vec<ChatMsg> },
-    Incoming { chat: PeerId, chat_name: String, msg: ChatMsg },
-    Sent { chat: PeerId, msg: ChatMsg, scheduled: bool },
+    History {
+        chat: PeerId,
+        msgs: Vec<ChatMsg>,
+    },
+    Incoming {
+        chat: PeerId,
+        chat_name: String,
+        msg: ChatMsg,
+    },
+    Sent {
+        chat: PeerId,
+        msg: ChatMsg,
+        scheduled: bool,
+    },
     /// Отправка не удалась: текст возвращается в поле ввода, чтобы не пропал.
-    SendFailed { text: String },
-    Edited { chat: PeerId, msg: ChatMsg },
+    SendFailed {
+        text: String,
+    },
+    Edited {
+        chat: PeerId,
+        msg: ChatMsg,
+    },
     /// `chat` = None для личных чатов и обычных групп (id сообщений общие на аккаунт).
-    Deleted { chat: Option<PeerId>, ids: Vec<i32> },
-    Presence { user: PeerId, presence: Presence },
+    Deleted {
+        chat: Option<PeerId>,
+        ids: Vec<i32>,
+    },
+    Presence {
+        user: PeerId,
+        presence: Presence,
+    },
     /// Кто-то печатает (или перестал) в чате.
-    Typing { chat: PeerId, from: Option<PeerId>, kind: TypingKind },
+    Typing {
+        chat: PeerId,
+        from: Option<PeerId>,
+        kind: TypingKind,
+    },
     /// Закреплённое сообщение чата (текст) или его отсутствие.
-    Pinned { chat: PeerId, text: Option<String> },
-    Scheduled { chat: PeerId, items: Vec<ScheduledMsg> },
+    Pinned {
+        chat: PeerId,
+        text: Option<String>,
+    },
+    Scheduled {
+        chat: PeerId,
+        items: Vec<ScheduledMsg>,
+    },
     Status(String),
     Error(String),
 }
@@ -285,11 +338,7 @@ pub struct Connection {
 /// Подключается к Telegram, используя сессию из хранилища.
 /// `proxy` — необязательный SOCKS5-прокси вида `socks5://127.0.0.1:1080`.
 pub fn connect(session: Arc<VaultSession>, api_id: i32, proxy: Option<String>) -> Connection {
-    let params = grammers_mtsender::ConnectionParams {
-        proxy_url: proxy,
-        retry_policy: Box::new(FloodPolicy),
-        ..Default::default()
-    };
+    let params = grammers_mtsender::ConnectionParams { proxy_url: proxy, retry_policy: Box::new(FloodPolicy), ..Default::default() };
     let SenderPool { runner, updates, handle } = SenderPool::with_configuration(session, api_id, params);
     let client = Client::new(handle.clone());
     tokio::spawn(runner.run());
@@ -301,11 +350,7 @@ pub fn connect(session: Arc<VaultSession>, api_id: i32, proxy: Option<String>) -
 pub fn format_time(ts: jiff::Timestamp) -> String {
     let z = ts.to_zoned(jiff::tz::TimeZone::system());
     let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::system());
-    if z.date() == now.date() {
-        z.strftime("%H:%M").to_string()
-    } else {
-        z.strftime("%d.%m %H:%M").to_string()
-    }
+    if z.date() == now.date() { z.strftime("%H:%M").to_string() } else { z.strftime("%d.%m %H:%M").to_string() }
 }
 
 fn kind_of(peer: &Peer) -> Kind {
@@ -334,9 +379,7 @@ struct FloodPolicy;
 impl RetryPolicy for FloodPolicy {
     fn should_retry(&self, ctx: &RetryContext) -> ControlFlow<(), Duration> {
         match &ctx.error {
-            InvocationError::Rpc(RpcError { code: 420, value: Some(secs), .. })
-                if ctx.fail_count.get() <= 2 && *secs <= 300 =>
-            {
+            InvocationError::Rpc(RpcError { code: 420, value: Some(secs), .. }) if ctx.fail_count.get() <= 2 && *secs <= 300 => {
                 FLOOD_UNTIL.store(jiff::Timestamp::now().as_second() + i64::from(*secs), Ordering::Relaxed);
                 ControlFlow::Continue(Duration::from_secs(u64::from(*secs)))
             }
@@ -348,21 +391,26 @@ impl RetryPolicy for FloodPolicy {
 
 /// Понятное сообщение вместо технического кода ошибки Telegram.
 pub fn friendly_error(e: &str) -> String {
-    let wait = || {
-        e.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).next_back().unwrap_or("?").to_string()
-    };
+    let wait = || e.split(|c: char| !c.is_ascii_digit()).rfind(|x| !x.is_empty()).unwrap_or("?").to_string();
     if e.contains("FLOOD_WAIT") || e.contains("SLOWMODE_WAIT") {
-        return format!("Telegram просит подождать {} с и не принимает запросы", wait());
+        return trf!(
+            "Telegram просит подождать {} с и не принимает запросы",
+            "Telegram asks to wait {} s and is not accepting requests",
+            wait()
+        );
     }
     let known = [
-        ("MESSAGE_TOO_LONG", "сообщение слишком длинное (лимит Telegram 4096 символов)"),
-        ("CHAT_WRITE_FORBIDDEN", "в этот чат писать нельзя"),
-        ("CHAT_ADMIN_REQUIRED", "нужны права администратора"),
-        ("USER_BANNED_IN_CHANNEL", "вам запрещено писать в этот чат"),
-        ("MESSAGE_NOT_MODIFIED", "текст не изменился"),
-        ("MESSAGE_EDIT_TIME_EXPIRED", "время для правки сообщения истекло"),
-        ("MESSAGE_ID_INVALID", "такого сообщения уже нет"),
-        ("PEER_FLOOD", "Telegram ограничил отправку, попробуйте позже"),
+        (
+            "MESSAGE_TOO_LONG",
+            tr!("сообщение слишком длинное (лимит Telegram 4096 символов)", "message is too long (Telegram limit is 4096 characters)"),
+        ),
+        ("CHAT_WRITE_FORBIDDEN", tr!("в этот чат писать нельзя", "you can't write in this chat")),
+        ("CHAT_ADMIN_REQUIRED", tr!("нужны права администратора", "admin rights required")),
+        ("USER_BANNED_IN_CHANNEL", tr!("вам запрещено писать в этот чат", "you are banned from writing in this chat")),
+        ("MESSAGE_NOT_MODIFIED", tr!("текст не изменился", "text was not changed")),
+        ("MESSAGE_EDIT_TIME_EXPIRED", tr!("время для правки сообщения истекло", "time to edit the message has expired")),
+        ("MESSAGE_ID_INVALID", tr!("такого сообщения уже нет", "this message no longer exists")),
+        ("PEER_FLOOD", tr!("Telegram ограничил отправку, попробуйте позже", "Telegram limited sending, try again later")),
     ];
     for (code, text) in known {
         if e.contains(code) {
@@ -383,13 +431,13 @@ pub fn fmt_size(bytes: usize) -> String {
     let b = bytes as f64;
     let (kb, mb, gb) = (1024.0, 1024.0 * 1024.0, 1024.0 * 1024.0 * 1024.0);
     if b >= gb {
-        format!("{} ГБ", trim_zero(format!("{:.1}", b / gb)))
+        trf!("{} ГБ", "{} GB", trim_zero(format!("{:.1}", b / gb)))
     } else if b >= mb {
-        format!("{} МБ", trim_zero(format!("{:.1}", b / mb)))
+        trf!("{} МБ", "{} MB", trim_zero(format!("{:.1}", b / mb)))
     } else if b >= kb {
-        format!("{:.0} КБ", b / kb)
+        trf!("{:.0} КБ", "{:.0} KB", b / kb)
     } else {
-        format!("{bytes} Б")
+        trf!("{bytes} Б", "{bytes} B")
     }
 }
 
@@ -413,17 +461,17 @@ pub fn doc_label(attrs: &[tl::enums::DocumentAttribute], mime: &str, size: Optio
     }
     for a in attrs {
         match a {
-            A::Audio(au) if au.voice => return format!("[голосовое {}]", fmt_duration(f64::from(au.duration))),
+            A::Audio(au) if au.voice => return trf!("[голосовое {}]", "[voice {}]", fmt_duration(f64::from(au.duration))),
             A::Audio(au) => {
                 let who = match (&au.performer, &au.title) {
                     (Some(p), Some(t)) => format!(" {} — {}", crate::util::clean(p), crate::util::clean(t)),
                     (None, Some(t)) => format!(" {}", crate::util::clean(t)),
                     _ => String::new(),
                 };
-                return with_size(format!("аудио {}{who}", fmt_duration(f64::from(au.duration))));
+                return with_size(trf!("аудио {}{who}", "audio {}{who}", fmt_duration(f64::from(au.duration))));
             }
-            A::Video(v) if v.round_message => return format!("[видеосообщение {}]", fmt_duration(v.duration)),
-            A::Video(v) => return with_size(format!("видео {}", fmt_duration(v.duration))),
+            A::Video(v) if v.round_message => return trf!("[видеосообщение {}]", "[video message {}]", fmt_duration(v.duration)),
+            A::Video(v) => return with_size(trf!("видео {}", "video {}", fmt_duration(v.duration))),
             _ => {}
         }
     }
@@ -432,11 +480,11 @@ pub fn doc_label(attrs: &[tl::enums::DocumentAttribute], mime: &str, size: Optio
         _ => None,
     });
     if mime.starts_with("image/") && name.is_none() {
-        return with_size("изображение".into());
+        return with_size(tr!("изображение", "image").into());
     }
     match name {
-        Some(n) if !n.trim().is_empty() => with_size(format!("файл {}", n.trim())),
-        _ => with_size("файл".into()),
+        Some(n) if !n.trim().is_empty() => with_size(trf!("файл {}", "file {}", n.trim())),
+        _ => with_size(tr!("файл", "file").into()),
     }
 }
 
@@ -444,32 +492,36 @@ pub fn doc_label(attrs: &[tl::enums::DocumentAttribute], mime: &str, size: Optio
 pub fn media_label(media: &grammers_client::media::Media) -> String {
     use grammers_client::media::Media as M;
     match media {
-        M::Photo(_) => "[фото]".into(),
-        M::Sticker(_) => "[стикер]".into(),
+        M::Photo(_) => tr!("[фото]", "[photo]").into(),
+        M::Sticker(_) => tr!("[стикер]", "[sticker]").into(),
         M::Document(d) => match &d.raw.document {
             Some(tl::enums::Document::Document(doc)) => doc_label(&doc.attributes, &doc.mime_type, Some(doc.size.max(0) as usize)),
-            _ => "[файл]".into(),
+            _ => tr!("[файл]", "[file]").into(),
         },
         M::Contact(c) => {
             let name = crate::util::clean(&format!("{} {}", c.first_name(), c.last_name()));
-            format!("[контакт {}]", name.trim()).replace("[контакт ]", "[контакт]")
+            if name.trim().is_empty() {
+                tr!("[контакт]", "[contact]").to_string()
+            } else {
+                trf!("[контакт {}]", "[contact {}]", name.trim())
+            }
         }
         M::Poll(p) => {
             let tl::enums::TextWithEntities::Entities(q) = p.question();
-            format!("[опрос: {}]", crate::util::clean(&q.text).trim())
+            trf!("[опрос: {}]", "[poll: {}]", crate::util::clean(&q.text).trim())
         }
-        M::Geo(_) | M::GeoLive(_) => "[геопозиция]".into(),
-        M::Venue(v) => format!("[место: {}]", crate::util::clean(v.title()).trim()),
-        M::Dice(_) => "[кубик]".into(),
+        M::Geo(_) | M::GeoLive(_) => tr!("[геопозиция]", "[location]").into(),
+        M::Venue(v) => trf!("[место: {}]", "[place: {}]", crate::util::clean(v.title()).trim()),
+        M::Dice(_) => tr!("[кубик]", "[dice]").into(),
         M::WebPage(_) => String::new(),
-        _ => "[вложение]".into(),
+        _ => tr!("[вложение]", "[attachment]").into(),
     }
 }
 
 /// Склеивает подпись вложения и текст сообщения.
 pub fn compose_text(label: &str, text: &str) -> String {
     match (label.is_empty(), text.is_empty()) {
-        (true, true) => "[служебное сообщение]".to_string(),
+        (true, true) => tr!("[служебное сообщение]", "[service message]").to_string(),
         (true, false) => text.to_string(),
         (false, true) => label.to_string(),
         (false, false) => format!("{label} {text}"),
@@ -477,7 +529,7 @@ pub fn compose_text(label: &str, text: &str) -> String {
 }
 
 pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
-    let text = crate::util::clean_or(m.text(), "[эмодзи]");
+    let text = crate::util::clean_or(m.text(), tr!("[эмодзи]", "[emoji]"));
     let label = m.media().map(|md| media_label(&md)).unwrap_or_default();
     let caption = if label.is_empty() { None } else { Some(text.clone()) };
     let text = compose_text(&label, &text);
@@ -489,7 +541,7 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
         None => None,
     };
     let sender = if m.outgoing() {
-        "Я".to_string()
+        tr!("Я", "Me").to_string()
     } else {
         m.sender().and_then(|p| p.name().map(crate::util::clean)).unwrap_or_else(|| fallback_name.to_string())
     };
@@ -541,7 +593,7 @@ fn folder_from_raw(f: &tl::enums::DialogFilter) -> Option<Folder> {
             include.dedup();
             Some(Folder {
                 id: f.id,
-                title: crate::util::clean_or(&t.text, "Папка").trim().to_string(),
+                title: crate::util::clean_or(&t.text, tr!("Папка", "Folder")).trim().to_string(),
                 include,
                 exclude: f.exclude_peers.iter().filter_map(input_peer_id).collect(),
                 include_self: f.pinned_peers.iter().chain(f.include_peers.iter()).any(|p| matches!(p, tl::enums::InputPeer::PeerSelf)),
@@ -559,7 +611,7 @@ fn folder_from_raw(f: &tl::enums::DialogFilter) -> Option<Folder> {
             include.dedup();
             Some(Folder {
                 id: f.id,
-                title: crate::util::clean_or(&t.text, "Папка").trim().to_string(),
+                title: crate::util::clean_or(&t.text, tr!("Папка", "Folder")).trim().to_string(),
                 include,
                 include_self: f.pinned_peers.iter().chain(f.include_peers.iter()).any(|p| matches!(p, tl::enums::InputPeer::PeerSelf)),
                 ..Default::default()
@@ -578,16 +630,17 @@ pub async fn load_dialogs(client: &Client) -> Result<Vec<ChatInfo>> {
         let (name, presence, is_contact, is_bot, is_self) = match d.peer() {
             Peer::User(u) => {
                 let is_self = u.is_self();
-                let name = if is_self { "Избранное".to_string() } else { crate::util::clean(&u.full_name()) };
+                let name =
+                    if is_self { tr!("Избранное", "Saved Messages").to_string() } else { crate::util::clean(&u.full_name()) };
                 let presence = if is_self { None } else { Some(presence_from(u.status())) };
                 (name, presence, u.contact(), u.is_bot(), is_self)
             }
-            p => (crate::util::clean(p.name().unwrap_or("(без имени)")), None, false, false, false),
+            p => (crate::util::clean(p.name().unwrap_or(tr!("(без имени)", "(no name)"))), None, false, false, false),
         };
         out.push(ChatInfo {
             id: d.peer_id(),
             peer: d.peer_ref(),
-            name: if name.trim().is_empty() { "(без имени)".to_string() } else { name.trim().to_string() },
+            name: if name.trim().is_empty() { tr!("(без имени)", "(no name)").to_string() } else { name.trim().to_string() },
             kind: kind_of(d.peer()),
             unread: dialog_unread(&d),
             mentions: dialog_mentions(&d),
@@ -660,16 +713,11 @@ pub fn download_dir() -> PathBuf {
 }
 
 /// Скачивает вложение сообщения. Прогресс сообщается в строку состояния.
-pub async fn save_attachment(
-    client: &Client,
-    chat: &ChatInfo,
-    id: i32,
-    events: &mpsc::UnboundedSender<Event>,
-) -> Result<PathBuf> {
+pub async fn save_attachment(client: &Client, chat: &ChatInfo, id: i32, events: &mpsc::UnboundedSender<Event>) -> Result<PathBuf> {
     use tokio::io::AsyncWriteExt;
     let msgs = client.get_messages_by_id(chat.peer, &[id]).await.map_err(|e| anyhow!("{e}"))?;
-    let msg = msgs.into_iter().next().flatten().ok_or_else(|| anyhow!("сообщение не найдено"))?;
-    let media = msg.media().ok_or_else(|| anyhow!("в сообщении нет вложения"))?;
+    let msg = msgs.into_iter().next().flatten().ok_or_else(|| anyhow!(tr!("сообщение не найдено", "message not found")))?;
+    let media = msg.media().ok_or_else(|| anyhow!(tr!("в сообщении нет вложения", "the message has no attachment")))?;
     let name = match &media {
         Media::Photo(p) => format!("photo_{}.jpg", p.id()),
         Media::Sticker(_) => format!("sticker_{id}.webp"),
@@ -683,7 +731,7 @@ pub async fn save_attachment(
                 }
             }
         }
-        _ => return Err(anyhow!("это вложение нельзя скачать")),
+        _ => return Err(anyhow!(tr!("это вложение нельзя скачать", "this attachment cannot be downloaded"))),
     };
     let dir = download_dir();
     std::fs::create_dir_all(&dir)?;
@@ -699,11 +747,11 @@ pub async fn save_attachment(
             file.write_all(&chunk).await?;
             done += chunk.len();
             let pct = total.filter(|t| *t > 0).map(|t| (done as u64 * 100 / t as u64).min(100));
-            if let Some(p) = pct {
-                if p / 5 != last_pct / 5 {
-                    last_pct = p;
-                    let _ = events.send(Event::Status(format!("Скачиваю {short}: {p}%")));
-                }
+            if let Some(p) = pct
+                && p / 5 != last_pct / 5
+            {
+                last_pct = p;
+                let _ = events.send(Event::Status(trf!("Скачиваю {short}: {p}%", "Downloading {short}: {p}%")));
             }
         }
         file.flush().await?;
@@ -727,15 +775,15 @@ pub async fn save_attachment(
 pub const MAX_UPLOAD: u64 = 2000 * 1024 * 1024;
 
 pub async fn send_file(client: &Client, chat: &ChatInfo, path: &Path, caption: &str) -> Result<ChatMsg> {
-    let meta = std::fs::metadata(path).map_err(|e| anyhow!("не удалось открыть файл: {e}"))?;
+    let meta = std::fs::metadata(path).map_err(|e| anyhow!(trf!("не удалось открыть файл: {e}", "could not open file: {e}")))?;
     if !meta.is_file() {
-        return Err(anyhow!("это не файл"));
+        return Err(anyhow!(tr!("это не файл", "this is not a file")));
     }
     if meta.len() == 0 {
-        return Err(anyhow!("файл пустой"));
+        return Err(anyhow!(tr!("файл пустой", "the file is empty")));
     }
     if meta.len() > MAX_UPLOAD {
-        return Err(anyhow!("файл больше 2 ГБ, Telegram его не примет"));
+        return Err(anyhow!(tr!("файл больше 2 ГБ, Telegram его не примет", "file is larger than 2 GB, Telegram will not accept it")));
     }
     let up = client.upload_file(path).await.map_err(|e| anyhow!("{e}"))?;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -763,7 +811,7 @@ pub async fn list_scheduled(client: &Client, chat: &ChatInfo) -> Result<Vec<Sche
         .filter_map(|m| match m {
             tl::enums::Message::Message(x) => {
                 let text = crate::util::clean(&x.message);
-                let text = if x.media.is_some() { format!("[вложение] {text}") } else { text };
+                let text = if x.media.is_some() { trf!("[вложение] {text}", "[attachment] {text}") } else { text };
                 Some(ScheduledMsg { id: x.id, date: i64::from(x.date), text: text.trim().to_string() })
             }
             _ => None,
@@ -805,7 +853,7 @@ pub async fn load_pinned(client: &Client, chat: &ChatInfo) -> Result<Option<Stri
     Ok(msgs.into_iter().find_map(|m| match m {
         tl::enums::Message::Message(x) => {
             let t = crate::util::clean(&x.message).replace('\n', " ");
-            Some(if t.trim().is_empty() { "[вложение]".to_string() } else { t.trim().to_string() })
+            Some(if t.trim().is_empty() { tr!("[вложение]", "[attachment]").to_string() } else { t.trim().to_string() })
         }
         _ => None,
     }))
@@ -828,7 +876,7 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                 Ok(s) => s,
                 Err(e) => {
                     log(&format!("stream_updates: {e}"));
-                    let _ = events.send(Event::Error(format!("не удалось получать обновления: {e}")));
+                    let _ = events.send(Event::Error(trf!("не удалось получать обновления: {e}", "failed to receive updates: {e}")));
                     return;
                 }
             };
@@ -837,7 +885,7 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                 let update = stream.next().await;
                 if was_down && update.is_ok() {
                     was_down = false;
-                    let _ = events.send(Event::Status("связь восстановлена".into()));
+                    let _ = events.send(Event::Status(tr!("связь восстановлена", "connection restored").into()));
                 }
                 match update {
                     Ok(Update::NewMessage(m)) => {
@@ -868,7 +916,8 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                     Err(e) => {
                         log(&format!("updates: {e}"));
                         was_down = true;
-                        let _ = events.send(Event::Status(format!("связь потеряна: {e}; переподключаюсь…")));
+                        let _ = events
+                            .send(Event::Status(trf!("связь потеряна: {e}; переподключаюсь…", "connection lost: {e}; reconnecting…")));
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
@@ -890,7 +939,7 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                             }
                             Err(e) => {
                                 log(&format!("dialogs: {e}"));
-                                let _ = events.send(Event::Error(format!("список чатов: {e}")));
+                                let _ = events.send(Event::Error(trf!("список чатов: {e}", "chat list: {e}")));
                                 return;
                             }
                         }
@@ -920,7 +969,7 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                             }
                             Err(e) => {
                                 log(&format!("history: {e}"));
-                                let _ = events.send(Event::Error(format!("история: {e}")));
+                                let _ = events.send(Event::Error(trf!("история: {e}", "history: {e}")));
                             }
                         }
                     });
@@ -931,11 +980,12 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                     tokio::spawn(async move {
                         match save_attachment(&client, &chat, id, &events).await {
                             Ok(p) => {
-                                let _ = events.send(Event::Status(format!("Сохранено: {}", p.display())));
+                                let _ = events.send(Event::Status(trf!("Сохранено: {}", "Saved: {}", p.display())));
                             }
                             Err(e) => {
                                 log(&format!("save: {e}"));
-                                let _ = events.send(Event::Error(format!("не скачано: {}", friendly_error(&e.to_string()))));
+                                let _ =
+                                    events.send(Event::Error(trf!("не скачано: {}", "not downloaded: {}", friendly_error(&e.to_string()))));
                             }
                         }
                     });
@@ -944,14 +994,15 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                     let client = client.clone();
                     let events = events.clone();
                     tokio::spawn(async move {
-                        let _ = events.send(Event::Status("Загружаю файл…".into()));
+                        let _ = events.send(Event::Status(tr!("Загружаю файл…", "Uploading file…").into()));
                         match send_file(&client, &chat, &path, &caption).await {
                             Ok(msg) => {
                                 let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: false });
                             }
                             Err(e) => {
                                 log(&format!("send_file: {e}"));
-                                let _ = events.send(Event::Error(format!("не отправлено: {}", friendly_error(&e.to_string()))));
+                                let _ =
+                                    events.send(Event::Error(trf!("не отправлено: {}", "not sent: {}", friendly_error(&e.to_string()))));
                             }
                         }
                     });
@@ -966,36 +1017,37 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                             }
                             Err(e) => {
                                 log(&format!("scheduled: {e}"));
-                                let _ = events.send(Event::Error(format!("отложенные: {}", friendly_error(&e.to_string()))));
+                                let _ = events.send(Event::Error(trf!("отложенные: {}", "scheduled: {}", friendly_error(&e.to_string()))));
                             }
                         }
                     });
                 }
                 Cmd::DeleteScheduled { chat, id } => {
                     let r = client
-                        .invoke(&tl::functions::messages::DeleteScheduledMessages { peer: tl::enums::InputPeer::from(chat.peer), id: vec![id] })
+                        .invoke(&tl::functions::messages::DeleteScheduledMessages {
+                            peer: tl::enums::InputPeer::from(chat.peer),
+                            id: vec![id],
+                        })
                         .await;
                     match r {
                         Ok(_) => {
-                            let _ = events.send(Event::Status("Отложенное сообщение отменено".into()));
+                            let _ = events.send(Event::Status(tr!("Отложенное сообщение отменено", "Scheduled message cancelled").into()));
                         }
                         Err(e) => {
                             log(&format!("delete scheduled: {e}"));
-                            let _ = events.send(Event::Error(format!("не отменено: {}", friendly_error(&e.to_string()))));
+                            let _ = events.send(Event::Error(trf!("не отменено: {}", "not cancelled: {}", friendly_error(&e.to_string()))));
                         }
                     }
                 }
-                Cmd::Forward { src, dst, id } => {
-                    match client.forward_messages(dst.peer, &[id], src.peer).await {
-                        Ok(_) => {
-                            let _ = events.send(Event::Status(format!("Переслано в «{}»", dst.name)));
-                        }
-                        Err(e) => {
-                            log(&format!("forward: {e}"));
-                            let _ = events.send(Event::Error(format!("не переслано: {}", friendly_error(&e.to_string()))));
-                        }
+                Cmd::Forward { src, dst, id } => match client.forward_messages(dst.peer, &[id], src.peer).await {
+                    Ok(_) => {
+                        let _ = events.send(Event::Status(trf!("Переслано в «{}»", "Forwarded to «{}»", dst.name)));
                     }
-                }
+                    Err(e) => {
+                        log(&format!("forward: {e}"));
+                        let _ = events.send(Event::Error(trf!("не переслано: {}", "not forwarded: {}", friendly_error(&e.to_string()))));
+                    }
+                },
                 Cmd::Send { chat, text, markdown, delay_minutes, reply_to } => {
                     match send(&client, &chat, &text, markdown, delay_minutes, reply_to).await {
                         Ok(msg) => {
@@ -1003,7 +1055,7 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                         Err(e) => {
                             log(&format!("send: {e}"));
-                            let _ = events.send(Event::Error(format!("не отправлено: {}", friendly_error(&e.to_string()))));
+                            let _ = events.send(Event::Error(trf!("не отправлено: {}", "not sent: {}", friendly_error(&e.to_string()))));
                             let _ = events.send(Event::SendFailed { text });
                         }
                     }
@@ -1015,28 +1067,28 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                             let m = ChatMsg {
                                 id,
                                 outgoing: true,
-                                sender: "Я".into(),
-                                text: crate::util::clean_or(&text, "[эмодзи]"),
+                                sender: tr!("Я", "Me").into(),
+                                text: crate::util::clean_or(&text, tr!("[эмодзи]", "[emoji]")),
                                 edited: true,
                                 ..Default::default()
                             };
                             let _ = events.send(Event::Edited { chat: chat.id, msg: m });
-                            let _ = events.send(Event::Status("Сообщение исправлено".into()));
+                            let _ = events.send(Event::Status(tr!("Сообщение исправлено", "Message edited").into()));
                         }
                         Err(e) => {
                             log(&format!("edit: {e}"));
-                            let _ = events.send(Event::Error(format!("не исправлено: {}", friendly_error(&e.to_string()))));
+                            let _ = events.send(Event::Error(trf!("не исправлено: {}", "not edited: {}", friendly_error(&e.to_string()))));
                         }
                     }
                 }
                 Cmd::Delete { chat, id } => match client.delete_messages(chat.peer, &[id]).await {
                     Ok(_) => {
                         let _ = events.send(Event::Deleted { chat: Some(chat.id), ids: vec![id] });
-                        let _ = events.send(Event::Status("Сообщение удалено".into()));
+                        let _ = events.send(Event::Status(tr!("Сообщение удалено", "Message deleted").into()));
                     }
                     Err(e) => {
                         log(&format!("delete: {e}"));
-                        let _ = events.send(Event::Error(format!("не удалено: {}", friendly_error(&e.to_string()))));
+                        let _ = events.send(Event::Error(trf!("не удалено: {}", "not deleted: {}", friendly_error(&e.to_string()))));
                     }
                 },
                 Cmd::MarkRead(chat) => {
@@ -1212,20 +1264,14 @@ mod tests {
     #[test]
     fn typing_updates_are_recognised() {
         use tl::enums::SendMessageAction as A;
-        let user = tl::enums::Update::UserTyping(tl::types::UpdateUserTyping {
-            user_id: 5,
-            top_msg_id: None,
-            action: A::SendMessageTypingAction,
-        });
+        let user =
+            tl::enums::Update::UserTyping(tl::types::UpdateUserTyping { user_id: 5, top_msg_id: None, action: A::SendMessageTypingAction });
         let (chat, from, kind) = typing_from_raw(&user).unwrap();
         assert_eq!(chat, PeerId::user(5).unwrap());
         assert!(from.is_none());
         assert_eq!(kind, TypingKind::Text);
-        let stop = tl::enums::Update::UserTyping(tl::types::UpdateUserTyping {
-            user_id: 5,
-            top_msg_id: None,
-            action: A::SendMessageCancelAction,
-        });
+        let stop =
+            tl::enums::Update::UserTyping(tl::types::UpdateUserTyping { user_id: 5, top_msg_id: None, action: A::SendMessageCancelAction });
         assert_eq!(typing_from_raw(&stop).unwrap().2, TypingKind::Stop);
         let voice = tl::enums::Update::UserTyping(tl::types::UpdateUserTyping {
             user_id: 5,

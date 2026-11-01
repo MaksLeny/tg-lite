@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+mod i18n;
 mod lock;
 mod proxy;
 mod settings;
@@ -46,60 +48,85 @@ fn ask_secret(prompt: &str) -> Result<String> {
 
 /// Первый запуск: ключи API (если не вшиты в сборку) и пароль приложения любой длины.
 fn first_run_setup() -> Result<(i32, String, String)> {
+    // Шаг 1: язык (если ещё не выбран раньше).
+    if !data_dir().join("tglite.lang").exists() {
+        println!("Tg-Lite {}\n", env!("CARGO_PKG_VERSION"));
+        println!("Step 1/4. Language / Язык:  1) Русский   2) English");
+        let choice = ask("> ")?;
+        i18n::set(u8::from(choice.trim() == "2" || choice.trim().eq_ignore_ascii_case("en")));
+        i18n::save();
+    }
+    println!("\n{}", tr!("Первый запуск: четыре коротких шага.", "First run: four short steps."));
     let (api_id, api_hash) = match embedded_keys() {
         Some(k) => k,
         None => {
-            println!("Первый запуск. Нужны api_id и api_hash с https://my.telegram.org (раздел API development tools).");
-            let api_id: i32 = ask("api_id: ")?.parse().map_err(|_| anyhow!("api_id должен быть числом"))?;
+            println!("\n{}", tr!("Шаг 2/4. Ключи Telegram (api_id и api_hash).", "Step 2/4. Telegram keys (api_id and api_hash)."));
+            println!(
+                "{}",
+                tr!(
+                    "  1) Откройте https://my.telegram.org и войдите по номеру телефона.\n  2) Выберите «API development tools» и создайте приложение (название любое).\n  3) Скопируйте api_id (число) и api_hash (длинная строка) и вставьте их ниже (Ctrl+V или правая кнопка мыши).",
+                    "  1) Open https://my.telegram.org and sign in with your phone number.\n  2) Choose \"API development tools\" and create an app (any name).\n  3) Copy api_id (a number) and api_hash (a long string) and paste them below (Ctrl+V or right-click)."
+                )
+            );
+            let api_id: i32 = ask("api_id: ")?.parse().map_err(|_| anyhow!(tr!("api_id должен быть числом", "api_id must be a number")))?;
             let api_hash = ask("api_hash: ")?;
             if api_hash.len() < 16 {
-                return Err(anyhow!("api_hash выглядит неправильно"));
+                return Err(anyhow!(tr!("api_hash выглядит неправильно", "api_hash looks wrong")));
             }
             (api_id, api_hash)
         }
     };
-    println!("\nПридумайте пароль приложения (любой длины, даже один символ). Им шифруется всё, включая вход в Telegram.");
-    println!("Забытый пароль восстановить нельзя: придётся входить в аккаунт заново.");
+    println!("\n{}", tr!("Шаг 3/4. Пароль приложения.", "Step 3/4. App password."));
+    println!(
+        "{}",
+        tr!(
+            "Придумайте пароль (любой длины, даже один символ). Им шифруется всё, включая вход в Telegram. При вводе символы не показываются.",
+            "Choose a password (any length, even one character). It encrypts everything, including your Telegram login. Characters are not shown while you type."
+        )
+    );
+    println!(
+        "{}",
+        tr!(
+            "Забытый пароль восстановить нельзя: придётся входить в аккаунт заново.",
+            "A forgotten password cannot be recovered: you will have to sign in to your account again."
+        )
+    );
     let password = loop {
-        let p1 = ask_secret("Пароль: ")?;
+        let p1 = ask_secret(tr!("Пароль: ", "Password: "))?;
         if p1.is_empty() {
-            println!("Пароль не может быть пустым.");
+            println!("{}", tr!("Пароль не может быть пустым.", "The password cannot be empty."));
             continue;
         }
-        let p2 = ask_secret("Повторите пароль: ")?;
+        let p2 = ask_secret(tr!("Повторите пароль: ", "Repeat password: "))?;
         if p1 == p2 {
             break p1;
         }
-        println!("Пароли не совпали, ещё раз.");
+        println!("{}", tr!("Пароли не совпали, ещё раз.", "Passwords do not match, try again."));
     };
     Ok((api_id, api_hash, password))
 }
 
 async fn sign_in_flow(client: &grammers_client::Client, api_hash: &str) -> Result<()> {
-    println!("\nВход в Telegram.");
-    let phone = ask("Номер телефона (+79001234567): ")?;
+    println!("\n{}", tr!("Шаг 4/4. Вход в Telegram.", "Step 4/4. Signing in to Telegram."));
+    let phone = ask(tr!("Номер телефона (+79001234567): ", "Phone number (+15551234567): "))?;
     let token = client.request_login_code(&phone, api_hash).await.map_err(|e| anyhow!("{e}"))?;
-    let code = ask("Код из Telegram (придёт в приложение или SMS): ")?;
+    let code = ask(tr!("Код из Telegram (придёт в приложение или SMS): ", "Telegram code (sent to the app or by SMS): "))?;
     match client.sign_in(&token, &code).await {
         Ok(_) => {}
         Err(SignInError::PasswordRequired(pt)) => {
-            let hint = pt.hint().unwrap_or("нет").to_string();
-            let pw = ask_secret(&format!("Облачный пароль Telegram (подсказка: {hint}): "))?;
+            let hint = pt.hint().unwrap_or(tr!("нет", "none")).to_string();
+            let pw = ask_secret(&trf!("Облачный пароль Telegram (подсказка: {hint}): ", "Telegram cloud password (hint: {hint}): "))?;
             client.check_password(pt, pw.trim()).await.map_err(|e| anyhow!("{e}"))?;
         }
-        Err(SignInError::InvalidCode) => return Err(anyhow!("неверный код")),
+        Err(SignInError::InvalidCode) => return Err(anyhow!(tr!("неверный код", "invalid code"))),
         Err(e) => return Err(anyhow!("{e}")),
     }
-    println!("Вход выполнен.");
+    println!("{}", tr!("Вход выполнен.", "Signed in."));
     Ok(())
 }
 
 /// Пробует подключиться по очереди всеми подходящими маршрутами. Возвращает рабочее подключение.
-async fn connect_auto(
-    session: &Arc<VaultSession>,
-    api_id: i32,
-    routes: &[Route],
-) -> Option<(tg::Connection, bool)> {
+async fn connect_auto(session: &Arc<VaultSession>, api_id: i32, routes: &[Route]) -> Option<(tg::Connection, bool)> {
     for route in routes {
         let url = match route {
             Route::Direct => None,
@@ -112,7 +139,7 @@ async fn connect_auto(
                 }
             },
         };
-        println!("Подключаюсь к Telegram {}…", route.label());
+        println!("{}", trf!("Подключаюсь к Telegram {}…", "Connecting to Telegram {}…", route.label()));
         util::debug(&format!("trying route {}", route.label()));
         let conn = tg::connect(Arc::clone(session), api_id, url);
         match tokio::time::timeout(Duration::from_secs(12), conn.client.is_authorized()).await {
@@ -130,17 +157,17 @@ async fn connect_auto(
 
 /// Запрос пароля обычной строкой (запасной вариант без экрана входа).
 fn console_login(vault: &VaultFile) -> Result<(vault::Secrets, String)> {
-    println!("Tg-Lite {} · файл данных: {}", env!("CARGO_PKG_VERSION"), vault.path().display());
+    println!("{}", trf!("Tg-Lite {} · файл данных: {}", "Tg-Lite {} · data file: {}", env!("CARGO_PKG_VERSION"), vault.path().display()));
     let mut tries = 0;
     loop {
-        let pw = ask_secret("Пароль: ")?;
+        let pw = ask_secret(tr!("Пароль: ", "Password: "))?;
         match vault.load(&pw) {
             Ok(s) => return Ok((s, pw)),
             Err(e) => {
                 tries += 1;
                 println!("{e}");
                 if tries >= 5 {
-                    return Err(anyhow!("слишком много неверных попыток"));
+                    return Err(anyhow!(tr!("слишком много неверных попыток", "too many wrong attempts")));
                 }
             }
         }
@@ -148,6 +175,7 @@ fn console_login(vault: &VaultFile) -> Result<(vault::Secrets, String)> {
 }
 
 async fn run() -> Result<()> {
+    i18n::load();
     let vault = VaultFile::new(data_dir().join("tglite.vault"));
 
     // 1. Пароль, ключи и настройки. Вход идёт на экране с анимированным фоном;
@@ -157,7 +185,7 @@ async fn run() -> Result<()> {
         let (s, pw) = match lock::login(&vault, env!("CARGO_PKG_VERSION"), accent)? {
             lock::Login::Ok(s, pw) => (*s, pw),
             lock::Login::Quit => return Ok(()),
-            lock::Login::TooMany => return Err(anyhow!("слишком много неверных попыток")),
+            lock::Login::TooMany => return Err(anyhow!(tr!("слишком много неверных попыток", "too many wrong attempts"))),
             lock::Login::NoTerminal => console_login(&vault)?,
         };
         (s.api_id, s.api_hash, pw, s.session, s.settings)
@@ -165,6 +193,8 @@ async fn run() -> Result<()> {
         let (id, hash, pw) = first_run_setup()?;
         (id, hash, pw, SessionBlob::default(), Settings::default())
     };
+
+    settings.lang = i18n::current();
 
     // Прокси, заданный вручную в версии 0.0.2 (proxy.txt), переезжает в настройки.
     let legacy = data_dir().join("proxy.txt");
@@ -187,13 +217,25 @@ async fn run() -> Result<()> {
             break found;
         }
         // Ни один маршрут не сработал: последняя возможность — подсказать адрес вручную.
-        println!("\nНе удалось подключиться к Telegram ни одним способом.");
-        println!("Проверьте интернет и VPN. Если VPN работает через прокси, введите его адрес,");
-        println!("например 127.0.0.1:10808 (Enter — повторить попытку, 0 — без прокси, q — выйти).");
-        let a = ask("Прокси: ")?;
+        println!("\n{}", tr!("Не удалось подключиться к Telegram ни одним способом.", "Could not connect to Telegram by any route."));
+        println!(
+            "{}",
+            tr!(
+                "Проверьте интернет и VPN. Если VPN работает через прокси, введите его адрес,",
+                "Check your internet and VPN. If your VPN works through a proxy, enter its address,"
+            )
+        );
+        println!(
+            "{}",
+            tr!(
+                "например 127.0.0.1:10808 (Enter — повторить попытку, 0 — без прокси, q — выйти).",
+                "e.g. 127.0.0.1:10808 (Enter - retry, 0 - no proxy, q - quit)."
+            )
+        );
+        let a = ask(tr!("Прокси: ", "Proxy: "))?;
         let mut s = saver.settings();
         match a.as_str() {
-            "q" | "Q" => return Err(anyhow!("подключение отменено")),
+            "q" | "Q" => return Err(anyhow!(tr!("подключение отменено", "connection cancelled"))),
             "" => {}
             "0" => s.proxy_mode = ProxyMode::Off,
             other => {
@@ -224,14 +266,22 @@ async fn run() -> Result<()> {
     let _ = saver.save();
     quit_handle.quit();
     if saver.is_wiped() {
-        println!("Данные Tg-Lite удалены (слишком много неверных паролей).");
-        println!("Чтобы закрыть доступ к аккаунту, завершите эту сессию в Telegram: Настройки → Устройства.");
+        println!("{}", tr!("Данные Tg-Lite удалены (слишком много неверных паролей).", "Tg-Lite data deleted (too many wrong passwords)."));
+        println!(
+            "{}",
+            tr!(
+                "Чтобы закрыть доступ к аккаунту, завершите эту сессию в Telegram: Настройки → Устройства.",
+                "To block access to your account, end this session in Telegram: Settings → Devices."
+            )
+        );
         std::thread::sleep(Duration::from_secs(4));
     }
     result
 }
 
-const HELP: &str = "Tg-Lite: лёгкий клиент Telegram для терминала.
+fn help() -> &'static str {
+    tr!(
+        "Tg-Lite: лёгкий клиент Telegram для терминала.
 
 Использование: tg-lite [параметры]
   --debug      подробный журнал в tglite.log (без текстов переписки)
@@ -239,10 +289,22 @@ const HELP: &str = "Tg-Lite: лёгкий клиент Telegram для терм�
   --help       эта справка
 
 Папка данных (tglite.vault, tglite.log, downloads, export) рядом с программой;
-другую можно задать переменной окружения TGLITE_DIR.";
+другую можно задать переменной окружения TGLITE_DIR.",
+        "Tg-Lite: a lightweight Telegram client for the terminal.
+
+Usage: tg-lite [options]
+  --debug      verbose log in tglite.log (no message texts)
+  --version    show the version
+  --help       this help
+
+The data folder (tglite.vault, tglite.log, downloads, export) is next to the program;
+set the TGLITE_DIR environment variable to use another one."
+    )
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    i18n::load();
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--version" | "-V" => {
@@ -250,12 +312,12 @@ async fn main() {
                 return;
             }
             "--help" | "-h" | "/?" => {
-                println!("{HELP}");
+                println!("{}", help());
                 return;
             }
             "--debug" => util::set_debug(true),
             other => {
-                eprintln!("Неизвестный параметр: {other}\n\n{HELP}");
+                eprintln!("{}\n\n{}", trf!("Неизвестный параметр: {other}", "Unknown option: {other}"), help());
                 return;
             }
         }
@@ -263,8 +325,8 @@ async fn main() {
     util::debug(&format!("start {}", env!("CARGO_PKG_VERSION")));
     if let Err(e) = run().await {
         log(&format!("fatal: {e}"));
-        eprintln!("\nОшибка: {e}");
-        eprint!("Нажмите Enter, чтобы закрыть…");
+        eprintln!("\n{}", trf!("Ошибка: {e}", "Error: {e}"));
+        eprint!("{}", tr!("Нажмите Enter, чтобы закрыть…", "Press Enter to close…"));
         let _ = io::stderr().flush();
         let mut s = String::new();
         let _ = io::stdin().read_line(&mut s);

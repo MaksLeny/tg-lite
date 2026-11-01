@@ -13,6 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 use crate::settings::{ProxyMode, Settings};
+use crate::{tr, trf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -26,9 +27,9 @@ pub enum Route {
 impl Route {
     pub fn label(&self) -> String {
         match self {
-            Route::Direct => "напрямую".to_string(),
-            Route::Socks5(a) => format!("через SOCKS5-прокси {a}"),
-            Route::HttpBridge(a) => format!("через HTTP-прокси {a}"),
+            Route::Direct => tr!("напрямую", "directly").to_string(),
+            Route::Socks5(a) => trf!("через SOCKS5-прокси {a}", "via SOCKS5 proxy {a}"),
+            Route::HttpBridge(a) => trf!("через HTTP-прокси {a}", "via HTTP proxy {a}"),
         }
     }
 }
@@ -257,13 +258,13 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
     let mut head = [0u8; 2];
     client.read_exact(&mut head).await?;
     if head[0] != 5 {
-        return Err(io::Error::other("не SOCKS5"));
+        return Err(io::Error::other(tr!("не SOCKS5", "not SOCKS5")));
     }
     let mut methods = vec![0u8; head[1] as usize];
     client.read_exact(&mut methods).await?;
     if !methods.contains(&0) {
         client.write_all(&[5, 0xFF]).await?;
-        return Err(io::Error::other("нужна авторизация"));
+        return Err(io::Error::other(tr!("нужна авторизация", "authentication required")));
     }
     client.write_all(&[5, 0]).await?;
 
@@ -272,7 +273,7 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
     client.read_exact(&mut req).await?;
     if req[0] != 5 || req[1] != 1 {
         client.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
-        return Err(io::Error::other("поддерживается только CONNECT"));
+        return Err(io::Error::other(tr!("поддерживается только CONNECT", "only CONNECT is supported")));
     }
     let host = match req[3] {
         1 => {
@@ -294,7 +295,7 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
         }
         _ => {
             client.write_all(&[5, 8, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
-            return Err(io::Error::other("неизвестный тип адреса"));
+            return Err(io::Error::other(tr!("неизвестный тип адреса", "unknown address type")));
         }
     };
     let mut port = [0u8; 2];
@@ -310,9 +311,7 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
         }
     };
     let target = format!("{host}:{port}");
-    upstream
-        .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\n\r\n").as_bytes())
-        .await?;
+    upstream.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\n\r\n").as_bytes()).await?;
 
     // Читаем ответ до пустой строки по одному байту, чтобы не «съесть» данные туннеля.
     let mut resp = Vec::with_capacity(256);
@@ -320,14 +319,14 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
     while !resp.ends_with(b"\r\n\r\n") {
         if resp.len() > 8192 || upstream.read(&mut b).await? == 0 {
             client.write_all(&[5, 1, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
-            return Err(io::Error::other("прокси закрыл соединение"));
+            return Err(io::Error::other(tr!("прокси закрыл соединение", "proxy closed the connection")));
         }
         resp.push(b[0]);
     }
     let status_ok = resp.starts_with(b"HTTP/1.") && resp.get(9..12) == Some(b"200");
     if !status_ok {
         client.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
-        return Err(io::Error::other("прокси отказал в соединении"));
+        return Err(io::Error::other(tr!("прокси отказал в соединении", "proxy refused the connection")));
     }
     client.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
@@ -496,9 +495,12 @@ mod tests {
             l.local_addr().unwrap().to_string()
         };
         let routes = vec![
-            Route::Socks5(socks.clone()), Route::HttpBridge(socks.clone()), // смешанный порт -> только SOCKS5
-            Route::Socks5(http.clone()), Route::HttpBridge(http.clone()),   // HTTP-прокси -> только мост
-            Route::Socks5(dead.clone()), Route::HttpBridge(dead.clone()),   // мёртвый -> ничего
+            Route::Socks5(socks.clone()),
+            Route::HttpBridge(socks.clone()), // смешанный порт -> только SOCKS5
+            Route::Socks5(http.clone()),
+            Route::HttpBridge(http.clone()), // HTTP-прокси -> только мост
+            Route::Socks5(dead.clone()),
+            Route::HttpBridge(dead.clone()), // мёртвый -> ничего
             Route::Direct,
         ];
         let got = resolve_routes(routes).await;

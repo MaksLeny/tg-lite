@@ -8,10 +8,7 @@ pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("TGLITE_DIR") {
         return PathBuf::from(d);
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Звуковой сигнал о новом сообщении. На Windows играет тон через звуковую карту (функция Beep),
@@ -43,10 +40,10 @@ const MAX_LOG_BYTES: u64 = 200 * 1024;
 pub fn log(msg: &str) {
     let dir = data_dir();
     let path = dir.join("tglite.log");
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > MAX_LOG_BYTES {
-            let _ = std::fs::rename(&path, dir.join("tglite.old.log"));
-        }
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() > MAX_LOG_BYTES
+    {
+        let _ = std::fs::rename(&path, dir.join("tglite.old.log"));
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::system());
@@ -56,10 +53,7 @@ pub fn log(msg: &str) {
 
 /// Имя файла из названия чата: только буквы, цифры, пробел, `-` и `_`.
 pub fn safe_filename(name: &str) -> String {
-    let s: String = name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
-        .collect();
+    let s: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
     let s = s.trim().chars().take(40).collect::<String>();
     if s.is_empty() { "chat".to_string() } else { s }
 }
@@ -115,7 +109,8 @@ pub fn extract_links(text: &str) -> Vec<String> {
     for tok in text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '«' | '»')) {
         let t = tok.trim_start_matches(['(', '[', '\'']);
         let lower = t.to_lowercase();
-        let is_link = lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("t.me/") || lower.starts_with("www.");
+        let is_link =
+            lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("t.me/") || lower.starts_with("www.");
         if !is_link {
             continue;
         }
@@ -266,10 +261,10 @@ pub fn clipboard_text() -> Option<String> {
             ("pbpaste", &[]),
         ];
         for (prog, args) in tools {
-            if let Ok(out) = std::process::Command::new(prog).args(args).output() {
-                if out.status.success() {
-                    return Some(String::from_utf8_lossy(&out.stdout).into_owned());
-                }
+            if let Ok(out) = std::process::Command::new(prog).args(args).output()
+                && out.status.success()
+            {
+                return Some(String::from_utf8_lossy(&out.stdout).into_owned());
             }
         }
         None
@@ -358,7 +353,8 @@ mod tests {
 
     #[test]
     fn links_are_extracted_cleanly() {
-        let t = "Смотри https://example.com/a?b=1&c=2, ещё (https://rust-lang.org). и t.me/durov! www.site.ru/x https://example.com/a?b=1&c=2";
+        let t =
+            "Смотри https://example.com/a?b=1&c=2, ещё (https://rust-lang.org). и t.me/durov! www.site.ru/x https://example.com/a?b=1&c=2";
         assert_eq!(
             extract_links(t),
             vec!["https://example.com/a?b=1&c=2", "https://rust-lang.org", "https://t.me/durov", "https://www.site.ru/x"]
