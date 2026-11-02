@@ -1,8 +1,19 @@
 <div align="center">
 
+<img src="docs/logo.png" alt="Tg-Lite" width="128" height="128">
+
 # Tg-Lite
 
+<a href="https://github.com/MaksLeny/tg-lite/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/MaksLeny/tg-lite?style=flat-square&color=2AABEE"></a>
+<a href="https://github.com/MaksLeny/tg-lite/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/MaksLeny/tg-lite/total?style=flat-square&color=2AABEE"></a>
+<a href="https://github.com/MaksLeny/tg-lite/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/MaksLeny/tg-lite/ci.yml?style=flat-square&label=CI"></a>
+<img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-555?style=flat-square">
+<img alt="memory" src="https://img.shields.io/badge/RAM-~3%20MB-brightgreen?style=flat-square">
+<a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
+
 **A tiny Telegram client for the terminal. One ~3.8 MB exe, about 3 MB of RAM.**
+
+[Download](https://github.com/MaksLeny/tg-lite/releases/latest) • [Quick start](#quick-start) • [Security](SECURITY.md) • [Changelog](CHANGELOG.md) • [Report a bug](https://github.com/MaksLeny/tg-lite/issues/new/choose)
 
 English · [Русский](#tg-lite-на-русском)
 
@@ -18,7 +29,7 @@ right in the console, and memory only holds what is on screen.
 > [grammers](https://github.com/Lonami/grammers) library. You need your own `api_id` and `api_hash` from <https://my.telegram.org>.
 
 ## Contents
-[Numbers](#numbers) · [Features](#features) · [Quick start](#quick-start) · [Keys and commands](#keys-and-commands) ·
+[Numbers](#numbers) · [Features](#features) · [Requirements](#requirements) · [Quick start](#quick-start) · [Keys and commands](#keys-and-commands) ·
 [Security](#security) · [Proxy](#proxy) · [Build](#build) · [FAQ](#faq) · [Limits](#limits) · [Roadmap](#roadmap) · [License](#license)
 
 ## Numbers
@@ -35,8 +46,7 @@ Measured on a Lenovo B550 (Pentium T4400, 2 GB DDR2, HDD, Windows 10 LTSC):
 | Size | one exe, **3.84 MB** (3934 KB) | tens of MB installed plus cache |
 | Installation | none, put the exe in any folder | installer |
 
-RAM is the "Memory (private working set)" column in Task Manager → Details. Other columns also count shared system
-libraries and show more.
+How it was measured: Tg-Lite 0.0.8 on Windows 10 LTSC, one account with the usual set of chats, Task Manager → Details, column "Memory (private working set)", reading taken after start and after 10–15 minutes of use. The figures were not re-measured on 1.0.0 (no big changes in how chats are held in memory are expected, but check on your own PC). It is not a fully like-for-like comparison: Tg-Lite is text-only and does less than Telegram Desktop. Other columns also count shared system libraries and show more.
 
 ¹ Telegram Desktop figures are user reports, not lab measurements: [tdesktop #30151](https://github.com/telegramdesktop/tdesktop/issues/30151)
 ("starts use RAM up to 2.0-2.5gb", "less than 800mb" after a restart). The real value depends a lot on how many chats
@@ -86,9 +96,18 @@ which is the main reason it is so small.
 </tr>
 </table>
 
+## Requirements
+
+| | |
+|---|---|
+| OS | Windows 10 / 11, 64-bit (tested on Windows 10 LTSC). Windows 7/8 are not tested and not promised |
+| Terminal | Windows Terminal or cmd (Consolas font recommended) |
+| Network | direct connection, or a SOCKS5 / HTTP proxy (see [Proxy](#proxy)) |
+| Rust | only if you build it yourself |
+
 ## Quick start
 
-1. Download `tg-lite.exe` from [Releases](../../releases) (or the CI artifact), and check it: `Get-FileHash tg-lite.exe -Algorithm SHA256` must match `tg-lite.exe.sha256` (letter case does not matter).
+1. Download `tg-lite.exe` from [Releases](../../releases) (or the CI artifact), and check it: `Get-FileHash tg-lite.exe -Algorithm SHA256` must match the SHA256 in the release description or in `tg-lite.exe.sha256` if it is attached (letter case does not matter).
 2. Run it, best from Windows Terminal or cmd with the Consolas font.
 3. The first-run wizard has four steps (the language step is skipped if a language is already chosen, the keys step if the keys are built into the exe):
    1. choose the language;
@@ -134,6 +153,13 @@ Every action has both a key and a command, in case a key does not work in your c
 - Auto-lock after 1–60 minutes (or never) and on `F2`; the lock screen shows no messages.
 - Optional self-destruct: overwrite and delete `tglite.vault` after 3, 5 or 10 wrong passwords on the lock screen (off by default). Other files stay, and you should end the session in Telegram → Settings → Devices.
 - The log never contains message text. The chosen language is stored in `tglite.lang` (not secret).
+
+**Security model in short**
+
+- *What is stored locally?* Only `tglite.vault` (keys and Telegram session, encrypted) and `tglite.lang` (language). Messages are not stored.
+- *What if I delete `tglite.vault`?* The program forgets the keys and the session; sign in again. End the old session in Telegram → Settings → Devices.
+- *Is a third-party exe safe?* Not by default: the exe is unsigned. Download it only from this repository's Releases, compare SHA256 (shown in the CI job summary), or build it yourself.
+- *Was the code audited?* It was reviewed and tested by the author and by automated checks (clippy, `cargo audit`). This is not an independent professional security audit.
 
 Details and how to report a vulnerability: [SECURITY.md](SECURITY.md) (English and Russian).
 
@@ -198,9 +224,20 @@ photos, video and voice, tray mode, a reusable core crate.
 
 <div align="center">
 
+<img src="docs/logo.png" alt="Tg-Lite" width="128" height="128">
+
 # Tg-Lite на русском
 
+<a href="https://github.com/MaksLeny/tg-lite/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/MaksLeny/tg-lite?style=flat-square&color=2AABEE"></a>
+<a href="https://github.com/MaksLeny/tg-lite/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/MaksLeny/tg-lite/total?style=flat-square&color=2AABEE"></a>
+<a href="https://github.com/MaksLeny/tg-lite/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/MaksLeny/tg-lite/ci.yml?style=flat-square&label=CI"></a>
+<img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-555?style=flat-square">
+<img alt="memory" src="https://img.shields.io/badge/RAM-~3%20MB-brightgreen?style=flat-square">
+<a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
+
 **Крошечный клиент Telegram для терминала. Один exe около 3,8 МБ, около 3 МБ памяти.**
+
+[Скачать](https://github.com/MaksLeny/tg-lite/releases/latest) • [Быстрый старт](#быстрый-старт) • [Безопасность](SECURITY.md) • [История версий](CHANGELOG.md) • [Сообщить об ошибке](https://github.com/MaksLeny/tg-lite/issues/new/choose)
 
 [English](#tg-lite) · Русский
 
@@ -216,7 +253,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 > [grammers](https://github.com/Lonami/grammers). Нужны ваши собственные `api_id` и `api_hash` с <https://my.telegram.org>.
 
 ## Содержание
-[Цифры](#цифры) · [Возможности](#возможности) · [Быстрый старт](#быстрый-старт) · [Клавиши и команды](#клавиши-и-команды) ·
+[Цифры](#цифры) · [Возможности](#возможности) · [Требования](#требования) · [Быстрый старт](#быстрый-старт) · [Клавиши и команды](#клавиши-и-команды) ·
 [Безопасность](#безопасность) · [Прокси](#прокси) · [Сборка](#сборка) · [Если не работает](#если-не-работает) · [Ограничения](#ограничения) ·
 [Планы](#планы) · [Лицензия](#лицензия)
 
@@ -234,8 +271,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | Размер | один exe, **3,84 МБ** (3934 КБ) | десятки МБ установки плюс кэш |
 | Установка | не нужна, exe кладётся в любую папку | установщик |
 
-ОЗУ — столбец «Память (закрытый рабочий набор)» в Диспетчере задач → «Подробности». Другие столбцы учитывают и общие
-системные библиотеки, поэтому показывают больше.
+Как мерили: Tg-Lite 0.0.8, Windows 10 LTSC, один аккаунт с обычным набором чатов, Диспетчер задач → «Подробности», столбец «Память (закрытый рабочий набор)», значения сразу после запуска и через 10–15 минут работы. На 1.0.0 замеры не повторялись (сильных изменений в хранении чатов в памяти не ожидается, но проверьте на своём ПК). Сравнение не полностью равноценное: Tg-Lite показывает только текст и умеет меньше, чем Telegram Desktop. Другие столбцы учитывают и общие системные библиотеки, поэтому показывают больше.
 
 ¹ Данные по Telegram Desktop — отзывы пользователей, а не лабораторные замеры: [tdesktop #30151](https://github.com/telegramdesktop/tdesktop/issues/30151)
 («starts use RAM up to 2.0-2.5gb», после перезапуска «less than 800mb»). Реальный расход сильно зависит от числа чатов и
@@ -284,9 +320,18 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 </tr>
 </table>
 
+## Требования
+
+| | |
+|---|---|
+| ОС | Windows 10 / 11, 64 бита (проверено на Windows 10 LTSC). Windows 7/8 не проверялись и не обещаются |
+| Терминал | Windows Terminal или cmd (лучше шрифт Consolas) |
+| Сеть | прямое соединение или прокси SOCKS5 / HTTP (см. [Прокси](#прокси)) |
+| Rust | нужен только для самостоятельной сборки |
+
 ## Быстрый старт
 
-1. Скачайте `tg-lite.exe` из [Releases](../../releases) (или артефакт CI) и проверьте: `Get-FileHash tg-lite.exe -Algorithm SHA256` должен совпасть с `tg-lite.exe.sha256` (регистр букв не важен).
+1. Скачайте `tg-lite.exe` из [Releases](../../releases) (или артефакт CI) и проверьте: `Get-FileHash tg-lite.exe -Algorithm SHA256` должен совпасть с SHA256 из описания релиза или с `tg-lite.exe.sha256`, если он приложен (регистр букв не важен).
 2. Запустите, лучше из Windows Terminal или cmd со шрифтом Consolas.
 3. Мастер первого запуска — четыре шага (шаг языка пропускается, если язык уже выбран, шаг ключей — если ключи вшиты в exe):
    1. выбор языка;
@@ -332,6 +377,13 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Автоблокировка через 1–60 минут (или никогда) и по `F2`; на экране блокировки переписки нет.
 - Самоуничтожение по желанию: затереть и удалить `tglite.vault` после 3, 5 или 10 неверных паролей на экране блокировки (по умолчанию выключено). Остальные файлы остаются; завершите сессию в Telegram → Настройки → Устройства.
 - В журнале нет текстов сообщений. Выбранный язык хранится в `tglite.lang` (не секрет).
+
+**Модель безопасности кратко**
+
+- *Что хранится на диске?* Только `tglite.vault` (ключи и сессия Telegram, зашифрованы) и `tglite.lang` (язык). Сообщения не сохраняются.
+- *Что будет, если удалить `tglite.vault`?* Программа забудет ключи и сессию, войти нужно заново. Старую сессию завершите в Telegram → Настройки → Устройства.
+- *Безопасен ли чужой exe?* По умолчанию нет: exe не подписан. Скачивайте только из Releases этого репозитория, сверяйте SHA256 (виден в сводке CI) или собирайте сами.
+- *Был ли аудит кода?* Код проверен и протестирован автором и автоматикой (clippy, `cargo audit`). Это не независимый профессиональный аудит безопасности.
 
 Подробности и как сообщить об уязвимости: [SECURITY.md](SECURITY.md) (на русском и английском).
 
