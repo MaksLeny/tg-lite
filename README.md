@@ -25,7 +25,7 @@ right in the console, and memory only holds what is on screen.
 
 Measured on a Lenovo B550 (Pentium T4400, 2 GB DDR2, HDD, Windows 10 LTSC):
 
-| | Tg-Lite 0.0.8 | Telegram Desktop |
+| | Tg-Lite (measured on 0.0.8) | Telegram Desktop |
 |---|---|---|
 | RAM, chat screen right after start | **2.8 MB** | 800 MB and more¹ |
 | RAM after 10–15 minutes of use | **2.8 MB** | up to 2–2.5 GB after long use¹ |
@@ -60,7 +60,7 @@ which is the main reason it is so small.
 - Reply quotes, forwarded-from notes and "(edited)" marks. Photos, voice and files appear as labels such as `[photo]`, `[file report.pdf, 2 MB]`.
 
 **Files and links**
-- `/send path caption` uploads a file up to 2 GB (drag a file into the window to paste its path). jpg and png go as photos.
+- `/send path [caption]` uploads a file up to 2000 MB (drag a file into the window to paste its path). jpg, jpeg and png images under 10 MB go as photos, everything else as a file.
 - `/save` downloads an attachment to the `downloads` folder next to the exe, with progress in the status bar.
 - `/links` lists links of the chat, Enter opens one in the browser.
 
@@ -70,10 +70,10 @@ which is the main reason it is so small.
 **Comfort**
 - Paste works: `Ctrl+V`, `Shift+Insert`, the terminal's own paste, or `/paste`.
 - English and Russian interface (setting "Interface language", chosen at first start).
-- Animated login and lock backgrounds: Aurora, Matrix, Stars (or none).
-- Settings: auto-lock, proxy, sound, status, number of messages, accent color, widths, self-destruct, language, password.
-- `/faq` shows troubleshooting tips inside the program. `tg-lite --debug` writes a detailed `tglite.log` (never message text).
-- Emoji and invisible characters from other people's messages are hidden: the Windows console cannot draw them and the screen would fall apart.
+- Animated sign-in screen (always Aurora) and lock screen (Aurora, Matrix, Stars or none, your choice in settings).
+- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, password.
+- `/faq` shows troubleshooting tips inside the program. `tglite.log` records errors and `tg-lite --debug` makes it detailed (never message text).
+- Emoji, invisible characters and scripts other than Latin, Greek and Cyrillic are hidden: the Windows console cannot draw them and the screen would fall apart.
 
 <table>
 <tr>
@@ -88,9 +88,9 @@ which is the main reason it is so small.
 
 ## Quick start
 
-1. Download `tg-lite.exe` from [Releases](../../releases) (or the CI artifact), and check it: `Get-FileHash tg-lite.exe -Algorithm SHA256` must match `tg-lite.exe.sha256`.
+1. Download `tg-lite.exe` from [Releases](../../releases) (or the CI artifact), and check it: `Get-FileHash tg-lite.exe -Algorithm SHA256` must match `tg-lite.exe.sha256` (letter case does not matter).
 2. Run it, best from Windows Terminal or cmd with the Consolas font.
-3. The first-run wizard has four steps:
+3. The first-run wizard has four steps (the language step is skipped if a language is already chosen, the keys step if the keys are built into the exe):
    1. choose the language;
    2. enter `api_id` and `api_hash` (create an app at <https://my.telegram.org> → API development tools, then copy both values);
    3. choose an app password (any length, even one character);
@@ -111,7 +111,7 @@ Every action has both a key and a command, in case a key does not work in your c
 | Ctrl+V / Shift+Insert | `/paste` | paste from the clipboard |
 | ↑ / ↓, Tab / Shift+Tab | | choose a chat, switch tabs |
 | PgUp / PgDn | | scroll the conversation |
-| Esc | | clear the input (empty input: reset search) |
+| Esc | | clear the input; then cancel edit or reply; then reset search |
 | F1 | `/help` | help |
 | F2 | `/lock` | lock |
 | F3 | `/md` | Markdown on/off |
@@ -125,24 +125,24 @@ Every action has both a key and a command, in case a key does not work in your c
 | | `/send` `/save` `/links` | upload file, download attachment, links |
 | | `/passwd` `/proxy` `/faq` | change password, proxy, troubleshooting |
 
-`Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` also work, in any keyboard layout. `Alt+Enter` is not used (Windows gives it to full screen).
+`Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` also work, in the Latin and Russian keyboard layouts. `Alt+Enter` and `Ctrl+J` also insert a new line (Windows may take Alt+Enter for full screen).
 
 ## Security
 
 - `api_id`, `api_hash` and the Telegram session live in `tglite.vault`, encrypted with your password (Argon2id + ChaCha20-Poly1305). Without the password the file cannot be read and tampering is detected.
 - The conversation is never written to disk. Exceptions are `/export` and `/save`, which you run yourself. Drafts live in memory only.
 - Auto-lock after 1–60 minutes (or never) and on `F2`; the lock screen shows no messages.
-- Optional self-destruct: delete the data after 3, 5 or 10 wrong passwords on the lock screen (off by default).
+- Optional self-destruct: overwrite and delete `tglite.vault` after 3, 5 or 10 wrong passwords on the lock screen (off by default). Other files stay, and you should end the session in Telegram → Settings → Devices.
 - The log never contains message text. The chosen language is stored in `tglite.lang` (not secret).
 
-Details and how to report a vulnerability: [SECURITY.md](SECURITY.md).
+Details and how to report a vulnerability: [SECURITY.md](SECURITY.md) (English and Russian).
 
 ## Proxy
 
 Nothing needs to be typed. In "auto" mode the order is: manually set address, environment variables
-(`ALL_PROXY`, `HTTPS_PROXY`), the Windows system proxy, then a direct connection. Plain HTTP proxies are handled by a
-small local bridge the program starts itself. If nothing works it asks once for a SOCKS5 address (for example
-`127.0.0.1:10808`) and remembers it. Manual: `/proxy 127.0.0.1:10808`, `/proxy auto`, `/proxy off` (applied on the next start).
+(`TGLITE_PROXY`, `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`), the Windows system proxy, then a direct connection. Plain HTTP proxies are handled by a
+small local bridge the program starts itself. If nothing works it asks for a proxy address (SOCKS5 or HTTP; Enter retries, `0` means no proxy, `q` quits) and remembers it (for example
+`127.0.0.1:10808`). Manual: `/proxy 127.0.0.1:10808` uses only that address; `/proxy auto` restores the order above; `/proxy off` goes direct (applied on the next start).
 
 ## Build
 
@@ -153,8 +153,9 @@ Without installing Rust: push the project to GitHub. **CI** (`.github/workflows/
 and builds the Windows exe (Actions → the run → Artifacts; the job summary shows the size and SHA256).
 **Releases:** push a tag such as `git tag v1.0.0 && git push --tags`, and `release.yml` publishes `tg-lite.exe` with `tg-lite.exe.sha256`.
 
-**API keys in the build.** The secrets `TGLITE_API_ID` and `TGLITE_API_HASH` bake your keys into the exe so they need not be
-typed. Do not do this in a public repository: anyone can download an exe with your keys.
+**API keys in the build.** In CI (`ci.yml`) the secrets `TGLITE_API_ID` and `TGLITE_API_HASH` bake your keys into the exe so they need not be
+typed; the release workflow does not use them, so release exes never contain keys. Do not set these secrets in a public repository:
+anyone can download the CI exe with your keys.
 
 ## FAQ
 
@@ -167,23 +168,25 @@ The same list is available in the program as `/faq`.
 | No connection | Telegram may be blocked: use a VPN or `/proxy 127.0.0.1:port`, then restart |
 | Antivirus complains | The exe is unsigned and built from open source; build it yourself or compare SHA256 with the release |
 | Forgot the password | It cannot be recovered: delete `tglite.vault` and sign in again |
-| No sound | `F4` → Sound: on; the beep goes through the sound card, check the volume |
+| No sound | `F4` → "Sound on new message": on; the beep goes through the sound card, check the volume |
 | Anything else | Run `tg-lite --debug` and send `tglite.log` (no message text in it). Author: Telegram **@maks1m_salov** |
 
 ## Limits
 
 - Text only: photos, voice, stickers and video are shown as labels (download with `/save` and open in another program). Emoji are hidden.
 - No secret chats and no calls.
-- Folders are built from the first 120 dialogs.
+- Only the first 120 chats are loaded; all tabs and folders are built from them.
 - The proxy mode is applied on the next start; the sign-in screen always uses the "Aurora" background (settings are inside the encrypted vault).
 - Self-destruct works on the lock screen, not at the startup password prompt.
 - If Telegram is blocked where you live you need a VPN or a proxy.
+- HTTP proxies that need a login are not supported.
 - Telegram is a trademark of its owners; this project is not affiliated with them.
 
 ## Roadmap
 
-0.0.9 (this version) brings paste, English interface, first-run wizard, CI and releases. Next: more polish and testing on real
-accounts, then **1.0**. Ideas that are not planned for 1.0: a graphical app with photos, video and voice, tray mode, a reusable core crate.
+**1.0.0 (this version)** is the first complete release: clipboard paste, English and Russian interface, first-run wizard, built-in FAQ,
+CI with checksummed releases, and a full code audit whose findings are covered by regression tests. Not planned: a graphical app with
+photos, video and voice, tray mode, a reusable core crate.
 
 ## License
 
@@ -221,7 +224,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 
 Замеры на Lenovo B550 (Pentium T4400, 2 ГБ DDR2, жёсткий диск, Windows 10 LTSC):
 
-| | Tg-Lite 0.0.8 | Telegram Desktop |
+| | Tg-Lite (замер на 0.0.8) | Telegram Desktop |
 |---|---|---|
 | ОЗУ на экране чатов сразу после запуска | **2,8 МБ** | 800 МБ и больше¹ |
 | ОЗУ через 10–15 минут работы | **2,8 МБ** | до 2–2,5 ГБ после долгой работы¹ |
@@ -255,7 +258,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Цитаты ответов, пометки «переслано» и «(изм.)». Фото, голосовые и файлы показываются подписями: `[фото]`, `[файл отчёт.pdf, 2 МБ]`.
 
 **Файлы и ссылки**
-- `/send путь подпись` — отправить файл до 2 ГБ (путь можно просто перетащить в окно). Картинки jpg и png идут как фото.
+- `/send путь подпись` — отправить файл (подпись необязательна) до 2000 МБ (путь можно просто перетащить в окно). Картинки jpg, jpeg и png меньше 10 МБ идут как фото, остальное как файл.
 - `/save` — скачать вложение в папку `downloads` рядом с exe, с прогрессом в строке состояния.
 - `/links` — ссылки чата, Enter открывает ссылку в браузере.
 
@@ -265,10 +268,10 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 **Удобство**
 - Вставка работает: `Ctrl+V`, `Shift+Insert`, вставка самого терминала или команда `/paste`.
 - Интерфейс на русском и английском (настройка «Язык интерфейса», выбирается при первом запуске).
-- Анимированный фон входа и блокировки: «Аврора», «Матрица», «Звёзды» или без анимации.
-- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, ширина, самоуничтожение, язык, пароль.
-- `/faq` — подсказки «Если не работает» прямо в программе. `tg-lite --debug` пишет подробный `tglite.log` (без текстов переписки).
-- Эмодзи и невидимые символы из чужих сообщений скрываются: консоль Windows не умеет их рисовать, и экран «рассыпался» бы.
+- Анимированный экран входа (всегда «Аврора») и экран блокировки («Аврора», «Матрица», «Звёзды» или без анимации, выбирается в настройках).
+- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, пароль.
+- `/faq` — подсказки «Если не работает» прямо в программе. В `tglite.log` пишутся ошибки, а `tg-lite --debug` делает журнал подробным (тексты переписки не пишутся никогда).
+- Эмодзи, невидимые символы и письменности кроме латиницы, греческого и кириллицы скрываются: консоль Windows не умеет их рисовать, и экран «рассыпался» бы.
 
 <table>
 <tr>
@@ -283,9 +286,9 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 
 ## Быстрый старт
 
-1. Скачайте `tg-lite.exe` из [Releases](../../releases) (или артефакт CI) и проверьте: `Get-FileHash tg-lite.exe -Algorithm SHA256` должен совпасть с `tg-lite.exe.sha256`.
+1. Скачайте `tg-lite.exe` из [Releases](../../releases) (или артефакт CI) и проверьте: `Get-FileHash tg-lite.exe -Algorithm SHA256` должен совпасть с `tg-lite.exe.sha256` (регистр букв не важен).
 2. Запустите, лучше из Windows Terminal или cmd со шрифтом Consolas.
-3. Мастер первого запуска — четыре шага:
+3. Мастер первого запуска — четыре шага (шаг языка пропускается, если язык уже выбран, шаг ключей — если ключи вшиты в exe):
    1. выбор языка;
    2. ввод `api_id` и `api_hash` (создайте приложение на <https://my.telegram.org> → API development tools и скопируйте оба значения);
    3. пароль приложения (любой длины, даже один символ);
@@ -306,7 +309,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | Ctrl+V / Shift+Insert | `/paste` | вставить из буфера обмена |
 | ↑ / ↓, Tab / Shift+Tab | | выбор чата, вкладки |
 | PgUp / PgDn | | прокрутка переписки |
-| Esc | | очистить ввод (при пустом поле: сбросить поиск) |
+| Esc | | очистить ввод; затем отменить правку или ответ; затем сбросить поиск |
 | F1 | `/help` | справка |
 | F2 | `/lock` | заблокировать |
 | F3 | `/md` | Markdown вкл/выкл |
@@ -320,24 +323,24 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | | `/send` `/save` `/links` | отправить файл, скачать вложение, ссылки |
 | | `/passwd` `/proxy` `/faq` | сменить пароль, прокси, подсказки |
 
-`Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` тоже работают, в любой раскладке. `Alt+Enter` не используется: Windows отдаёт его полноэкранному режиму.
+`Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` тоже работают, в латинской и русской раскладках. `Alt+Enter` и `Ctrl+J` тоже вставляют новую строку (Windows может забрать Alt+Enter для полноэкранного режима).
 
 ## Безопасность
 
 - `api_id`, `api_hash` и сессия Telegram лежат в `tglite.vault`, зашифрованном вашим паролем (Argon2id + ChaCha20-Poly1305). Без пароля файл не прочитать, подмена данных обнаруживается.
 - Переписка на диск не пишется. Исключения — `/export` и `/save`, которые вы запускаете сами. Черновики живут только в памяти.
 - Автоблокировка через 1–60 минут (или никогда) и по `F2`; на экране блокировки переписки нет.
-- Самоуничтожение по желанию: удалить данные после 3, 5 или 10 неверных паролей на экране блокировки (по умолчанию выключено).
+- Самоуничтожение по желанию: затереть и удалить `tglite.vault` после 3, 5 или 10 неверных паролей на экране блокировки (по умолчанию выключено). Остальные файлы остаются; завершите сессию в Telegram → Настройки → Устройства.
 - В журнале нет текстов сообщений. Выбранный язык хранится в `tglite.lang` (не секрет).
 
-Подробности и как сообщить об уязвимости: [SECURITY.md](SECURITY.md).
+Подробности и как сообщить об уязвимости: [SECURITY.md](SECURITY.md) (на русском и английском).
 
 ## Прокси
 
 Вводить ничего не нужно. Порядок в режиме «авто»: адрес, заданный вручную, переменные окружения
-(`ALL_PROXY`, `HTTPS_PROXY`), системный прокси Windows, затем напрямую. Для обычных HTTP-прокси программа сама поднимает
-небольшой локальный мост. Если ничего не сработало, один раз спросит адрес SOCKS5-прокси (например `127.0.0.1:10808`) и запомнит его.
-Вручную: `/proxy 127.0.0.1:10808`, `/proxy auto`, `/proxy off` (применяется при следующем запуске).
+(`TGLITE_PROXY`, `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`), системный прокси Windows, затем напрямую. Для обычных HTTP-прокси программа сама поднимает
+небольшой локальный мост. Если ничего не сработало, спросит адрес прокси (SOCKS5 или HTTP; Enter повторяет, `0` — без прокси, `q` — выход) и запомнит его (например `127.0.0.1:10808`).
+Вручную: `/proxy 127.0.0.1:10808` использует только этот адрес, `/proxy auto` возвращает порядок выше, `/proxy off` — напрямую (применяется при следующем запуске).
 
 ## Сборка
 
@@ -348,8 +351,9 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 и собирает exe под Windows (Actions → запуск → Artifacts; в сводке задания видны размер и SHA256).
 **Релизы:** создайте тег, например `git tag v1.0.0 && git push --tags`, и `release.yml` опубликует `tg-lite.exe` вместе с `tg-lite.exe.sha256`.
 
-**Ключи API в сборке.** Секреты `TGLITE_API_ID` и `TGLITE_API_HASH` вшивают ваши ключи в exe, и вводить их не придётся.
-Не делайте этого в публичном репозитории: любой сможет скачать exe с вашими ключами.
+**Ключи API в сборке.** В CI (`ci.yml`) секреты `TGLITE_API_ID` и `TGLITE_API_HASH` вшивают ваши ключи в exe, и вводить их не придётся;
+workflow релиза их не использует, поэтому exe из релизов ключей не содержат. Не задавайте эти секреты в публичном репозитории:
+любой сможет скачать exe из CI с вашими ключами.
 
 ## Если не работает
 
@@ -362,23 +366,25 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | Нет подключения | Telegram может быть заблокирован: VPN или `/proxy 127.0.0.1:порт`, затем перезапуск |
 | Антивирус ругается | exe не подписан и собран из открытого кода; соберите сами или сверьте SHA256 с релизом |
 | Забыл пароль | Восстановить нельзя: удалите `tglite.vault` и войдите заново |
-| Нет звука | `F4` → «Звук»: включить, проверьте громкость |
+| Нет звука | `F4` → «Звук при новом сообщении»: включить; сигнал идёт через звуковую карту, проверьте громкость |
 | Другое | `tg-lite --debug`, затем пришлите `tglite.log` (без текстов переписки). Автор: Telegram **@maks1m_salov** |
 
 ## Ограничения
 
 - Только текст: фото, голосовые, стикеры и видео показываются подписями (скачайте через `/save` и откройте другой программой). Эмодзи скрыты.
 - Нет секретных чатов и звонков.
-- Папки строятся по первым 120 диалогам.
+- Загружаются только первые 120 чатов; все вкладки и папки строятся из них.
 - Режим прокси применяется при следующем запуске; экран входа всегда с фоном «Аврора» (настройки лежат внутри зашифрованного файла).
 - Самоуничтожение работает на экране блокировки, но не при первом запросе пароля при запуске.
 - Если Telegram у вас заблокирован, нужен VPN или прокси.
+- HTTP-прокси с логином не поддерживаются.
 - Telegram — торговая марка своих владельцев; проект с ними не связан.
 
 ## Планы
 
-0.0.9 (эта версия): вставка, английский интерфейс, мастер первого запуска, CI и релизы. Дальше: шлифовка и проверка на живых
-аккаунтах, затем **1.0**. Не входит в 1.0: графическое приложение с фото, видео и голосовыми, режим в трее, общий core-крейт.
+**1.0.0 (эта версия)** — первый законченный выпуск: вставка из буфера, интерфейс на русском и английском, мастер первого запуска,
+подсказки внутри программы, CI с релизами и контрольными суммами, полный аудит кода, все находки которого закрыты регрессионными
+тестами. Не планируется: графическое приложение с фото, видео и голосовыми, режим в трее, общий core-крейт.
 
 ## Лицензия
 

@@ -182,9 +182,14 @@ pub enum Probe {
     Other,
 }
 
+/// Адрес без `логин:пароль@`: для TCP-соединения нужны только хост и порт.
+fn host_port(addr: &str) -> &str {
+    addr.rsplit_once('@').map_or(addr, |(_, hp)| hp)
+}
+
 /// За пару секунд выясняет, что слушает на адресе: SOCKS5, что-то другое или ничего.
 pub async fn probe(addr: &str) -> Probe {
-    let Ok(Ok(mut s)) = timeout(Duration::from_millis(2000), TcpStream::connect(addr)).await else {
+    let Ok(Ok(mut s)) = timeout(Duration::from_millis(2000), TcpStream::connect(host_port(addr))).await else {
         return Probe::Dead;
     };
     if s.write_all(&[5, 1, 0]).await.is_err() {
@@ -303,7 +308,7 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
     let port = u16::from_be_bytes(port);
 
     // Соединение с HTTP-прокси и просьба «CONNECT host:port».
-    let mut upstream = match TcpStream::connect(http_proxy).await {
+    let mut upstream = match TcpStream::connect(host_port(http_proxy)).await {
         Ok(s) => s,
         Err(e) => {
             client.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
@@ -471,6 +476,13 @@ mod tests {
             }
         });
         addr
+    }
+
+    #[test]
+    fn host_port_strips_credentials() {
+        assert_eq!(host_port("user:pw@127.0.0.1:1080"), "127.0.0.1:1080");
+        assert_eq!(host_port("127.0.0.1:1080"), "127.0.0.1:1080");
+        assert_eq!(host_port("u:p@w@h:1"), "h:1");
     }
 
     #[tokio::test]

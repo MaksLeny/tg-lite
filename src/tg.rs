@@ -212,6 +212,8 @@ pub struct ChatMsg {
     pub text: String,
     /// Текст без подписи вложения (для правки): `Some`, если у сообщения есть вложение.
     pub caption: Option<String>,
+    /// Исходный текст из Telegram (с эмодзи, без подписи вложения): им заполняется поле при правке.
+    pub raw: String,
     pub time: String,
     /// Сообщение исправлено после отправки.
     pub edited: bool,
@@ -380,7 +382,7 @@ impl RetryPolicy for FloodPolicy {
     fn should_retry(&self, ctx: &RetryContext) -> ControlFlow<(), Duration> {
         match &ctx.error {
             InvocationError::Rpc(RpcError { code: 420, value: Some(secs), .. }) if ctx.fail_count.get() <= 2 && *secs <= 300 => {
-                FLOOD_UNTIL.store(jiff::Timestamp::now().as_second() + i64::from(*secs), Ordering::Relaxed);
+                FLOOD_UNTIL.fetch_max(jiff::Timestamp::now().as_second() + i64::from(*secs), Ordering::Relaxed);
                 ControlFlow::Continue(Duration::from_secs(u64::from(*secs)))
             }
             InvocationError::Io(_) if ctx.fail_count.get() <= 1 => ControlFlow::Continue(Duration::from_secs(1)),
@@ -552,6 +554,7 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
         sender,
         text,
         caption,
+        raw: m.text().to_string(),
         time: format_time(m.date()),
         edited: m.edit_date().is_some() && !m.edit_hide(),
         reply_to: m.reply_to_message_id(),
@@ -735,10 +738,17 @@ pub async fn save_attachment(client: &Client, chat: &ChatInfo, id: i32, events: 
     };
     let dir = download_dir();
     std::fs::create_dir_all(&dir)?;
-    let path = crate::util::unique_path(&dir, &crate::util::safe_file_name(&name));
-    let part = path.with_extension("part");
+    let path = crate::util::reserve_unique(&dir, &crate::util::safe_file_name(&name))?;
+    // Имя `path` уже занято пустым файлом, поэтому и временное имя уникально.
+    let part = PathBuf::from(format!("{}.part", path.display()));
     let total = Downloadable::size(&media);
-    let mut file = tokio::fs::File::create(&part).await?;
+    let mut file = match tokio::fs::File::create(&part).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(e.into());
+        }
+    };
     let mut it = client.iter_download(&media);
     let (mut done, mut last_pct) = (0usize, 101u64);
     let short = crate::util::safe_file_name(&name);
@@ -761,11 +771,16 @@ pub async fn save_attachment(client: &Client, chat: &ChatInfo, id: i32, events: 
     drop(file);
     match result {
         Ok(()) => {
-            std::fs::rename(&part, &path)?;
+            if let Err(e) = std::fs::rename(&part, &path) {
+                let _ = std::fs::remove_file(&part);
+                let _ = std::fs::remove_file(&path);
+                return Err(e.into());
+            }
             Ok(path)
         }
         Err(e) => {
             let _ = std::fs::remove_file(&part);
+            let _ = std::fs::remove_file(&path); // и пустой «заказ» имени
             Err(e)
         }
     }
@@ -1280,5 +1295,63 @@ mod tests {
         });
         assert_eq!(typing_from_raw(&voice).unwrap().2, TypingKind::Voice);
         assert_eq!(TypingKind::Text.label(), "печатает…");
+    }
+
+    fn no_cyrillic(s: &str) -> bool {
+        !s.chars().any(|c| ('\u{400}'..='\u{4ff}').contains(&c))
+    }
+
+    #[test]
+    fn english_labels_have_no_russian_text() {
+        crate::i18n::set(1);
+        let tz = jiff::tz::TimeZone::UTC;
+        let now = 1_800_000_000;
+        for p in [
+            Presence::Online(now + 60),
+            Presence::Online(now - 60),
+            Presence::Offline(now - 10),
+            Presence::Offline(now - 86_400),
+            Presence::Offline(now - 5 * 86_400),
+            Presence::Recently,
+            Presence::LastWeek,
+            Presence::LastMonth,
+        ] {
+            let l = presence_label(p, now, &tz);
+            assert!(no_cyrillic(&l), "{l}");
+        }
+        for n in [0usize, 500, 2048, 5 * 1024 * 1024, 3 * 1024 * 1024 * 1024] {
+            assert!(no_cyrillic(&fmt_size(n)));
+        }
+        assert_eq!(fmt_size(2 * 1024 * 1024), "2 MB");
+        assert_eq!(fmt_size(1536), "2 KB");
+        for e in ["FLOOD_WAIT_30", "MESSAGE_TOO_LONG", "CHAT_WRITE_FORBIDDEN", "MESSAGE_ID_INVALID", "PEER_FLOOD"] {
+            let m = friendly_error(e);
+            assert!(no_cyrillic(&m), "{m}");
+        }
+        assert!(no_cyrillic(&compose_text("", "")));
+        for k in [TypingKind::Text, TypingKind::Voice, TypingKind::File] {
+            assert!(no_cyrillic(k.label()));
+        }
+        crate::i18n::set(0);
+    }
+
+    #[test]
+    fn unknown_errors_are_passed_through_unchanged() {
+        assert_eq!(friendly_error("SOMETHING_NEW_42"), "SOMETHING_NEW_42");
+        assert!(friendly_error("FLOOD_WAIT_17").contains("17"));
+        assert!(friendly_error("420 SLOWMODE_WAIT_5").contains('5'));
+    }
+
+    #[test]
+    fn duration_formats_edge_cases() {
+        assert_eq!(fmt_duration(-5.0), "0:00");
+        assert_eq!(fmt_duration(59.6), "1:00");
+        assert_eq!(fmt_duration(3725.0), "1:02:05");
+    }
+
+    #[test]
+    fn chat_msg_default_is_empty_and_safe() {
+        let m = ChatMsg::default();
+        assert!(m.text.is_empty() && m.raw.is_empty() && m.caption.is_none() && !m.edited && m.reply_to.is_none());
     }
 }

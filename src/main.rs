@@ -8,7 +8,7 @@ mod ui;
 mod util;
 mod vault;
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +33,9 @@ fn ask(prompt: &str) -> Result<String> {
     print!("{prompt}");
     io::stdout().flush()?;
     let mut s = String::new();
-    io::stdin().read_line(&mut s)?;
+    if io::stdin().read_line(&mut s)? == 0 {
+        return Err(anyhow!(tr!("ввод закрыт", "input closed"))); // иначе при закрытом вводе цикл не кончился бы
+    }
     Ok(s.trim().to_string())
 }
 
@@ -43,6 +45,9 @@ fn ask_secret(prompt: &str) -> Result<String> {
     io::stdout().flush()?;
     let pw = rpassword::read_password()?;
     println!();
+    if pw.is_empty() && !io::stdin().is_terminal() {
+        return Err(anyhow!(tr!("ввод закрыт", "input closed")));
+    }
     Ok(pw)
 }
 
@@ -116,7 +121,7 @@ async fn sign_in_flow(client: &grammers_client::Client, api_hash: &str) -> Resul
         Err(SignInError::PasswordRequired(pt)) => {
             let hint = pt.hint().unwrap_or(tr!("нет", "none")).to_string();
             let pw = ask_secret(&trf!("Облачный пароль Telegram (подсказка: {hint}): ", "Telegram cloud password (hint: {hint}): "))?;
-            client.check_password(pt, pw.trim()).await.map_err(|e| anyhow!("{e}"))?;
+            client.check_password(pt, &pw).await.map_err(|e| anyhow!("{e}"))?;
         }
         Err(SignInError::InvalidCode) => return Err(anyhow!(tr!("неверный код", "invalid code"))),
         Err(e) => return Err(anyhow!("{e}")),

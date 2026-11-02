@@ -167,4 +167,66 @@ mod tests {
         s.lock_minutes = 0;
         assert_eq!(s.lock_label(), "никогда");
     }
+
+    #[test]
+    fn safe_defaults() {
+        let s = Settings::default();
+        assert_eq!(s.wipe_after, 0, "самоуничтожение по умолчанию выключено");
+        assert!(!s.sound);
+        assert_eq!(s.lang, 0);
+        assert_eq!(s.lock_minutes, 5);
+        assert!(s.pinned.is_empty());
+        assert_eq!(s.proxy_mode, ProxyMode::Auto);
+    }
+
+    #[test]
+    fn settings_roundtrip_through_json_and_ignore_unknown_fields() {
+        let mut s = Settings::default();
+        s.lang = 1;
+        s.wipe_after = 5;
+        s.pinned = vec![1, -100123];
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+        let s2: Settings = serde_json::from_str(r#"{"lang":1,"from_the_future":true}"#).unwrap();
+        assert_eq!(s2.lang, 1);
+    }
+
+    #[test]
+    fn out_of_range_values_never_panic() {
+        let mut s = Settings::default();
+        s.accent = 200;
+        s.lock_bg = 200;
+        s.list_width = 200;
+        s.bubble_width = 200;
+        s.lang = 200;
+        let _ = (s.accent_name(), s.lock_bg_name(), s.list_dims(), s.bubble_pct());
+        let (min, max) = s.list_dims();
+        assert!(min <= max);
+        assert_eq!(Settings::width_name(9, ["a", "b", "c"]), "c");
+    }
+
+    #[test]
+    fn english_labels_have_no_russian_text() {
+        crate::i18n::set(1);
+        let mut s = Settings::default();
+        let cyr = |t: &str| t.chars().any(|c| ('\u{400}'..='\u{4ff}').contains(&c));
+        for m in LOCK_CHOICES {
+            s.lock_minutes = m;
+            assert!(!cyr(&s.lock_label()), "{}", s.lock_label());
+        }
+        for mode in [ProxyMode::Auto, ProxyMode::Off, ProxyMode::Manual] {
+            s.proxy_mode = mode;
+            assert!(!cyr(&s.proxy_label()));
+        }
+        for w in WIPE_CHOICES {
+            s.wipe_after = w;
+            assert!(!cyr(&s.wipe_label()));
+        }
+        assert!(accent_names().iter().all(|n| !cyr(n)));
+        for bg in 0..crate::lock::BG_COUNT {
+            s.lock_bg = bg;
+            assert!(!cyr(s.lock_bg_name()));
+        }
+        crate::i18n::set(0);
+    }
 }

@@ -163,7 +163,12 @@ impl VaultFile {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes)?;
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?; // данные должны дойти до диска до переименования
+        }
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -330,15 +335,17 @@ impl Saver {
         if self.is_wiped() {
             return Ok(());
         }
+        // Сначала блокировка записи, потом снимок состояния: иначе старый снимок мог бы
+        // перезаписать новый (например, вернуть прежний пароль после его смены).
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_wiped() {
+            return Ok(());
+        }
         let (password, settings) = {
             let st = self.state();
             (st.password.clone(), st.settings.clone())
         };
         let secrets = Secrets { api_id: self.api_id, api_hash: self.api_hash.clone(), session: self.session.snapshot(), settings };
-        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if self.is_wiped() {
-            return Ok(());
-        }
         self.vault.save(&secrets, &password)
     }
 
@@ -346,7 +353,9 @@ impl Saver {
     pub fn save_in_background(self: &std::sync::Arc<Self>) {
         let s = std::sync::Arc::clone(self);
         std::thread::spawn(move || {
-            let _ = s.save();
+            if let Err(e) = s.save() {
+                crate::util::log(&format!("не удалось сохранить хранилище: {e}"));
+            }
         });
     }
 }
@@ -428,5 +437,97 @@ mod tests {
         assert!(f.exists());
         assert_eq!(f.load("pw").unwrap().api_id, 12345);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn temp_vault(tag: &str) -> VaultFile {
+        let p = std::env::temp_dir().join(format!("tglt-vault-{tag}-{}.vault", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        VaultFile::new(p)
+    }
+
+    fn saver_for(vault: VaultFile, password: &str) -> std::sync::Arc<Saver> {
+        std::sync::Arc::new(Saver::new(
+            vault,
+            7,
+            "0123456789abcdef".into(),
+            std::sync::Arc::new(VaultSession::from_blob(SessionBlob::default())),
+            password.into(),
+            Settings::default(),
+        ))
+    }
+
+    #[test]
+    fn password_change_is_persisted_and_old_password_stops_working() {
+        let v = temp_vault("pw");
+        let path = v.path().to_path_buf();
+        let s = saver_for(v, "old");
+        s.save().unwrap();
+        s.set_password("new".into());
+        s.save().unwrap();
+        let v = VaultFile::new(path.clone());
+        assert!(v.load("new").is_ok());
+        assert!(v.load("old").is_err());
+        assert!(!path.with_extension("tmp").exists(), "временный файл не остаётся");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_saves_never_bring_back_the_old_password() {
+        let v = temp_vault("race");
+        let path = v.path().to_path_buf();
+        let s = saver_for(v, "old");
+        s.save().unwrap();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let s = std::sync::Arc::clone(&s);
+                std::thread::spawn(move || {
+                    for _ in 0..3 {
+                        s.save().unwrap();
+                    }
+                })
+            })
+            .collect();
+        s.set_password("new".into());
+        s.save().unwrap();
+        for w in workers {
+            w.join().unwrap();
+        }
+        // Последняя запись в любом порядке потоков обязана быть с новым паролем.
+        s.save().unwrap();
+        let v = VaultFile::new(path.clone());
+        assert!(v.load("new").is_ok(), "после смены пароля файл должен открываться новым паролем");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn damaged_files_give_errors_not_panics() {
+        for bytes in [vec![], vec![0u8; 3], vec![0u8; 40], vec![0xFFu8; 200], b"TGLITE".to_vec()] {
+            assert!(decrypt(&bytes, "x").is_err());
+        }
+        let good = encrypt(&sample(), "pw").unwrap();
+        for cut in [1usize, 10, good.len() / 2, good.len() - 1] {
+            assert!(decrypt(&good[..cut], "pw").is_err(), "обрезанный на {cut} файл");
+        }
+        let mut flipped = good.clone();
+        let last = flipped.len() - 1;
+        flipped[last] ^= 1;
+        assert!(decrypt(&flipped, "pw").is_err());
+    }
+
+    #[test]
+    fn two_encryptions_of_the_same_data_differ() {
+        let a = encrypt(&sample(), "pw").unwrap();
+        let b = encrypt(&sample(), "pw").unwrap();
+        assert_ne!(a, b, "соль и nonce случайные");
+        assert!(a.windows(16).all(|w| w != b"abcdef0123456789"), "api_hash не виден в файле");
+    }
+
+    #[test]
+    fn unicode_and_one_character_passwords_work() {
+        for pw in ["x", "пароль с пробелами и ёж", "p@ss\\w0rd€", "  "] {
+            let enc = encrypt(&sample(), pw).unwrap();
+            assert!(decrypt(&enc, pw).is_ok(), "{pw:?}");
+            assert!(decrypt(&enc, &format!("{pw}!")).is_err());
+        }
     }
 }

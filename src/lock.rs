@@ -342,7 +342,9 @@ fn login_loop(terminal: &mut DefaultTerminal, vault: &VaultFile, version: &str, 
         }
         match k.code {
             KeyCode::Esc | KeyCode::F(10) => return Ok(Login::Quit),
-            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(Login::Quit),
+            KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) && !k.modifiers.contains(KeyModifiers::ALT) => {
+                return Ok(Login::Quit);
+            }
             KeyCode::Backspace => {
                 input.pop();
             }
@@ -362,7 +364,8 @@ fn login_loop(terminal: &mut DefaultTerminal, vault: &VaultFile, version: &str, 
                     }
                 }
             }
-            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => input.push(c),
+            // AltGr приходит как Ctrl+Alt: такие символы (@, \\, € и т. п.) вводятся как обычные.
+            KeyCode::Char(c) if crate::ui::ctrl_letter(&k).is_none() => input.push(c),
             _ => {}
         }
     }

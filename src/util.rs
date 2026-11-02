@@ -55,14 +55,33 @@ pub fn log(msg: &str) {
 pub fn safe_filename(name: &str) -> String {
     let s: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
     let s = s.trim().chars().take(40).collect::<String>();
-    if s.is_empty() { "chat".to_string() } else { s }
+    if s.is_empty() {
+        "chat".to_string()
+    } else if is_reserved_name(&s) {
+        format!("_{s}")
+    } else {
+        s
+    }
+}
+
+/// Имена устройств Windows (CON, NUL, COM1…LPT9): файл с таким именем создать нельзя.
+fn is_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim().to_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit()
 }
 
 /// Имя файла для скачивания: точки и расширение сохраняются, недопустимые для Windows символы заменяются.
 pub fn safe_file_name(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| if c.is_control() || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .map(|c| {
+            // Управляющие символы и символы смены направления текста (имя `photo_\u{202E}fdp.exe` выглядело бы как `photo_exe.pdf`).
+            let bidi = matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+            if c.is_control() || bidi || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }
+        })
         .collect();
     let s = s.trim().trim_start_matches('.').trim().to_string();
     let s: String = if s.chars().count() > 100 {
@@ -73,34 +92,34 @@ pub fn safe_file_name(name: &str) -> String {
     } else {
         s
     };
-    let stem = s.split('.').next().unwrap_or("").to_uppercase();
-    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"];
+    // Windows отбрасывает пробелы и точки в конце имени.
+    let s = s.trim_end_matches([' ', '.']).to_string();
     if s.is_empty() {
         "file".to_string()
-    } else if reserved.contains(&stem.as_str()) {
+    } else if is_reserved_name(&s) {
         format!("_{s}")
     } else {
         s
     }
 }
 
-/// Свободное имя в папке: `a.pdf`, затем `a (1).pdf`, `a (2).pdf`…
-pub fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
+/// Занимает свободное имя в папке (создаёт пустой файл): `a.pdf`, `a (1).pdf`, …
+/// Два одновременных скачивания не получат одно и то же имя и ничего не перезапишут.
+pub fn reserve_unique(dir: &std::path::Path, name: &str) -> std::io::Result<PathBuf> {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
         _ => (name.to_string(), String::new()),
     };
-    for n in 1..1000 {
-        let p = dir.join(format!("{stem} ({n}){ext}"));
-        if !p.exists() {
-            return p;
+    for n in 0..1000 {
+        let file = if n == 0 { name.to_string() } else { format!("{stem} ({n}){ext}") };
+        let p = dir.join(file);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(_) => return Ok(p),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
     }
-    first
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "too many files with the same name"))
 }
 
 /// Находит ссылки в тексте (http, https, t.me, www), без хвостовой пунктуации и без повторов.
@@ -115,6 +134,15 @@ pub fn extract_links(text: &str) -> Vec<String> {
             continue;
         }
         let mut t = t.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '\'']).to_string();
+        // Схема всегда в нижнем регистре: `HTTPS://x.com` иначе нашлась бы, но не открылась.
+        for scheme in ["https://", "http://"] {
+            if lower.starts_with(scheme) {
+                if let Some(rest) = t.get(scheme.len()..) {
+                    t = format!("{scheme}{rest}");
+                }
+                break;
+            }
+        }
         if !lower.starts_with("http") {
             t = format!("https://{t}");
         }
@@ -294,6 +322,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn file_names_are_safe_on_windows() {
+        assert_eq!(safe_file_name("photo_\u{202E}fdp.exe"), "photo__fdp.exe");
+        assert_eq!(safe_file_name("nul.txt"), "_nul.txt");
+        assert_eq!(safe_file_name("COM7.log"), "_COM7.log");
+        assert_eq!(safe_file_name("lpt9"), "_lpt9");
+        assert_eq!(safe_file_name("nul .txt"), "_nul .txt");
+        assert_eq!(safe_file_name("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(safe_file_name("report. . "), "report");
+        assert_eq!(safe_file_name("..."), "file");
+        assert_eq!(safe_file_name("COM10.txt"), "COM10.txt"); // не устройство
+        assert_eq!(safe_filename("con"), "_con");
+        assert_eq!(safe_filename("Рабочий чат"), "Рабочий чат");
+    }
+
+    #[test]
+    fn uppercase_scheme_links_are_normalized_and_openable() {
+        let l = extract_links("см. HTTPS://Example.com/Path, и Http://a.bc/x");
+        assert_eq!(l, vec!["https://Example.com/Path", "http://a.bc/x"]);
+        assert!(l.iter().all(|u| u.starts_with("http")));
+    }
+
+    #[test]
+    fn reserve_unique_never_reuses_a_name() {
+        let dir = std::env::temp_dir().join(format!("tglt-res-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = reserve_unique(&dir, "a.pdf").unwrap();
+        let b = reserve_unique(&dir, "a.pdf").unwrap();
+        let c = reserve_unique(&dir, "noext").unwrap();
+        let d = reserve_unique(&dir, "noext").unwrap();
+        assert_eq!(a, dir.join("a.pdf"));
+        assert_eq!(b, dir.join("a (1).pdf"));
+        assert_eq!(c, dir.join("noext"));
+        assert_eq!(d, dir.join("noext (1)"));
+        // параллельно: все имена разные
+        let names: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = dir.clone();
+                std::thread::spawn(move || reserve_unique(&dir, "x.zip").unwrap())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        let set: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(set.len(), 8);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn paste_helpers() {
         assert_eq!(paste_clean("a\r\nb\rc", 100), "a\nb\nc");
         assert_eq!(paste_clean("abcdef", 3), "abc");
@@ -334,21 +412,6 @@ mod tests {
         let long = format!("{}.mp4", "я".repeat(200));
         let n = safe_file_name(&long);
         assert!(n.chars().count() <= 100 && n.ends_with(".mp4"), "{n}");
-    }
-
-    #[test]
-    fn unique_path_adds_counter() {
-        let dir = std::env::temp_dir().join(format!("tglt-uniq-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let a = unique_path(&dir, "a.pdf");
-        assert_eq!(a, dir.join("a.pdf"));
-        std::fs::write(&a, b"x").unwrap();
-        let b = unique_path(&dir, "a.pdf");
-        assert_eq!(b, dir.join("a (1).pdf"));
-        std::fs::write(&b, b"x").unwrap();
-        assert_eq!(unique_path(&dir, "a.pdf"), dir.join("a (2).pdf"));
-        assert_eq!(unique_path(&dir, "noext"), dir.join("noext"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
