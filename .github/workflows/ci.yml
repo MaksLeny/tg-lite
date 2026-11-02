@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Необязательно: секреты вшивают ваши ключи API в exe (не делайте этого в публичном репозитории).
+  TGLITE_API_ID: ${{ secrets.TGLITE_API_ID }}
+  TGLITE_API_HASH: ${{ secrets.TGLITE_API_HASH }}
+
+jobs:
+  lint:
+    name: fmt, clippy, tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  windows:
+    name: Windows exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Size and checksum
+        shell: pwsh
+        run: |
+          $f = Get-Item target/release/tg-lite.exe
+          $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+          "tg-lite.exe: $([math]::Round($f.Length / 1KB)) KB" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          "SHA256: $hash" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tg-lite-windows-x64
+          path: target/release/tg-lite.exe
