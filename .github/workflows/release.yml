@@ -1,0 +1,32 @@
+name: Release
+
+# Публикует релиз при создании тега вида v1.0.0: exe и файл SHA256 для проверки.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/tg-lite.exe dist/tg-lite.exe
+          $hash = (Get-FileHash dist/tg-lite.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  tg-lite.exe" | Out-File -Encoding ascii dist/tg-lite.exe.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tg-lite.exe
+            dist/tg-lite.exe.sha256
+          generate_release_notes: true
