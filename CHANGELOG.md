@@ -1,5 +1,9 @@
 # Changelog / История версий
 
+## 1.2.0
+- EN: read marks in private chats (`√` sent, `√√` read); `/pinned` lists all pinned messages; `/chat @name` opens a chat by public name (also people you have never written to); `/join` joins by invite link or public name; `/leave` leaves a group or channel after a repeated command; cloud drafts (unsent text is saved in Telegram when you switch chats or stop typing, drafts typed on the phone appear here; new setting "Cloud drafts", on by default; commands are never uploaded); view counts next to channel posts.
+- RU: отметки прочтения в личных чатах (`√` отправлено, `√√` прочитано); `/pinned` — список всех закреплённых сообщений; `/chat @имя` открывает чат по публичному имени (в том числе с тем, кому вы не писали); `/join` — вступление по ссылке-приглашению или публичному имени; `/leave` — выход из группы или канала после повторной команды; облачные черновики (неотправленный текст сохраняется в Telegram при смене чата или паузе в наборе, черновики с телефона появляются здесь; новая настройка «Облачные черновики», по умолчанию включена; команды не отправляются); просмотры рядом с постами каналов.
+
 ## 1.1.0
 - EN: mouse support (click a tab or a chat, the wheel scrolls the conversation or moves the selection over the chat list; new setting "Mouse", on by default); short demo GIFs in the README; README measurements now include memory after long heavy use (12.3 MB on 1.0.2).
 - RU: поддержка мыши (клик по вкладке или чату, колесо прокручивает переписку или двигает выбор над списком чатов; новая настройка «Мышь», по умолчанию включена); короткие GIF-демо в README; в замерах README теперь есть память после долгой активной работы (12,3 МБ на 1.0.2).

@@ -234,7 +234,8 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             Some(msgs) => {
                 let focus = app.focus_msg.and_then(|fid| msgs.iter().position(|m| m.id == fid));
                 let sel = if picking { Some(app.pick.min(msgs.len() - 1)) } else { focus };
-                let (l, r) = build_message_lines(msgs, width, app.settings.bubble_pct(), sel, app.theme.select_bg);
+                let read_out = app.selected().filter(|c| c.kind == Kind::User && !c.is_self).map(|c| c.read_out);
+                let (l, r) = build_message_lines_marks(msgs, width, app.settings.bubble_pct(), sel, app.theme.select_bg, read_out);
                 ranges = r;
                 l
             }
@@ -510,14 +511,16 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
         key("Esc", tr!("очистить ввод; отменить ответ, правку, поиск", "clear input; cancel reply, edit, search")),
         key(tr!("F2  или /lock", "F2  or /lock"), tr!("заблокировать (запрос пароля)", "lock (asks for password)")),
         key(tr!("F3  или /md", "F3  or /md"), tr!("Markdown вкл/выкл", "Markdown on/off")),
-        key(tr!("F4  или /settings", "F4  or /settings"), tr!("настройки", "settings")),
+        key(
+            tr!("F4  или /settings", "F4  or /settings"),
+            tr!("настройки; /proxy, /passwd — прокси и пароль", "settings; /proxy, /passwd — proxy, password"),
+        ),
         key(tr!("F5  или /refresh", "F5  or /refresh"), tr!("обновить список чатов", "refresh chat list")),
         key("F6 / Ctrl+F", tr!("поиск по чатам (/find текст; Esc сбрасывает)", "search chats (/find text; Esc resets)")),
         key(tr!("F10 или /quit", "F10 or /quit"), tr!("выход", "quit")),
-        key(tr!("/later 30 текст", "/later 30 text"), tr!("отложенная публикация через 30 минут", "send in 30 minutes")),
         key(
-            tr!("/note текст", "/note text"),
-            tr!("быстрая заметка в «Избранное» из любого чата", "quick note to Saved Messages from any chat"),
+            tr!("/later 30 текст", "/later 30 text"),
+            tr!("через 30 минут; /note текст — заметка в «Избранное»", "in 30 minutes; /note text — note to Saved Messages"),
         ),
         key(
             tr!("/edit [текст], /del", "/edit [text], /del"),
@@ -564,7 +567,8 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
             "/links, /scheduled",
             tr!("ссылки чата (L для сообщения); отложенные, отмена", "chat links (L for a message); scheduled, cancel"),
         ),
-        key("/proxy, /passwd", tr!("прокси вручную (auto, off); смена пароля", "set proxy (auto, off); change password")),
+        key("/pinned, /chat", tr!("закреплённые чата; открыть чат: /chat @имя", "pinned messages; open a chat: /chat @name")),
+        key("/join, /leave", tr!("вступить по ссылке или @имени; выйти из чата", "join by link or @name; leave a chat")),
         Line::from(Span::styled(
             trf!(
                 " Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает",
@@ -612,6 +616,7 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
         ),
         (tr!("Язык интерфейса", "Interface language"), if s.lang == 0 { "Русский".to_string() } else { "English".to_string() }),
         (tr!("Мышь", "Mouse"), on_off(s.mouse).to_string()),
+        (tr!("Облачные черновики", "Cloud drafts"), on_off(s.cloud_drafts).to_string()),
         (tr!("Пароль приложения", "App password"), tr!("сменить…", "change…").to_string()),
     ];
     let width = 78u16;

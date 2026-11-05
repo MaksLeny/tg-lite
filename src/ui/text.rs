@@ -202,14 +202,48 @@ pub(super) fn day_label(date: (i16, i8, i8), today: Option<(i16, i8, i8)>) -> St
     }
 }
 
+/// Короткая запись числа просмотров: 950, 1.2K, 15K, 2.4M.
+pub(super) fn short_count(n: i32) -> String {
+    match n {
+        ..1000 => n.to_string(),
+        1000..10_000 => format!("{}.{}K", n / 1000, n % 1000 / 100),
+        10_000..1_000_000 => format!("{}K", n / 1000),
+        _ => format!("{}.{}M", n / 1_000_000, n % 1_000_000 / 100_000),
+    }
+}
+
 /// Превращает историю в строки для вывода: даты-разделители, свои сообщения справа, ответы и пересылки.
 /// Возвращает строки и диапазон строк каждого сообщения (для выделения в режиме выбора).
+#[cfg(test)]
 pub(super) fn build_message_lines(
     msgs: &[ChatMsg],
     width: usize,
     bubble_pct: usize,
     selected: Option<usize>,
     sel_bg: Color,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    build_message_lines_marks(msgs, width, bubble_pct, selected, sel_bg, None)
+}
+
+/// Отметка у своего сообщения: «√» отправлено, «√√» прочитано собеседником.
+pub(super) fn read_mark(id: i32, read_out: i32) -> &'static str {
+    if id <= 0 {
+        ""
+    } else if id <= read_out {
+        " √√"
+    } else {
+        " √"
+    }
+}
+
+/// То же, но с отметками прочтения: `read_out` задан только в личных чатах.
+pub(super) fn build_message_lines_marks(
+    msgs: &[ChatMsg],
+    width: usize,
+    bubble_pct: usize,
+    selected: Option<usize>,
+    sel_bg: Color,
+    read_out: Option<i32>,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let tz = jiff::tz::TimeZone::system();
     let today = local_date(jiff::Timestamp::now().as_second(), &tz);
@@ -254,8 +288,16 @@ pub(super) fn build_message_lines(
         if m.outgoing {
             lines.push(
                 Line::from(vec![
+                    Span::styled(
+                        m.views.map(|v| trf!("{} просм. · ", "{} views · ", short_count(v))).unwrap_or_default(),
+                        Style::new().fg(MUTED),
+                    ),
                     Span::styled(format!("{time} "), Style::new().fg(MUTED)),
                     Span::styled(tr!("Я", "Me"), Style::new().fg(OWN).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        read_out.map(|r| read_mark(m.id, r)).unwrap_or(""),
+                        Style::new().fg(if read_out.is_some_and(|r| m.id > 0 && m.id <= r) { OWN } else { MUTED }),
+                    ),
                 ])
                 .right_aligned(),
             );
@@ -273,6 +315,9 @@ pub(super) fn build_message_lines(
             }
             head.push(Span::styled(m.sender.clone(), Style::new().fg(color).add_modifier(Modifier::BOLD)));
             head.push(Span::styled(format!(" {time}"), Style::new().fg(MUTED)));
+            if let Some(v) = m.views {
+                head.push(Span::styled(trf!(" · {} просм.", " · {} views", short_count(v)), Style::new().fg(MUTED)));
+            }
             lines.push(Line::from(head));
             for n in &notes {
                 lines.push(Line::from(vec![Span::styled("│ ", Style::new().fg(color)), note(truncate(n, inner))]));

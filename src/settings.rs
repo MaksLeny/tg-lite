@@ -43,6 +43,8 @@ pub struct Settings {
     pub lang: u8,
     /// Мышь: клик по чату и вкладке, колесо для прокрутки.
     pub mouse: bool,
+    /// Черновики хранятся в Telegram и видны на других устройствах.
+    pub cloud_drafts: bool,
 }
 
 impl Default for Settings {
@@ -62,6 +64,7 @@ impl Default for Settings {
             bubble_width: 1,
             lang: 0,
             mouse: true,
+            cloud_drafts: true,
         }
     }
 }

@@ -46,7 +46,11 @@ const COMMANDS: &[&str] = &[
     "/findmsg",
     "/findall",
     "/latest",
+    "/pinned",
     "/pin",
+    "/chat",
+    "/join",
+    "/leave",
     "/readall",
     "/export",
     "/note",
@@ -222,7 +226,7 @@ enum Tab {
     Folder(i32),
 }
 
-const SETTINGS_ROWS: usize = 13;
+const SETTINGS_ROWS: usize = 14;
 
 pub struct App {
     chats: Vec<ChatInfo>,
@@ -281,6 +285,14 @@ pub struct App {
     drafts: HashMap<PeerId, (String, usize)>,
     /// Сообщение, ожидающее подтверждения удаления (второй `/del`).
     pending_delete: Option<(PeerId, i32)>,
+    /// Чат, для которого уже набрано первое /leave и ждём повторного.
+    pending_leave: Option<PeerId>,
+    /// Что сейчас лежит в Telegram как черновик каждого чата (чтобы не отправлять одно и то же).
+    cloud_drafts: HashMap<PeerId, String>,
+    /// Черновики, которые пора отправить в Telegram (разбирается на каждом такте).
+    draft_out: Vec<(PeerId, String)>,
+    /// Что набрано в поле и с какого момента не менялось: через пару секунд черновик уходит в Telegram.
+    draft_watch: (Option<PeerId>, String, Instant),
     /// Индекс выбранного сообщения в режиме выбора.
     pick: usize,
     /// Ответ на сообщение: (номер, подпись для поля ввода).
@@ -346,6 +358,10 @@ impl App {
             filter: String::new(),
             drafts: HashMap::new(),
             pending_delete: None,
+            pending_leave: None,
+            cloud_drafts: HashMap::new(),
+            draft_out: Vec::new(),
+            draft_watch: (None, String::new(), Instant::now()),
             pick: 0,
             reply: None,
             edit_target: None,
@@ -492,12 +508,17 @@ impl App {
             return;
         }
         let had_old = self.sel.is_some();
-        if self.edit_target.take().is_some() {
+        let was_editing = self.edit_target.take().is_some();
+        if was_editing {
             self.input.clear(); // текст правки не должен стать черновиком нового сообщения
             self.cursor = 0;
         }
         self.reply = None;
         if let Some(old) = self.sel {
+            if !was_editing {
+                let text = self.input.clone();
+                self.queue_draft(old, &text);
+            }
             if self.input.is_empty() {
                 self.drafts.remove(&old);
             } else {
@@ -520,6 +541,84 @@ impl App {
         self.older_busy = false;
         self.sel = new;
         self.pending_delete = None;
+        self.pending_leave = None;
+    }
+
+    /// Ставит черновик в очередь на отправку в Telegram, если он изменился. Команды («/…») не отправляем.
+    fn queue_draft(&mut self, id: PeerId, text: &str) {
+        if !self.settings.cloud_drafts || self.mode == Mode::Locked {
+            return;
+        }
+        let text = if text.trim().is_empty() || text.starts_with('/') { "" } else { text };
+        if self.cloud_drafts.get(&id).map_or("", String::as_str) == text {
+            return;
+        }
+        if text.is_empty() {
+            self.cloud_drafts.remove(&id);
+        } else {
+            self.cloud_drafts.insert(id, text.to_string());
+        }
+        self.draft_out.push((id, text.to_string()));
+    }
+
+    /// Раз в такт: замечает, что поле ввода давно не менялось, и отправляет черновик; выдаёт накопленную очередь.
+    fn flush_drafts(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) {
+        const IDLE: Duration = Duration::from_secs(4);
+        if self.mode == Mode::Chat && self.edit_target.is_none() {
+            if self.draft_watch.0 != self.sel || self.draft_watch.1 != self.input {
+                self.draft_watch = (self.sel, self.input.clone(), Instant::now());
+            } else if self.draft_watch.2.elapsed() >= IDLE
+                && let Some(id) = self.sel
+            {
+                let text = self.input.clone();
+                self.queue_draft(id, &text);
+            }
+        }
+        for (id, text) in std::mem::take(&mut self.draft_out) {
+            if let Some(chat) = self.chats.iter().find(|c| c.id == id).cloned() {
+                let _ = cmd.send(Cmd::SaveDraft { chat, text });
+            }
+        }
+    }
+
+    /// Подхватывает черновики из списка чатов (набранные на телефоне).
+    fn sync_server_drafts(&mut self) {
+        let found: Vec<(PeerId, String)> = self.chats.iter().filter(|c| !c.draft.is_empty()).map(|c| (c.id, c.draft.clone())).collect();
+        for (id, text) in found {
+            self.apply_server_draft(id, &text, false);
+        }
+    }
+
+    /// Принимает черновик, сохранённый в Telegram на другом устройстве. Набранное здесь не затирается.
+    fn apply_server_draft(&mut self, id: PeerId, text: &str, from_update: bool) {
+        if !self.settings.cloud_drafts {
+            return;
+        }
+        let prev = self.cloud_drafts.get(&id).cloned().unwrap_or_default();
+        if text == prev || (text.is_empty() && !from_update) {
+            return; // совпадает с известным; пустой черновик из списка чатов мог устареть и ничего не стирает
+        }
+        if text.is_empty() {
+            self.cloud_drafts.remove(&id);
+        } else {
+            self.cloud_drafts.insert(id, text.to_string());
+        }
+        if self.sel == Some(id) {
+            if self.edit_target.is_none() && (self.input.is_empty() || self.input == prev) {
+                self.input = text.to_string();
+                self.cursor = self.input.chars().count();
+            }
+        } else {
+            match self.drafts.get(&id) {
+                Some((t, _)) if *t != prev => {} // здесь набрано другое: не трогаем
+                _ if text.is_empty() => {
+                    self.drafts.remove(&id);
+                }
+                _ => {
+                    self.drafts.insert(id, (text.to_string(), text.chars().count()));
+                }
+            }
+        }
     }
 
     /// Следит, чтобы выбранный чат был виден в текущей вкладке. Возвращает true, если выбор сменился.
@@ -726,6 +825,7 @@ impl App {
         match ev {
             Event::DialogsPage(page) => {
                 self.merge_dialogs(page);
+                self.sync_server_drafts();
                 let keys: Vec<PeerId> = self.histories.keys().copied().collect();
                 for k in keys {
                     self.resolve_fwd(k);
@@ -802,8 +902,66 @@ impl App {
                 let title = trf!(" Найдено: {} · «{query}» ", " Found: {} · “{query}” ", items.len());
                 self.open_overlay(OverlayKind::Search, &title, items);
             }
+            Event::ReadOutbox { chat, max_id } => {
+                if let Some(c) = self.chats.iter_mut().find(|c| c.id == chat) {
+                    c.read_out = c.read_out.max(max_id);
+                }
+            }
+            Event::PinnedList { chat, hits } => {
+                if self.mode == Mode::Locked {
+                    return;
+                }
+                if hits.is_empty() {
+                    self.status = tr!("В этом чате нет закреплённых сообщений", "This chat has no pinned messages").into();
+                    return;
+                }
+                let name = self.chats.iter().find(|c| c.id == chat).map(|c| c.name.clone()).unwrap_or_default();
+                let items: Vec<OverlayItem> = hits
+                    .iter()
+                    .map(|h| {
+                        let text = h.text.replace('\n', " ");
+                        OverlayItem {
+                            label: format!("{}  {}: {text}", h.when, h.sender),
+                            target: Some((h.chat, h.id, h.ts)),
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+                let title = trf!(" Закреплённые: {} · {name} ", " Pinned: {} · {name} ", items.len());
+                self.open_overlay(OverlayKind::Search, &title, items);
+            }
+            Event::Found(info) => {
+                if self.mode == Mode::Locked {
+                    return;
+                }
+                let id = info.id;
+                let name = info.name.clone();
+                if !self.chats.iter().any(|c| c.id == id) {
+                    self.chats.insert(0, info);
+                }
+                self.reveal_chat(id);
+                self.scroll = 0;
+                self.pending_load = Some(Instant::now());
+                self.status = trf!("Открыт чат «{name}»", "Opened chat “{name}”");
+            }
+            Event::Draft { chat, text } => {
+                if self.mode != Mode::Locked {
+                    self.apply_server_draft(chat, &text, true);
+                }
+            }
+            Event::Left(id) => {
+                self.chats.retain(|c| c.id != id);
+                self.histories.remove(&id);
+                self.drafts.remove(&id);
+                if self.sel == Some(id) {
+                    self.sel = None;
+                    self.ensure_selection();
+                }
+                self.status = tr!("Вы вышли из чата", "You left the chat").into();
+            }
             Event::Dialogs(list) => {
                 self.chats = list;
+                self.sync_server_drafts();
                 let keys: Vec<PeerId> = self.histories.keys().copied().collect();
                 for k in keys {
                     self.resolve_fwd(k);
@@ -1066,6 +1224,7 @@ impl App {
                 self.status = tr!("Язык: русский", "Language: English").into();
             }
             11 => s.mouse = !s.mouse,
+            12 => s.cloud_drafts = !s.cloud_drafts,
             _ => {
                 if activate {
                     self.mode = Mode::NewPassword;
@@ -1374,6 +1533,7 @@ impl App {
             return;
         }
         self.pending_delete = None;
+        self.pending_leave = None;
         let simple = match text.as_str() {
             "/md" => Some(0),
             "/lock" => Some(1),
@@ -1437,6 +1597,7 @@ impl App {
             None => tr!("Отправляю…", "Sending…").into(),
         };
         let reply_to = self.reply.take().map(|(id, _)| id);
+        self.cloud_drafts.remove(&chat.id); // после отправки Telegram сам стирает черновик чата
         let _ = cmd.send(Cmd::Send { chat, text: body, markdown: self.markdown, delay_minutes: delay, reply_to });
         self.clear_input();
     }
@@ -1573,6 +1734,7 @@ impl App {
                 self.pick_note.clear();
                 self.mode = Mode::Pick;
                 self.pending_delete = None;
+                self.pending_leave = None;
             }
             _ => self.status = tr!("В этом чате пока нет сообщений", "No messages in this chat yet").into(),
         }
@@ -1812,6 +1974,9 @@ impl App {
             Some((n, a)) => (n, a.trim()),
             None => (text, ""),
         };
+        if name != "/leave" {
+            self.pending_leave = None; // подтверждение выхода действует только на сразу следующий /leave
+        }
         match name {
             "/find" | "/search" => {
                 self.clear_input();
@@ -1833,6 +1998,62 @@ impl App {
                     let _ = cmd.send(Cmd::SearchAll { query: arg.to_string() });
                 }
                 self.status = tr!("Ищу…", "Searching…").into();
+            }
+            "/pinned" => {
+                self.clear_input();
+                let Some(chat) = self.selected().cloned() else {
+                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
+                    return true;
+                };
+                let _ = cmd.send(Cmd::ListPinned(chat));
+                self.status = tr!("Загружаю закреплённые…", "Loading pinned messages…").into();
+            }
+            "/chat" | "/join" => {
+                self.clear_input();
+                let join = name == "/join";
+                let Some(target) = tg::parse_target(arg) else {
+                    self.status = if join {
+                        tr!(
+                            "Укажите ссылку или имя: /join t.me/+код или /join @имя",
+                            "Give a link or a name: /join t.me/+code or /join @name"
+                        )
+                        .into()
+                    } else {
+                        tr!("Укажите @имя: /chat @имя", "Give an @name: /chat @name").into()
+                    };
+                    return true;
+                };
+                if !join && !matches!(target, tg::Target::Username(_)) {
+                    self.status = tr!("Для ссылки-приглашения используйте /join", "Use /join for an invite link").into();
+                    return true;
+                }
+                let _ = cmd.send(if join { Cmd::Join(target) } else { Cmd::OpenTarget(target) });
+                self.status = if join { tr!("Вступаю…", "Joining…").into() } else { tr!("Ищу…", "Looking…").into() };
+            }
+            "/leave" => {
+                self.clear_input();
+                let Some(chat) = self.selected().cloned() else {
+                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
+                    return true;
+                };
+                if chat.kind == Kind::User {
+                    self.status = tr!(
+                        "Из личного чата выйти нельзя: /leave работает для групп и каналов",
+                        "You cannot leave a private chat: /leave works for groups and channels"
+                    )
+                    .into();
+                    return true;
+                }
+                if self.pending_leave == Some(chat.id) {
+                    self.pending_leave = None;
+                    let _ = cmd.send(Cmd::Leave(chat));
+                    self.status = tr!("Выхожу…", "Leaving…").into();
+                } else {
+                    self.status =
+                        trf!("Выйти из «{}»? Повторите /leave для подтверждения", "Leave “{}”? Repeat /leave to confirm", chat.name);
+                    self.pending_leave = Some(chat.id);
+                }
+                return true; // pending_leave сохраняется до следующей другой команды
             }
             "/latest" => {
                 self.clear_input();
@@ -2176,6 +2397,7 @@ pub async fn run(
                 if app.expire_typing() {
                     dirty = true;
                 }
+                app.flush_drafts(&cmd);
                 let left = tg::flood_left();
                 if left > 0 {
                     let text = trf!("Telegram просит подождать {left} с, сообщение отправится само…", "Telegram asks to wait {left} s, the message will be sent automatically…");

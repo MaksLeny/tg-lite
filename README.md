@@ -63,7 +63,8 @@ which is the main reason it is so small.
 - Tabs: All, New (unread), Users, Groups, Channels and your own Telegram folders.
 - Online / last seen (within the other person's privacy settings), unread counters, the unread total in the window title.
 - Live updates: new, edited and deleted messages; "typing…" and "recording voice…" in the chat header; `@` marks mentions.
-- A separate draft per chat; if sending fails the text returns to the input box.
+- A separate draft per chat; if sending fails the text returns to the input box. Cloud drafts: unsent text is saved in Telegram (when you switch chats or stop typing for a few seconds), so it shows up on your phone, and a draft typed on the phone appears here. Can be turned off in the settings; commands starting with `/` are never uploaded.
+- Channel posts show their view count next to the time (as loaded; it is not refreshed live).
 - A pinned message is shown above the conversation.
 
 **Messages**
@@ -81,6 +82,9 @@ which is the main reason it is so small.
 
 **Managing chats**
 - `/findmsg text` searches messages in the open chat, `/findall text` in all chats (up to 40 results); `Enter` on a result opens it in its surroundings (`PgDn` or `Esc` goes back to the latest messages, also `/latest`). `PgUp` at the top of a conversation loads older messages (up to 1500 per chat; use search beyond that).
+- Read marks in private chats: `√` next to your message means sent, `√√` means the other person has read it (not shown in groups, channels and Saved Messages).
+- `/pinned` lists all pinned messages of the open chat (`Enter` opens one in its surroundings).
+- `/chat @name` finds a person or a channel by its public name and opens the chat, even if you have never written to them. `/join t.me/+code` or `/join @name` joins a group or channel by an invite link or a public name; `/leave` leaves the open group or channel (repeat it to confirm; not available in private chats).
 - `/find text` (`F6`, `Ctrl+F`) filters chats by name, `/pin` pins a chat, `/readall` marks everything read, `/export` saves a conversation to `export/<chat>.txt`.
 
 **Comfort**
@@ -88,7 +92,7 @@ which is the main reason it is so small.
 - English and Russian interface (setting "Interface language", chosen at first start).
 - Animated sign-in screen (always Aurora) and lock screen (Aurora, Matrix, Stars or none, your choice in settings).
 - Mouse: click a tab or a chat, the wheel scrolls the conversation (over the chat list it moves the selection). Can be turned off in the settings. While the mouse is on, selecting text by dragging and right-click paste may not work in the console (in Windows Terminal hold `Shift` to select); use `/copy` and `Ctrl+V`, or turn the mouse off.
-- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, mouse, password.
+- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, mouse, cloud drafts, password.
 - `/faq` shows troubleshooting tips inside the program. `tglite.log` records errors and `tg-lite --debug` makes it detailed (never message text).
 - Emoji, invisible characters and scripts other than Latin, Greek and Cyrillic are hidden: the Windows console cannot draw them and the screen would fall apart.
 
@@ -147,6 +151,9 @@ Every action has both a key and a command, in case a key does not work in your c
 | F5 | `/refresh` | refresh chat list |
 | F6 | `/find text` | search chats |
 | | `/findmsg text` `/findall text` `/latest` | search messages in this chat or everywhere, back to the latest messages |
+| | `/pinned` | all pinned messages of the open chat |
+| | `/chat @name` | find a person or channel by name and open the chat |
+| | `/join link-or-@name` `/leave` | join a group or channel; leave the open one (repeat to confirm) |
 | F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links |
 | F10 | `/quit` | quit |
 | | `/pin` `/readall` `/export` | pin chat, read everything, export |
@@ -159,7 +166,7 @@ Every action has both a key and a command, in case a key does not work in your c
 ## Security
 
 - `api_id`, `api_hash` and the Telegram session live in `tglite.vault`, encrypted with your password (Argon2id + ChaCha20-Poly1305). Without the password the file cannot be read and tampering is detected.
-- The conversation is never written to disk. Exceptions are `/export` and `/save`, which you run yourself, and the short-lived files of `/open` (the `tglite-view` folder, emptied on lock, on exit and on start). Drafts and the input history live in memory only.
+- The conversation is never written to disk. Exceptions are `/export` and `/save`, which you run yourself, and the short-lived files of `/open` (the `tglite-view` folder, emptied on lock, on exit and on start). The input history lives in memory only; drafts also live in memory here, and with cloud drafts on (default) the unsent text is stored by Telegram itself, like in any official app.
 - Auto-lock after 1–60 minutes (or never) and on `F2`; the lock screen shows no messages.
 - Optional self-destruct: overwrite and delete `tglite.vault` after 3, 5 or 10 wrong passwords on the lock screen (off by default). Other files stay, and you should end the session in Telegram → Settings → Devices.
 - The log never contains message text. The chosen language is stored in `tglite.lang` (not secret).
@@ -220,7 +227,9 @@ The same list is available in the program as `/faq`.
 
 ## Roadmap
 
-**1.1.0 (this version):** mouse (click a tab or a chat, wheel scrolling; can be turned off in the settings), a short demo GIF, measured memory use after long heavy use.
+**1.2.0 (this version):** read marks in private chats, `/pinned`, `/chat @name`, `/join` and `/leave`, cloud drafts (synced with the phone), view counts under channel posts.
+
+**1.1.0:** mouse (click a tab or a chat, wheel scrolling; can be turned off in the settings), a short demo GIF, measured memory use after long heavy use.
 
 **1.0.2:** all chats instead of the first 120, older history on PgUp, message search (`/findmsg`, `/findall`) with the result opened in its context.
 
@@ -303,7 +312,8 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Вкладки: Все, Новые (с непрочитанными), Личные, Группы, Каналы и ваши папки из Telegram.
 - «В сети» / «был(а) в сети» (в пределах приватности собеседника), счётчики непрочитанных, число в заголовке окна.
 - Всё приходит само: новые, изменённые и удалённые сообщения; «печатает…» и «записывает голосовое…» в заголовке; значок `@` у упоминаний.
-- Свой черновик у каждого чата; если отправка не удалась, текст возвращается в поле ввода.
+- Свой черновик у каждого чата; если отправка не удалась, текст возвращается в поле ввода. Облачные черновики: неотправленный текст сохраняется в Telegram (при смене чата или когда вы несколько секунд не печатаете) и виден на телефоне, а черновик с телефона появляется здесь. Выключается в настройках; команды, начинающиеся с `/`, не отправляются.
+- У постов каналов рядом со временем показано число просмотров (на момент загрузки, вживую не обновляется).
 - Закреплённое сообщение показывается над перепиской.
 
 **Сообщения**
@@ -321,6 +331,9 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 
 **Управление чатами**
 - `/findmsg текст` — поиск сообщений в открытом чате, `/findall текст` — во всех чатах (до 40 результатов); `Enter` на результате открывает его среди соседних сообщений (`PgDn` или `Esc` возвращает к последним, также `/latest`). `PgUp` у верха переписки подгружает старые сообщения (до 1500 на чат; дальше помогает поиск).
+- Отметки прочтения в личных чатах: `√` у вашего сообщения — отправлено, `√√` — собеседник прочитал (в группах, каналах и «Избранном» не показываются).
+- `/pinned` — список всех закреплённых сообщений открытого чата (`Enter` открывает сообщение среди соседних).
+- `/chat @имя` находит человека или канал по публичному имени и открывает чат, даже если вы ему ещё не писали. `/join t.me/+код` или `/join @имя` — вступить в группу или канал по ссылке-приглашению или публичному имени; `/leave` — выйти из открытой группы или канала (повторите для подтверждения; в личных чатах недоступно).
 - `/find текст` (`F6`, `Ctrl+F`) — поиск по названиям, `/pin` — закрепить, `/readall` — всё прочитано, `/export` — сохранить переписку в `export/<чат>.txt`.
 
 **Удобство**
@@ -328,7 +341,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Интерфейс на русском и английском (настройка «Язык интерфейса», выбирается при первом запуске).
 - Анимированный экран входа (всегда «Аврора») и экран блокировки («Аврора», «Матрица», «Звёзды» или без анимации, выбирается в настройках).
 - Мышь: клик по вкладке или чату, колесо прокручивает переписку (над списком чатов двигает выбор). Выключается в настройках. Пока мышь включена, выделение текста протягиванием и вставка правой кнопкой в консоли могут не работать (в Windows Terminal выделять можно с зажатым `Shift`); используйте `/copy` и `Ctrl+V` или выключите мышь.
-- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, мышь, пароль.
+- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, мышь, облачные черновики, пароль.
 - `/faq` — подсказки «Если не работает» прямо в программе. В `tglite.log` пишутся ошибки, а `tg-lite --debug` делает журнал подробным (тексты переписки не пишутся никогда).
 - Эмодзи, невидимые символы и письменности кроме латиницы, греческого и кириллицы скрываются: консоль Windows не умеет их рисовать, и экран «рассыпался» бы.
 
@@ -387,6 +400,9 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | F5 | `/refresh` | обновить список чатов |
 | F6 | `/find текст` | поиск по чатам |
 | | `/findmsg текст` `/findall текст` `/latest` | поиск сообщений в этом чате или везде, назад к последним |
+| | `/pinned` | все закреплённые сообщения открытого чата |
+| | `/chat @имя` | найти человека или канал по имени и открыть чат |
+| | `/join ссылка-или-@имя` `/leave` | вступить в группу или канал; выйти из открытого (повторите для подтверждения) |
 | F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки |
 | F10 | `/quit` | выход |
 | | `/pin` `/readall` `/export` | закрепить чат, прочитать всё, сохранить переписку |
@@ -399,7 +415,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 ## Безопасность
 
 - `api_id`, `api_hash` и сессия Telegram лежат в `tglite.vault`, зашифрованном вашим паролем (Argon2id + ChaCha20-Poly1305). Без пароля файл не прочитать, подмена данных обнаруживается.
-- Переписка на диск не пишется. Исключения — `/export` и `/save`, которые вы запускаете сами, и недолгие файлы `/open` (папка `tglite-view`, очищается при блокировке, выходе и запуске). Черновики и история ввода живут только в памяти.
+- Переписка на диск не пишется. Исключения — `/export` и `/save`, которые вы запускаете сами, и недолгие файлы `/open` (папка `tglite-view`, очищается при блокировке, выходе и запуске). История ввода живёт только в памяти; черновики здесь тоже в памяти, а при включённых облачных черновиках (по умолчанию) неотправленный текст хранит сам Telegram, как в любом официальном приложении.
 - Автоблокировка через 1–60 минут (или никогда) и по `F2`; на экране блокировки переписки нет.
 - Самоуничтожение по желанию: затереть и удалить `tglite.vault` после 3, 5 или 10 неверных паролей на экране блокировки (по умолчанию выключено). Остальные файлы остаются; завершите сессию в Telegram → Настройки → Устройства.
 - В журнале нет текстов сообщений. Выбранный язык хранится в `tglite.lang` (не секрет).
@@ -460,7 +476,9 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Планы
 
-**1.1.0 (эта версия):** мышь (клик по вкладке или чату, прокрутка колесом; выключается в настройках), короткое GIF-демо, замер памяти после долгой активной работы.
+**1.2.0 (эта версия):** отметки прочтения в личных чатах, `/pinned`, `/chat @имя`, `/join` и `/leave`, облачные черновики (синхронизация с телефоном), просмотры под постами каналов.
+
+**1.1.0:** мышь (клик по вкладке или чату, прокрутка колесом; выключается в настройках), короткое GIF-демо, замер памяти после долгой активной работы.
 
 **1.0.2:** все чаты вместо первых 120, старая история по PgUp, поиск сообщений (`/findmsg`, `/findall`) с открытием найденного в контексте.
 

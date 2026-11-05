@@ -109,6 +109,10 @@ pub struct ChatInfo {
     pub is_contact: bool,
     pub is_bot: bool,
     pub is_self: bool,
+    /// Самое большое прочитанное собеседником ваше сообщение (для отметок прочтения в личных чатах).
+    pub read_out: i32,
+    /// Черновик, сохранённый в Telegram (набран на телефоне или в другом клиенте).
+    pub draft: String,
 }
 
 /// Папка чатов из аккаунта Telegram.
@@ -227,6 +231,8 @@ pub struct ChatMsg {
     pub fwd: Option<Fwd>,
     /// В сообщении упомянули вас (@).
     pub mentioned: bool,
+    /// Просмотры поста канала (на момент загрузки).
+    pub views: Option<i32>,
 }
 
 /// Найденное сообщение.
@@ -320,6 +326,19 @@ pub enum Cmd {
         chat: ChatInfo,
         id: i32,
     },
+    /// Показать все закреплённые сообщения чата.
+    ListPinned(ChatInfo),
+    /// Найти человека или канал по @имени и открыть чат с ним (в том числе без переписки).
+    OpenTarget(Target),
+    /// Вступить в группу или канал по ссылке-приглашению или публичному имени.
+    Join(Target),
+    /// Выйти из группы или канала.
+    Leave(ChatInfo),
+    /// Сохранить черновик в Telegram.
+    SaveDraft {
+        chat: ChatInfo,
+        text: String,
+    },
 }
 
 /// События от обработчика к интерфейсу.
@@ -393,6 +412,25 @@ pub enum Event {
     },
     /// Файл для просмотра скачан: интерфейс открывает его.
     Open(PathBuf),
+    /// Собеседник прочитал ваши сообщения в личном чате до номера `max_id`.
+    ReadOutbox {
+        chat: PeerId,
+        max_id: i32,
+    },
+    /// Закреплённые сообщения чата (новые сверху).
+    PinnedList {
+        chat: PeerId,
+        hits: Vec<SearchHit>,
+    },
+    /// Найденный или присоединённый чат: интерфейс добавляет его в список и открывает.
+    Found(ChatInfo),
+    /// Вы вышли из чата.
+    Left(PeerId),
+    /// Черновик изменён на другом устройстве (пустой текст — стёрт).
+    Draft {
+        chat: PeerId,
+        text: String,
+    },
     Status(String),
     Error(String),
 }
@@ -626,6 +664,7 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
         reply_to: m.reply_to_message_id(),
         fwd,
         mentioned: m.mentioned() && !m.outgoing(),
+        views: m.view_count().filter(|v| *v > 0),
     }
 }
 
@@ -692,8 +731,8 @@ fn folder_from_raw(f: &tl::enums::DialogFilter) -> Option<Folder> {
 
 // ------------------------------------------------------------ операции
 
-fn dialog_info(d: &grammers_client::peer::Dialog) -> ChatInfo {
-    let (name, presence, is_contact, is_bot, is_self) = match d.peer() {
+fn chat_info(p: &Peer, id: PeerId, peer: PeerRef, unread: i32, mentions: i32, read_out: i32, draft: String) -> ChatInfo {
+    let (name, presence, is_contact, is_bot, is_self) = match p {
         Peer::User(u) => {
             let is_self = u.is_self();
             let name = if is_self { tr!("Избранное", "Saved Messages").to_string() } else { crate::util::clean(&u.full_name()) };
@@ -703,16 +742,44 @@ fn dialog_info(d: &grammers_client::peer::Dialog) -> ChatInfo {
         p => (crate::util::clean(p.name().unwrap_or(tr!("(без имени)", "(no name)"))), None, false, false, false),
     };
     ChatInfo {
-        id: d.peer_id(),
-        peer: d.peer_ref(),
+        id,
+        peer,
         name: if name.trim().is_empty() { tr!("(без имени)", "(no name)").to_string() } else { name.trim().to_string() },
-        kind: kind_of(d.peer()),
-        unread: dialog_unread(d),
-        mentions: dialog_mentions(d),
+        kind: kind_of(p),
+        unread,
+        mentions,
         presence,
         is_contact,
         is_bot,
         is_self,
+        read_out,
+        draft,
+    }
+}
+
+fn dialog_info(d: &grammers_client::peer::Dialog) -> ChatInfo {
+    chat_info(d.peer(), d.peer_id(), d.peer_ref(), dialog_unread(d), dialog_mentions(d), dialog_read_out(d), dialog_draft(d))
+}
+
+/// Текст черновика из диалога.
+fn dialog_draft(d: &grammers_client::peer::Dialog) -> String {
+    match &d.raw {
+        tl::enums::Dialog::Dialog(x) => x.draft.as_ref().map(draft_text).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn draft_text(d: &tl::enums::DraftMessage) -> String {
+    match d {
+        tl::enums::DraftMessage::Message(m) => m.message.clone(),
+        _ => String::new(),
+    }
+}
+
+fn dialog_read_out(d: &grammers_client::peer::Dialog) -> i32 {
+    match &d.raw {
+        tl::enums::Dialog::Dialog(x) => x.read_outbox_max_id,
+        _ => 0,
     }
 }
 
@@ -1043,6 +1110,189 @@ pub async fn load_pinned(client: &Client, chat: &ChatInfo) -> Result<Option<Stri
     }))
 }
 
+// ------------------------------------------------------------ ссылки, @имена, закреплённые
+
+/// Куда ведёт введённая пользователем ссылка или @имя.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Публичное имя пользователя, группы или канала (без @).
+    Username(String),
+    /// Хэш ссылки-приглашения (t.me/+хэш).
+    Invite(String),
+}
+
+fn valid_username(s: &str) -> bool {
+    (4..=32).contains(&s.len())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+fn valid_invite(s: &str) -> bool {
+    (6..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Служебные пути t.me, которые не являются именами.
+const RESERVED_PATHS: [&str; 12] =
+    ["joinchat", "addstickers", "addemoji", "c", "proxy", "socks", "share", "iv", "bg", "login", "setlanguage", "addlist"];
+
+/// Разбирает `@имя`, `имя`, `t.me/имя`, `t.me/+хэш`, `t.me/joinchat/хэш`, `tg://resolve?domain=имя`, `tg://join?invite=хэш`.
+pub fn parse_target(input: &str) -> Option<Target> {
+    let s = input.trim();
+    if s.is_empty() || s.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if let Some(name) = s.strip_prefix('@') {
+        return valid_username(name).then(|| Target::Username(name.to_string()));
+    }
+    if let Some(rest) = s.strip_prefix("tg://") {
+        let (path, query) = rest.split_once('?')?;
+        let get = |key: &str| query.split('&').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='));
+        return match path {
+            "resolve" => get("domain").filter(|d| valid_username(d)).map(|d| Target::Username(d.to_string())),
+            "join" => get("invite").filter(|h| valid_invite(h)).map(|h| Target::Invite(h.to_string())),
+            _ => None,
+        };
+    }
+    let lower = s.to_ascii_lowercase();
+    let no_scheme = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://")).unwrap_or(&lower);
+    let no_www = no_scheme.strip_prefix("www.").unwrap_or(no_scheme);
+    let host_len = ["t.me/", "telegram.me/", "telegram.dog/"].iter().find(|h| no_www.starts_with(**h)).map(|h| h.len());
+    let Some(host_len) = host_len else {
+        // голое имя без @ допускается: `/join durov`
+        return valid_username(s).then(|| Target::Username(s.to_string()));
+    };
+    // регистр в хэшах приглашений важен, поэтому режем оригинальную строку по тем же смещениям
+    let offset = s.len() - no_www.len() + host_len;
+    let path = s.get(offset..)?.split(['?', '#']).next()?;
+    let mut parts = path.split('/').filter(|p| !p.is_empty());
+    let first = parts.next()?;
+    if let Some(h) = first.strip_prefix('+') {
+        return valid_invite(h).then(|| Target::Invite(h.to_string()));
+    }
+    let first_lower = first.to_ascii_lowercase();
+    if first_lower == "joinchat" {
+        let h = parts.next()?;
+        return valid_invite(h).then(|| Target::Invite(h.to_string()));
+    }
+    let name = if first_lower == "s" { parts.next()? } else { first };
+    if RESERVED_PATHS.contains(&name.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    valid_username(name).then(|| Target::Username(name.to_string()))
+}
+
+/// Понятное объяснение ошибки Telegram при поиске, вступлении и выходе.
+pub fn rpc_hint(e: &InvocationError) -> String {
+    let known: [(&str, &str, &str); 9] = [
+        ("USER_ALREADY_PARTICIPANT", "вы уже состоите в этом чате", "you are already a member of this chat"),
+        ("INVITE_HASH_EXPIRED", "ссылка-приглашение устарела или отозвана", "the invite link has expired or was revoked"),
+        ("INVITE_HASH_INVALID", "ссылка-приглашение неверна", "the invite link is not valid"),
+        (
+            "INVITE_REQUEST_SENT",
+            "заявка на вступление отправлена, ждите одобрения администратора",
+            "join request sent, wait for an admin to approve it",
+        ),
+        ("CHANNELS_TOO_MUCH", "вы состоите в максимальном числе групп и каналов", "you have reached the limit of groups and channels"),
+        ("USERNAME_INVALID", "неверное имя", "invalid username"),
+        ("USERNAME_NOT_OCCUPIED", "такого имени нет", "no such username"),
+        ("CHANNEL_PRIVATE", "чат закрытый: нужна ссылка-приглашение", "the chat is private: an invite link is needed"),
+        ("USER_BANNED_IN_CHANNEL", "вам запрещено вступать в этот чат", "you are banned from this chat"),
+    ];
+    for (name, ru, en) in known {
+        if e.is(name) {
+            return tr!(ru, en).to_string();
+        }
+    }
+    e.to_string()
+}
+
+/// Находит чат по публичному имени.
+pub async fn resolve_chat(client: &Client, name: &str) -> Result<Option<ChatInfo>> {
+    let Some(peer) = client.resolve_username(name).await.map_err(|e| anyhow!("{}", rpc_hint(&e)))? else {
+        return Ok(None);
+    };
+    let Some(r) = peer.to_ref().await.map_err(|e| anyhow!("{e}"))? else {
+        return Ok(None);
+    };
+    Ok(Some(chat_info(&peer, peer.id(), r, 0, 0, 0, String::new())))
+}
+
+/// Вступает в чат; возвращает чат, если он известен сразу (по публичному имени).
+pub async fn join_target(client: &Client, target: &Target) -> Result<Option<ChatInfo>> {
+    match target {
+        Target::Invite(hash) => match client.invoke(&tl::functions::messages::ImportChatInvite { hash: hash.clone() }).await {
+            Ok(_) => Ok(None),
+            Err(e) => Err(anyhow!("{}", rpc_hint(&e))),
+        },
+        Target::Username(name) => {
+            let Some(info) = resolve_chat(client, name).await? else {
+                return Err(anyhow!("{}", tr!("такого имени нет", "no such username")));
+            };
+            if info.kind == Kind::User {
+                return Ok(Some(info));
+            }
+            match client.join_chat(info.peer).await {
+                Ok(_) => Ok(Some(info)),
+                Err(e) if e.is("USER_ALREADY_PARTICIPANT") => Ok(Some(info)),
+                Err(e) => Err(anyhow!("{}", rpc_hint(&e))),
+            }
+        }
+    }
+}
+
+/// Все закреплённые сообщения чата, новые сверху.
+pub async fn list_pinned(client: &Client, chat: &ChatInfo) -> Result<Vec<SearchHit>> {
+    let mut it = client.search_messages(chat.peer).filter(tl::enums::MessagesFilter::InputMessagesFilterPinned);
+    let mut out = Vec::new();
+    while let Some(m) = it.next().await? {
+        out.push(hit_from(&m, &chat.name));
+        if out.len() >= MAX_HITS {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Сохраняет черновик в Telegram (пустой текст стирает его); он появится на других устройствах.
+pub async fn save_draft(client: &Client, chat: &ChatInfo, text: &str) -> Result<()> {
+    client
+        .invoke(&tl::functions::messages::SaveDraft {
+            no_webpage: false,
+            invert_media: false,
+            reply_to: None,
+            peer: chat.peer.into(),
+            message: text.to_string(),
+            entities: None,
+            media: None,
+            effect: None,
+            suggested_post: None,
+            rich_message: None,
+        })
+        .await?;
+    Ok(())
+}
+
+/// Разбирает «сырое» обновление о черновике (набран на другом устройстве); темы форумов не учитываем.
+pub fn draft_from_raw(u: &tl::enums::Update) -> Option<(PeerId, String)> {
+    match u {
+        tl::enums::Update::DraftMessage(x) if x.top_msg_id.is_none() && x.saved_peer_id.is_none() => {
+            Some((PeerId::from(x.peer.clone()), draft_text(&x.draft)))
+        }
+        _ => None,
+    }
+}
+
+/// Разбирает «сырое» обновление о прочтении ваших сообщений собеседником в личном чате.
+pub fn read_outbox_from_raw(u: &tl::enums::Update) -> Option<(PeerId, i32)> {
+    match u {
+        tl::enums::Update::ReadHistoryOutbox(x) => match &x.peer {
+            tl::enums::Peer::User(p) => Some((PeerId::user(p.user_id)?, x.max_id)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 // ------------------------------------------------------------ фоновые задачи
 
 /// Запускает обработку команд и входящих обновлений. Возвращает канал команд.
@@ -1092,6 +1342,10 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                             if let Some(user) = PeerId::user(u.user_id) {
                                 let _ = events.send(Event::Presence { user, presence: presence_from(&u.status) });
                             }
+                        } else if let Some((chat, text)) = draft_from_raw(&raw.raw) {
+                            let _ = events.send(Event::Draft { chat, text });
+                        } else if let Some((chat, max_id)) = read_outbox_from_raw(&raw.raw) {
+                            let _ = events.send(Event::ReadOutbox { chat, max_id });
                         } else if let Some((chat, from, kind)) = typing_from_raw(&raw.raw) {
                             let _ = events.send(Event::Typing { chat, from, kind });
                         }
@@ -1356,6 +1610,89 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         let _ = events.send(Event::Error(trf!("не удалено: {}", "not deleted: {}", friendly_error(&e.to_string()))));
                     }
                 },
+                Cmd::ListPinned(chat) => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match list_pinned(&client, &chat).await {
+                            Ok(hits) => {
+                                let _ = events.send(Event::PinnedList { chat: chat.id, hits });
+                            }
+                            Err(e) => {
+                                log(&format!("pinned list: {e}"));
+                                let _ = events.send(Event::Error(trf!("закреплённые: {e}", "pinned: {e}")));
+                            }
+                        }
+                    });
+                }
+                Cmd::OpenTarget(target) => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        let Target::Username(name) = target else { return };
+                        match resolve_chat(&client, &name).await {
+                            Ok(Some(info)) => {
+                                let _ = events.send(Event::Found(info));
+                            }
+                            Ok(None) => {
+                                let _ = events.send(Event::Error(trf!("@{} не найден", "@{} not found", name)));
+                            }
+                            Err(e) => {
+                                log(&format!("open @{name}: {e}"));
+                                let _ = events.send(Event::Error(trf!("@{}: {}", "@{}: {}", name, e)));
+                            }
+                        }
+                    });
+                }
+                Cmd::Join(target) => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match join_target(&client, &target).await {
+                            Ok(Some(info)) => {
+                                let _ = events.send(Event::Found(info));
+                            }
+                            Ok(None) => {
+                                let _ = events.send(Event::Status(tr!("Вы вступили в чат", "You joined the chat").into()));
+                                if let Ok(d) = load_dialogs(&client, QUICK_DIALOGS, None).await {
+                                    let _ = events.send(Event::DialogsPage(d));
+                                }
+                            }
+                            Err(e) => {
+                                log(&format!("join: {e}"));
+                                let _ = events.send(Event::Error(trf!("не удалось вступить: {e}", "could not join: {e}")));
+                            }
+                        }
+                    });
+                }
+                Cmd::SaveDraft { chat, text } => {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        // Черновик не критичен: ошибка только в журнал.
+                        if let Err(e) = save_draft(&client, &chat, &text).await {
+                            log(&format!("save draft: {e}"));
+                        }
+                    });
+                }
+                Cmd::Leave(chat) => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        // личный чат так «покинуть» нельзя: Telegram удалил бы переписку
+                        if chat.kind == Kind::User {
+                            return;
+                        }
+                        match client.delete_dialog(chat.peer).await {
+                            Ok(()) => {
+                                let _ = events.send(Event::Left(chat.id));
+                            }
+                            Err(e) => {
+                                log(&format!("leave: {e}"));
+                                let _ = events.send(Event::Error(trf!("не удалось выйти: {e}", "could not leave: {e}")));
+                            }
+                        }
+                    });
+                }
                 Cmd::MarkRead(chat) => {
                     let client = client.clone();
                     tokio::spawn(async move {
@@ -1390,7 +1727,109 @@ mod tests {
             is_bot: false,
             is_self: false,
             mentions: 0,
+            read_out: 0,
+            draft: String::new(),
         }
+    }
+
+    #[test]
+    fn targets_are_parsed_from_links_and_names() {
+        let user = |n: &str| Some(Target::Username(n.to_string()));
+        let invite = |h: &str| Some(Target::Invite(h.to_string()));
+        for ok in [
+            "@durov",
+            "durov",
+            "t.me/durov",
+            "https://t.me/durov",
+            "http://t.me/durov/",
+            "HTTPS://T.ME/durov",
+            "t.me/durov/123",
+            "t.me/durov?start=x",
+            "https://telegram.me/durov",
+            "tg://resolve?domain=durov",
+            "t.me/s/durov",
+            "www.t.me/durov",
+            "  @durov  ",
+        ] {
+            assert_eq!(parse_target(ok), user("durov"), "{ok}");
+        }
+        for ok in [
+            "t.me/+AbCdEfGh12345",
+            "https://t.me/+AbCdEfGh12345",
+            "t.me/joinchat/AbCdEfGh12345",
+            "tg://join?invite=AbCdEfGh12345",
+            "t.me/+AbCdEfGh12345?x=1",
+        ] {
+            assert_eq!(parse_target(ok), invite("AbCdEfGh12345"), "{ok}");
+        }
+        // регистр хэша сохраняется
+        assert_eq!(parse_target("https://T.me/+aBcDeF_gh-1"), invite("aBcDeF_gh-1"));
+        for bad in [
+            "",
+            "   ",
+            "@",
+            "@ab",
+            "@1abcde",
+            "@du rov",
+            "durov channel",
+            "t.me/",
+            "t.me/+",
+            "t.me/+abc",
+            "t.me/joinchat",
+            "t.me/addstickers/pack",
+            "t.me/c/123/4",
+            "https://example.com/durov",
+            "tg://unknown?x=1",
+            "tg://resolve",
+            "tg://join?invite=ab",
+            "@имя_на_русском",
+            "@a_very_long_name_that_is_longer_than_thirty_two_characters",
+        ] {
+            assert_eq!(parse_target(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn read_receipts_come_only_from_private_chats() {
+        let upd = |peer: tl::enums::Peer| {
+            tl::enums::Update::ReadHistoryOutbox(tl::types::UpdateReadHistoryOutbox { peer, max_id: 42, pts: 1, pts_count: 1 })
+        };
+        assert_eq!(
+            read_outbox_from_raw(&upd(tl::enums::Peer::User(tl::types::PeerUser { user_id: 7 }))),
+            Some((PeerId::user(7).unwrap(), 42))
+        );
+        assert_eq!(read_outbox_from_raw(&upd(tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: 7 }))), None);
+        assert_eq!(read_outbox_from_raw(&upd(tl::enums::Peer::Channel(tl::types::PeerChannel { channel_id: 7 }))), None);
+    }
+
+    #[test]
+    fn drafts_come_from_updates_and_dialogs() {
+        let upd = |top: Option<i32>, draft: tl::enums::DraftMessage| {
+            tl::enums::Update::DraftMessage(tl::types::UpdateDraftMessage {
+                peer: tl::enums::Peer::User(tl::types::PeerUser { user_id: 9 }),
+                top_msg_id: top,
+                saved_peer_id: None,
+                draft,
+            })
+        };
+        let text = tl::enums::DraftMessage::Message(tl::types::DraftMessage {
+            no_webpage: false,
+            invert_media: false,
+            reply_to: None,
+            message: "привет".into(),
+            entities: None,
+            media: None,
+            date: 1,
+            effect: None,
+            suggested_post: None,
+            rich_message: None,
+        });
+        assert_eq!(draft_from_raw(&upd(None, text.clone())), Some((PeerId::user(9).unwrap(), "привет".to_string())));
+        assert_eq!(draft_text(&text), "привет");
+        let empty = tl::enums::DraftMessage::Empty(tl::types::DraftMessageEmpty { date: None });
+        assert_eq!(draft_from_raw(&upd(None, empty.clone())), Some((PeerId::user(9).unwrap(), String::new())));
+        assert_eq!(draft_text(&empty), "");
+        assert_eq!(draft_from_raw(&upd(Some(5), text)), None, "черновики тем форумов не учитываем");
     }
 
     #[test]

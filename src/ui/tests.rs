@@ -14,6 +14,8 @@ fn chat(id: i64, name: &str, kind: Kind, unread: i32) -> ChatInfo {
         Kind::Channel => PeerId::channel(id).unwrap(),
     };
     ChatInfo {
+        read_out: 0,
+        draft: String::new(),
         id: pid,
         peer: pid.to_ambient_ref(),
         name: name.into(),
@@ -1171,7 +1173,7 @@ fn altgr_characters_are_not_ctrl_shortcuts() {
 fn settings_scroll_keeps_selected_row_visible_on_short_windows() {
     let mut app = demo_app();
     app.mode = Mode::Settings;
-    for row in [0usize, 5, 10, 11, 12] {
+    for row in [0usize, 5, 10, 11, 12, 13] {
         app.settings_row = row;
         let mut term = Terminal::new(TestBackend::new(100, 10)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -1181,6 +1183,7 @@ fn settings_scroll_keeps_selected_row_visible_on_short_windows() {
             5 => "Цвет интерфейса",
             10 => "Язык интерфейса",
             11 => "Мышь",
+            12 => "Облачные черновики",
             _ => "Пароль приложения",
         };
         assert!(text.contains(label), "строка {row} не видна:\n{text}");
@@ -1757,8 +1760,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.1.0"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.1.0");
+    assert!(README.contains("1.2.0"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.2.0");
 }
 
 #[test]
@@ -2501,4 +2504,421 @@ fn mouse_tab_hit_areas_match_what_is_drawn() {
         let cells: String = (a..b).map(|x| term.backend().buffer()[(x, 0)].symbol().to_string()).collect();
         assert!(cells.contains(&title), "область вкладки {title:?} не совпала с нарисованным: {cells:?} в {first_row:?}");
     }
+}
+
+// ---- пачка 1.2.0: отметки прочтения, /pinned, /chat, /join, /leave
+
+fn private_app() -> App {
+    let mut app = app_with_chats();
+    let id = app.chats[0].id; // Мама: личный чат
+    app.histories.insert(id, vec![msg(1, true, "Я", "первое"), msg(2, true, "Я", "второе"), msg(3, false, "Мама", "ответ")]);
+    app.chats[0].read_out = 1;
+    app
+}
+
+#[test]
+fn read_marks_show_sent_and_read_in_private_chats_only() {
+    crate::i18n::set(0);
+    assert_eq!(read_mark(5, 5), " √√");
+    assert_eq!(read_mark(6, 5), " √");
+    assert_eq!(read_mark(0, 5), "", "ещё не отправленное сообщение без отметки");
+    let mut app = private_app();
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("Я √√"), "первое сообщение прочитано: {text}");
+    assert!(text.contains("Я √"), "второе только отправлено");
+    assert_eq!(text.matches("√√").count(), 1);
+    // в группе и канале отметок нет
+    let gid = app.chats[2].id;
+    app.histories.insert(gid, vec![msg(1, true, "Я", "в группе")]);
+    app.chats[2].read_out = 5;
+    app.set_sel(Some(gid));
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(!dump(&term).contains('√'));
+    // «Избранное» тоже без отметок
+    let mut saved = private_app();
+    saved.chats[0].is_self = true;
+    term.draw(|f| draw(f, &mut saved)).unwrap();
+    assert!(!dump(&term).contains('√'));
+}
+
+#[test]
+fn read_outbox_update_moves_the_mark_forward_only() {
+    let mut app = private_app();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let id = app.chats[0].id;
+    app.handle_event(Event::ReadOutbox { chat: id, max_id: 2 }, &tx);
+    assert_eq!(app.chats[0].read_out, 2);
+    app.handle_event(Event::ReadOutbox { chat: id, max_id: 1 }, &tx);
+    assert_eq!(app.chats[0].read_out, 2, "запоздавшее старое обновление не откатывает отметку");
+    app.handle_event(Event::ReadOutbox { chat: PeerId::user(999).unwrap(), max_id: 9 }, &tx);
+}
+
+#[test]
+fn pinned_command_lists_pinned_messages_and_opens_one() {
+    crate::i18n::set(0);
+    let mut app = private_app();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "/pinned", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::ListPinned(c)) if c.name == "Мама"));
+    let id = app.chats[0].id;
+    app.handle_event(Event::PinnedList { chat: id, hits: vec![] }, &tx);
+    assert_eq!(app.status, "В этом чате нет закреплённых сообщений");
+    assert!(app.overlay.is_none());
+    app.handle_event(Event::PinnedList { chat: id, hits: vec![hit(1, 50, "важное"), hit(1, 3, "ответ")] }, &tx);
+    let ov = app.overlay.as_ref().unwrap();
+    assert!(ov.title.contains("Закреплённые") && ov.title.contains('2') && ov.title.contains("Мама"), "{}", ov.title);
+    assert!(!ov.items[0].label.starts_with('['), "имя чата в списке не повторяется");
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::LoadAround { id: 50, .. })), "старое закреплённое открывается среди соседних");
+    // закреплённое, которое уже загружено, просто подсвечивается
+    app.handle_event(Event::PinnedList { chat: id, hits: vec![hit(1, 2, "второе")] }, &tx);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.focus_msg, Some(2));
+    // без выбранного чата и под блокировкой
+    app.mode = Mode::Locked;
+    app.handle_event(Event::PinnedList { chat: id, hits: vec![hit(1, 2, "x")] }, &tx);
+    assert!(app.overlay.is_none() || app.mode == Mode::Locked);
+    app.mode = Mode::Chat;
+    app.chats.clear();
+    app.ensure_selection();
+    submit_text(&mut app, "/pinned", &tx, &s);
+    assert_eq!(app.status, "Сначала выберите чат");
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn chat_and_join_commands_validate_their_argument() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "/chat @durov", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::OpenTarget(tg::Target::Username(n))) if n == "durov"));
+    submit_text(&mut app, "/chat t.me/durov", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::OpenTarget(_))));
+    submit_text(&mut app, "/chat t.me/+AbCdEfGh12345", &tx, &s);
+    assert!(rx.try_recv().is_err(), "приглашение через /chat не принимается");
+    assert!(app.status.contains("/join"));
+    submit_text(&mut app, "/chat", &tx, &s);
+    assert!(rx.try_recv().is_err());
+    assert!(app.status.starts_with("Укажите @имя"));
+    submit_text(&mut app, "/join https://t.me/+AbCdEfGh12345", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::Join(tg::Target::Invite(h))) if h == "AbCdEfGh12345"));
+    submit_text(&mut app, "/join @mychannel", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::Join(tg::Target::Username(n))) if n == "mychannel"));
+    submit_text(&mut app, "/join что-то не то", &tx, &s);
+    assert!(rx.try_recv().is_err());
+    assert!(app.status.starts_with("Укажите ссылку"));
+}
+
+#[test]
+fn found_chat_is_added_to_the_list_and_opened() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let newcomer = chat(77, "Новый знакомый", Kind::User, 0);
+    let id = newcomer.id;
+    app.tab = Tab::Channels; // чужая вкладка: чат всё равно должен стать видимым
+    app.handle_event(Event::Found(newcomer.clone()), &tx);
+    assert_eq!(app.chats.len(), 4);
+    assert_eq!(app.chats[0].id, id);
+    assert_eq!(app.sel, Some(id));
+    assert_eq!(app.tab, Tab::All);
+    assert!(app.pending_load.is_some());
+    assert_eq!(app.status, "Открыт чат «Новый знакомый»");
+    // уже известный чат не дублируется
+    app.handle_event(Event::Found(newcomer), &tx);
+    assert_eq!(app.chats.len(), 4);
+    // под блокировкой не открывается
+    app.mode = Mode::Locked;
+    let other = chat(78, "Другой", Kind::User, 0);
+    app.handle_event(Event::Found(other), &tx);
+    assert_eq!(app.chats.len(), 4);
+}
+
+#[test]
+fn leave_needs_confirmation_and_refuses_private_chats() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats(); // выбран личный чат «Мама»
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "/leave", &tx, &s);
+    assert!(rx.try_recv().is_err());
+    assert!(app.status.starts_with("Из личного чата выйти нельзя"));
+    let group = app.chats[2].id;
+    app.set_sel(Some(group));
+    submit_text(&mut app, "/leave", &tx, &s);
+    assert!(rx.try_recv().is_err(), "первый /leave только спрашивает");
+    assert!(app.status.contains("Повторите /leave"));
+    submit_text(&mut app, "/leave", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::Leave(c)) if c.id == group));
+    // любая другая команда сбрасывает подтверждение
+    submit_text(&mut app, "/leave", &tx, &s);
+    submit_text(&mut app, "/latest", &tx, &s);
+    submit_text(&mut app, "/leave", &tx, &s);
+    assert!(rx.try_recv().is_err());
+    // смена чата тоже
+    app.set_sel(Some(app.chats[1].id));
+    submit_text(&mut app, "/leave", &tx, &s);
+    app.set_sel(Some(group));
+    submit_text(&mut app, "/leave", &tx, &s);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn leaving_removes_the_chat_everywhere() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let group = app.chats[2].id;
+    app.histories.insert(group, long_history(3));
+    app.drafts.insert(group, ("черновик".into(), 3));
+    app.set_sel(Some(group));
+    app.handle_event(Event::Left(group), &tx);
+    assert_eq!(app.chats.len(), 2);
+    assert!(!app.histories.contains_key(&group));
+    assert!(!app.drafts.contains_key(&group));
+    assert!(app.sel.is_some() && app.sel != Some(group), "выбор переходит на другой чат");
+}
+
+#[test]
+fn help_and_commands_cover_the_new_batch() {
+    for lang in [0, 1] {
+        crate::i18n::set(lang);
+        let mut app = app_with_chats();
+        app.mode = Mode::Help;
+        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let text = dump(&term);
+        for c in ["/pinned", "/chat", "/join", "/leave"] {
+            assert!(text.contains(c), "{c} нет в справке ({lang})");
+            assert!(COMMANDS.contains(&c));
+        }
+    }
+    crate::i18n::set(0);
+}
+
+// ---- пачка E (1.2.0): облачные черновики и просмотры постов
+
+fn with_draft(mut c: ChatInfo, text: &str) -> ChatInfo {
+    c.draft = text.into();
+    c
+}
+
+#[test]
+fn view_counts_are_short() {
+    for (n, want) in [
+        (5, "5"),
+        (999, "999"),
+        (1000, "1.0K"),
+        (1234, "1.2K"),
+        (9999, "9.9K"),
+        (10_000, "10K"),
+        (15_800, "15K"),
+        (999_999, "999K"),
+        (1_000_000, "1.0M"),
+        (2_450_000, "2.4M"),
+    ] {
+        assert_eq!(short_count(n), want, "{n}");
+    }
+}
+
+#[test]
+fn channel_posts_show_views() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let channel = app.chats[1].id;
+    let mut post = msg(1, false, "Мой канал", "новость");
+    post.views = Some(12_345);
+    let mut mine = msg(2, true, "Я", "мой пост");
+    mine.views = Some(87);
+    app.histories.insert(channel, vec![post, mine, msg(3, false, "Кто-то", "без просмотров")]);
+    app.set_sel(Some(channel));
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("12K просм."), "{text}");
+    assert!(text.contains("87 просм."));
+    assert_eq!(text.matches("просм.").count(), 2, "у сообщений без счётчика ничего не пишем");
+    crate::i18n::set(1);
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(dump(&term).contains("12K views"));
+    crate::i18n::set(0);
+}
+
+#[test]
+fn draft_is_uploaded_when_leaving_the_chat_and_only_once() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    type_text(&mut app, "не дописал", &tx, &s);
+    let mama = app.chats[0].id;
+    app.move_selection(1);
+    app.flush_drafts(&tx);
+    match rx.try_recv() {
+        Ok(Cmd::SaveDraft { chat, text }) => {
+            assert_eq!(chat.id, mama);
+            assert_eq!(text, "не дописал");
+        }
+        _ => panic!("ждали SaveDraft"),
+    }
+    // вернулись и снова ушли, ничего не меняя: повторно не отправляем
+    app.move_selection(-1);
+    app.move_selection(1);
+    app.flush_drafts(&tx);
+    assert!(rx.try_recv().is_err());
+    // стёрли текст: на сервере черновик тоже стирается
+    app.move_selection(-1);
+    app.input.clear();
+    app.cursor = 0;
+    app.move_selection(1);
+    app.flush_drafts(&tx);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::SaveDraft { text, .. }) if text.is_empty()));
+}
+
+#[test]
+fn draft_is_uploaded_after_the_input_rests() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    type_text(&mut app, "набираю", &tx, &s);
+    app.flush_drafts(&tx);
+    assert!(rx.try_recv().is_err(), "сразу не отправляем");
+    app.draft_watch.2 = Instant::now() - Duration::from_secs(10);
+    app.flush_drafts(&tx);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::SaveDraft { text, .. }) if text == "набираю"));
+    app.draft_watch.2 = Instant::now() - Duration::from_secs(10);
+    app.flush_drafts(&tx);
+    assert!(rx.try_recv().is_err(), "тот же текст второй раз не уходит");
+}
+
+#[test]
+fn commands_edits_locks_and_the_setting_keep_drafts_local() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    // команда не уходит в Telegram
+    type_text(&mut app, "/findmsg abc", &tx, &s);
+    app.move_selection(1);
+    app.flush_drafts(&tx);
+    assert!(rx.try_recv().is_err());
+    // правка своего сообщения не превращается в черновик и не стирает чужой
+    app.move_selection(-1);
+    app.input.clear();
+    app.cloud_drafts.insert(app.chats[0].id, "старый".into());
+    app.edit_target = Some(1);
+    app.input = "правка".into();
+    app.move_selection(1);
+    app.flush_drafts(&tx);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.cloud_drafts.get(&app.chats[0].id).map(String::as_str), Some("старый"));
+    // под блокировкой и с выключенной настройкой не отправляем
+    app.edit_target = None;
+    app.settings.cloud_drafts = false;
+    app.input = "тайна".into();
+    app.cursor = 5;
+    app.move_selection(-1);
+    app.flush_drafts(&tx);
+    assert!(rx.try_recv().is_err());
+    app.settings.cloud_drafts = true;
+    app.mode = Mode::Locked;
+    app.queue_draft(app.chats[0].id, "тайна");
+    app.flush_drafts(&tx);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn sending_forgets_the_uploaded_draft() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.chats[0].id;
+    type_text(&mut app, "готово", &tx, &s);
+    app.flush_drafts(&tx);
+    app.draft_watch.2 = Instant::now() - Duration::from_secs(10);
+    app.flush_drafts(&tx);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::SaveDraft { .. })));
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::Send { .. })));
+    assert!(!app.cloud_drafts.contains_key(&id));
+    // тот же текст снова набран и оставлен: уходит как новый черновик
+    type_text(&mut app, "готово", &tx, &s);
+    app.flush_drafts(&tx);
+    app.draft_watch.2 = Instant::now() - Duration::from_secs(10);
+    app.flush_drafts(&tx);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::SaveDraft { text, .. }) if text == "готово"));
+}
+
+#[test]
+fn drafts_from_the_phone_fill_the_input_and_the_other_chats() {
+    let mut app = App::new(Settings::default());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let list = vec![
+        with_draft(chat(1, "Мама", Kind::User, 0), "с телефона"),
+        with_draft(chat(2, "Папа", Kind::User, 0), "про дачу"),
+        chat(3, "Без черновика", Kind::User, 0),
+    ];
+    app.handle_event(Event::Dialogs(list), &tx);
+    assert_eq!(app.input, "с телефона", "в открытом чате черновик сразу в поле");
+    assert_eq!(app.cursor, "с телефона".chars().count());
+    let papa = app.chats[1].id;
+    assert_eq!(app.drafts.get(&papa).map(|d| d.0.as_str()), Some("про дачу"));
+    app.move_selection(1);
+    assert_eq!(app.input, "про дачу");
+    // уже набранное здесь не затирается
+    app.input = "моё".into();
+    app.cursor = 3;
+    let mama = app.chats[0].id;
+    app.handle_event(Event::Draft { chat: papa, text: "новое с телефона".into() }, &tx);
+    assert_eq!(app.input, "моё");
+    assert_eq!(app.drafts.get(&mama).map(|d| d.0.as_str()), Some("с телефона"));
+    // пустой черновик из списка чатов ничего не стирает, а живое обновление стирает
+    app.handle_event(Event::DialogsPage(vec![chat(1, "Мама", Kind::User, 0)]), &tx);
+    assert_eq!(app.drafts.get(&mama).map(|d| d.0.as_str()), Some("с телефона"));
+    app.handle_event(Event::Draft { chat: mama, text: String::new() }, &tx);
+    assert!(!app.drafts.contains_key(&mama));
+}
+
+#[test]
+fn a_draft_cleared_on_the_phone_clears_an_untouched_input() {
+    let mut app = App::new(Settings::default());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.handle_event(Event::Dialogs(vec![with_draft(chat(1, "Мама", Kind::User, 0), "черновик")]), &tx);
+    assert_eq!(app.input, "черновик");
+    app.handle_event(Event::Draft { chat: app.chats[0].id, text: String::new() }, &tx);
+    assert_eq!(app.input, "", "поле не менялось здесь, значит повторяет состояние телефона");
+    // эхо собственной загрузки ничего не меняет
+    app.input = "новое".into();
+    app.cursor = 5;
+    app.queue_draft(app.chats[0].id, "новое");
+    app.handle_event(Event::Draft { chat: app.chats[0].id, text: "новое".into() }, &tx);
+    assert_eq!(app.input, "новое");
+}
+
+#[test]
+fn drafts_from_the_phone_are_ignored_when_off_or_locked() {
+    let mut app = App::new(Settings::default());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.settings.cloud_drafts = false;
+    app.handle_event(Event::Dialogs(vec![with_draft(chat(1, "Мама", Kind::User, 0), "x")]), &tx);
+    assert_eq!(app.input, "");
+    app.settings.cloud_drafts = true;
+    app.mode = Mode::Locked;
+    app.handle_event(Event::Draft { chat: app.chats[0].id, text: "секрет".into() }, &tx);
+    assert!(app.cloud_drafts.is_empty() && app.input.is_empty());
+}
+
+#[test]
+fn cloud_drafts_setting_toggles() {
+    let mut app = App::new(Settings::default());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    assert!(app.settings.cloud_drafts);
+    app.mode = Mode::Settings;
+    app.settings_row = 12;
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+    assert!(!app.settings.cloud_drafts && !s.settings().cloud_drafts);
 }
