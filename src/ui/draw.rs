@@ -413,8 +413,8 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLay
 pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mode_hint = match app.mode {
         Mode::Pick => Some(tr!(
-            " ↑ ↓ · R ответ · F переслать · E правка · D удалить · S скачать · L ссылки · Esc",
-            " ↑ ↓ · R reply · F forward · E edit · D delete · S save · L links · Esc"
+            " ↑ ↓ · R ответ · F переслать · E правка · D удалить · C копия · S скачать · O открыть · L ссылки · Esc",
+            " ↑ ↓ · R reply · F forward · E edit · D delete · C copy · S save · O open · L links · Esc"
         )),
         Mode::Forward => Some(tr!(
             " Переслать: выберите чат ↑ ↓ / Tab · Enter — переслать · Esc — отмена",
@@ -494,14 +494,29 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
             tr!("/edit [текст], /del", "/edit [text], /del"),
             tr!("править / удалить своё последнее сообщение", "edit / delete your last message"),
         ),
-        key("/pin", tr!("закрепить / открепить чат наверху списка", "pin / unpin chat at the top of the list")),
-        key("/readall", tr!("отметить все чаты прочитанными", "mark all chats as read")),
-        key("/export", tr!("сохранить переписку в файл export/…txt", "save the chat to a file export/…txt")),
+        key(
+            "/pin /readall /export",
+            tr!("закрепить чат; всё прочитано; сохранить переписку в export/", "pin chat; mark all read; save the chat to export/"),
+        ),
         key(
             tr!("/send путь [текст]", "/send path [text]"),
             tr!("отправить файл (можно перетащить файл в окно)", "send a file (you can drag a file into the window)"),
         ),
         key("/save", tr!("скачать последнее вложение (или S в режиме F7)", "download the last attachment (or S in F7 mode)")),
+        key(
+            "/open, /copy",
+            tr!(
+                "открыть вложение программой Windows (O в F7); копировать текст сообщения (C в F7)",
+                "open an attachment with the default app (O in F7); copy message text (C in F7)"
+            ),
+        ),
+        key(
+            "Alt+↑ / Alt+↓",
+            tr!(
+                "прошлые сообщения и команды (↑ ↓ тоже, когда в поле есть текст)",
+                "previous messages and commands (↑ ↓ too when the input has text)"
+            ),
+        ),
         key(
             "Ctrl+V / /paste",
             tr!(

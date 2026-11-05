@@ -93,7 +93,7 @@ impl Settings {
             ProxyMode::Auto => tr!("авто (системный)", "auto (system)").to_string(),
             ProxyMode::Off => tr!("выключен", "off").to_string(),
             ProxyMode::Manual if self.proxy_manual.is_empty() => tr!("вручную (адрес не задан)", "manual (no address set)").to_string(),
-            ProxyMode::Manual => trf!("вручную: {}", "manual: {}", self.proxy_manual),
+            ProxyMode::Manual => trf!("вручную: {}", "manual: {}", crate::proxy::redact(&self.proxy_manual)),
         }
     }
 

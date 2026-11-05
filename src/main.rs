@@ -8,6 +8,43 @@ mod ui;
 mod util;
 mod vault;
 
+/// Счётчик выделенной памяти для теста «бюджет ОЗУ»: считает только в потоке теста.
+#[cfg(test)]
+pub mod alloc_count {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Counting;
+
+    thread_local! {
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+    }
+
+    /// Сколько байт сейчас занято выделениями этого потока (относительно начала).
+    pub fn live() -> isize {
+        LIVE.with(Cell::get)
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            LIVE.with(|c| c.set(c.get() + l.size() as isize));
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            LIVE.with(|c| c.set(c.get() - l.size() as isize));
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+            LIVE.with(|c| c.set(c.get() + new as isize - l.size() as isize));
+            unsafe { System.realloc(p, l, new) }
+        }
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: alloc_count::Counting = alloc_count::Counting;
+
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,7 +176,7 @@ async fn connect_auto(session: &Arc<VaultSession>, api_id: i32, routes: &[Route]
             Route::HttpBridge(a) => match proxy::start_bridge(a.clone()).await {
                 Ok(local) => Some(format!("socks5://{local}")),
                 Err(e) => {
-                    log(&format!("bridge for {a}: {e}"));
+                    log(&format!("bridge for {}: {e}", proxy::redact(a)));
                     continue;
                 }
             },
@@ -152,7 +189,7 @@ async fn connect_auto(session: &Arc<VaultSession>, api_id: i32, routes: &[Route]
                 log(&format!("connected {}", route.label()));
                 return Some((conn, authorized));
             }
-            Ok(Err(e)) => log(&format!("connect {}: {e}", route.label())),
+            Ok(Err(e)) => log(&format!("connect {}: {}", route.label(), proxy::redact_text(&e.to_string()))),
             Err(_) => log(&format!("connect {}: timeout", route.label())),
         }
         conn.quit.quit();

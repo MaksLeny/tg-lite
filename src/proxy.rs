@@ -28,9 +28,101 @@ impl Route {
     pub fn label(&self) -> String {
         match self {
             Route::Direct => tr!("напрямую", "directly").to_string(),
-            Route::Socks5(a) => trf!("через SOCKS5-прокси {a}", "via SOCKS5 proxy {a}"),
-            Route::HttpBridge(a) => trf!("через HTTP-прокси {a}", "via HTTP proxy {a}"),
+            Route::Socks5(a) => {
+                let a = redact(a);
+                trf!("через SOCKS5-прокси {a}", "via SOCKS5 proxy {a}")
+            }
+            Route::HttpBridge(a) => {
+                let a = redact(a);
+                trf!("через HTTP-прокси {a}", "via HTTP proxy {a}")
+            }
         }
+    }
+}
+
+/// В адресе (после `логин:пароль@`) есть числовой порт: `host:1080`, `[::1]:1080`.
+fn has_port(addr: &str) -> bool {
+    let hp = addr.rsplit_once('@').map_or(addr, |(_, hp)| hp);
+    hp.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
+
+/// Адрес для показа на экране и в журнале: `логин:пароль@` заменяется на `***@`.
+pub fn redact(addr: &str) -> String {
+    match addr.rsplit_once('@') {
+        Some((_, hp)) => format!("***@{hp}"),
+        None => addr.to_string(),
+    }
+}
+
+/// Убирает `логин:пароль@` из любого текста (например, сообщения об ошибке библиотеки): `://user:pw@host` -> `://***@host`.
+pub fn redact_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(tail.len());
+        match tail[..end].rfind('@') {
+            Some(at) => {
+                out.push_str("***@");
+                rest = &tail[at + 1..];
+            }
+            None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Раскодирует `%40` и подобное в логине и пароле из адреса прокси.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Some(v) =
+                s.get(i + 1..i + 3).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit())).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Делит `логин:пароль@хост:порт` на (логин, пароль) и `хост:порт`. Без `@` или без `:` в учётных данных логина нет.
+pub fn split_auth(addr: &str) -> (Option<(String, String)>, &str) {
+    let Some((cred, hp)) = addr.rsplit_once('@') else { return (None, addr) };
+    match cred.split_once(':') {
+        Some((u, p)) if !u.is_empty() => (Some((percent_decode(u), percent_decode(p))), hp),
+        _ => (None, hp),
+    }
+}
+
+/// Base64 для заголовка Proxy-Authorization (без внешних зависимостей).
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// Строка `Proxy-Authorization: Basic …\r\n` для адреса с логином или пустая строка.
+fn auth_header(addr: &str) -> String {
+    match split_auth(addr).0 {
+        Some((u, p)) => format!("Proxy-Authorization: Basic {}\r\n", base64(format!("{u}:{p}").as_bytes())),
+        None => String::new(),
     }
 }
 
@@ -45,8 +137,8 @@ pub fn parse_proxy_url(s: &str) -> Vec<Route> {
         None => (String::new(), s),
     };
     let addr = rest.trim_end_matches('/');
-    // Логин и пароль в адресе не поддерживаются мостом; для SOCKS5 оставляем как есть.
-    if addr.is_empty() || !addr.contains(':') {
+    // Логин и пароль (`user:pass@host:port`) остаются в адресе: мост добавляет их в запрос к HTTP-прокси.
+    if !has_port(addr) {
         return vec![];
     }
     match scheme.as_str() {
@@ -68,7 +160,7 @@ pub fn parse_proxy_server(s: &str) -> Vec<Route> {
         for part in s.split(';') {
             let Some((proto, addr)) = part.split_once('=') else { continue };
             let addr = addr.trim();
-            if !addr.contains(':') {
+            if !has_port(addr) {
                 continue;
             }
             match proto.trim().to_ascii_lowercase().as_str() {
@@ -251,7 +343,9 @@ pub async fn start_bridge(http_proxy: String) -> io::Result<String> {
             let Ok((client, _)) = listener.accept().await else { break };
             let proxy = http_proxy.clone();
             tokio::spawn(async move {
-                let _ = serve_socks5(client, &proxy).await;
+                if let Err(e) = serve_socks5(client, &proxy).await {
+                    crate::util::debug(&format!("bridge {}: {e}", redact(&proxy)));
+                }
             });
         }
     });
@@ -306,6 +400,11 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
     let mut port = [0u8; 2];
     client.read_exact(&mut port).await?;
     let port = u16::from_be_bytes(port);
+    // Имя узла попадает в строку запроса к HTTP-прокси: никаких пробелов и управляющих символов (иначе можно вписать свои заголовки).
+    if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')) {
+        client.write_all(&[5, 8, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+        return Err(io::Error::other(tr!("недопустимое имя узла", "invalid host name")));
+    }
 
     // Соединение с HTTP-прокси и просьба «CONNECT host:port».
     let mut upstream = match TcpStream::connect(host_port(http_proxy)).await {
@@ -316,7 +415,10 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
         }
     };
     let target = format!("{host}:{port}");
-    upstream.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\n\r\n").as_bytes()).await?;
+    let auth = auth_header(http_proxy);
+    upstream
+        .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n{auth}Proxy-Connection: keep-alive\r\n\r\n").as_bytes())
+        .await?;
 
     // Читаем ответ до пустой строки по одному байту, чтобы не «съесть» данные туннеля.
     let mut resp = Vec::with_capacity(256);
@@ -331,6 +433,12 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
     let status_ok = resp.starts_with(b"HTTP/1.") && resp.get(9..12) == Some(b"200");
     if !status_ok {
         client.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+        if resp.get(9..12) == Some(b"407") {
+            return Err(io::Error::other(tr!(
+                "прокси требует логин и пароль: /proxy логин:пароль@адрес:порт",
+                "the proxy needs a login: /proxy user:password@host:port"
+            )));
+        }
         return Err(io::Error::other(tr!("прокси отказал в соединении", "proxy refused the connection")));
     }
     client.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
@@ -476,6 +584,147 @@ mod tests {
             }
         });
         addr
+    }
+
+    #[test]
+    fn splits_and_redacts_credentials() {
+        assert_eq!(split_auth("user:pw@127.0.0.1:3128"), (Some(("user".into(), "pw".into())), "127.0.0.1:3128"));
+        assert_eq!(split_auth("127.0.0.1:3128"), (None, "127.0.0.1:3128"));
+        // @ и : в пароле, закодированные и сырые
+        assert_eq!(split_auth("u:p%40ss%3Aw@h:1").0, Some(("u".into(), "p@ss:w".into())));
+        assert_eq!(split_auth("u:p@ss@h:1"), (Some(("u".into(), "p@ss".into())), "h:1"));
+        assert_eq!(split_auth("@h:1").0, None, "пустой логин не считается");
+        assert_eq!(redact("user:secret@h:1"), "***@h:1");
+        assert_eq!(redact("h:1"), "h:1");
+        assert!(!Route::HttpBridge("user:secret@h:1".into()).label().contains("secret"));
+        assert!(!Route::Socks5("user:secret@h:1".into()).label().contains("user"));
+    }
+
+    #[test]
+    fn redact_text_hides_credentials_in_any_message() {
+        assert_eq!(
+            redact_text("proxy port is missing from url: socks5://bob:secret@host"),
+            "proxy port is missing from url: socks5://***@host"
+        );
+        assert_eq!(redact_text("a http://u:p@h:1/x and https://h2/y"), "a http://***@h:1/x and https://h2/y");
+        assert_eq!(redact_text("no urls here"), "no urls here");
+        assert_eq!(redact_text("socks5://127.0.0.1:1080"), "socks5://127.0.0.1:1080");
+        assert!(!redact_text("socks5://b:p@ss@host").contains("ss@"));
+    }
+
+    #[test]
+    fn proxy_address_needs_a_numeric_port() {
+        assert!(parse_proxy_url("bob:secret@host").is_empty(), "без порта: не принимаем (и пароль не попадёт в сообщения об ошибках)");
+        assert!(parse_proxy_url("host:abc").is_empty());
+        assert!(parse_proxy_url("host:99999").is_empty());
+        assert!(!parse_proxy_url("bob:secret@host:1080").is_empty());
+        assert!(!parse_proxy_url("socks5://[::1]:1080").is_empty());
+        assert!(parse_proxy_url(":1080").is_empty());
+    }
+
+    #[test]
+    fn percent_decode_ignores_malformed_escapes() {
+        assert_eq!(percent_decode("a%+4b"), "a%+4b");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%4"), "%4");
+        assert_eq!(percent_decode("%41%7a"), "Az");
+    }
+
+    #[tokio::test]
+    async fn bridge_rejects_host_names_that_could_inject_headers() {
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap().to_string();
+        let touched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t2 = touched.clone();
+        tokio::spawn(async move {
+            if proxy.accept().await.is_ok() {
+                t2.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let bridge = start_bridge(proxy_addr).await.unwrap();
+        let mut c = TcpStream::connect(&bridge).await.unwrap();
+        c.write_all(&[5, 1, 0]).await.unwrap();
+        let mut r = [0u8; 2];
+        c.read_exact(&mut r).await.unwrap();
+        let host = b"a.com\r\nX: y";
+        let mut req = vec![5, 1, 0, 3, host.len() as u8];
+        req.extend_from_slice(host);
+        req.extend_from_slice(&[0, 80]);
+        c.write_all(&req).await.unwrap();
+        let mut r = [0u8; 10];
+        c.read_exact(&mut r).await.unwrap();
+        assert_eq!(r[1], 8, "отказ без обращения к прокси");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!touched.load(std::sync::atomic::Ordering::SeqCst), "к HTTP-прокси не подключались");
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"Aladdin:open sesame"), "QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+        assert_eq!(auth_header("Aladdin:open sesame@h:1"), "Proxy-Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==\r\n");
+        assert_eq!(auth_header("h:1"), "");
+    }
+
+    #[tokio::test]
+    async fn bridge_sends_proxy_authorization() {
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap().to_string();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen2 = seen.clone();
+        tokio::spawn(async move {
+            let (mut s, _) = proxy.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut b = [0u8; 1];
+            while !buf.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut b).await.unwrap();
+                buf.push(b[0]);
+            }
+            *seen2.lock().unwrap() = String::from_utf8_lossy(&buf).into_owned();
+            s.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let bridge = start_bridge(format!("Aladdin:open sesame@{proxy_addr}")).await.unwrap();
+        let mut c = TcpStream::connect(&bridge).await.unwrap();
+        c.write_all(&[5, 1, 0]).await.unwrap();
+        let mut r = [0u8; 2];
+        c.read_exact(&mut r).await.unwrap();
+        c.write_all(&[5, 1, 0, 1, 1, 2, 3, 4, 0x01, 0xBB]).await.unwrap();
+        let mut r = [0u8; 10];
+        c.read_exact(&mut r).await.unwrap();
+        assert_eq!(&r[..2], &[5, 0]);
+        let req = seen.lock().unwrap().clone();
+        assert!(req.contains("Proxy-Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==\r\n"), "{req}");
+        assert!(req.starts_with("CONNECT 1.2.3.4:443 HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn bridge_survives_407_without_credentials() {
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let (mut s, _) = proxy.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut b = [0u8; 1];
+            while !buf.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut b).await.unwrap();
+                buf.push(b[0]);
+            }
+            assert!(!String::from_utf8_lossy(&buf).contains("Proxy-Authorization"));
+            s.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await.unwrap();
+        });
+        let bridge = start_bridge(proxy_addr).await.unwrap();
+        let mut c = TcpStream::connect(&bridge).await.unwrap();
+        c.write_all(&[5, 1, 0]).await.unwrap();
+        let mut r = [0u8; 2];
+        c.read_exact(&mut r).await.unwrap();
+        c.write_all(&[5, 1, 0, 1, 1, 2, 3, 4, 0x01, 0xBB]).await.unwrap();
+        let mut r = [0u8; 10];
+        c.read_exact(&mut r).await.unwrap();
+        assert_eq!(r[1], 5);
     }
 
     #[test]

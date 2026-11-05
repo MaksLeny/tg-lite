@@ -46,7 +46,7 @@ Measured on a Lenovo B550 (Pentium T4400, 2 GB DDR2, HDD, Windows 10 LTSC):
 | Size | one exe, **3.84 MB** (3934 KB) | tens of MB installed plus cache |
 | Installation | none, put the exe in any folder | installer |
 
-How it was measured: Tg-Lite 0.0.8 on Windows 10 LTSC, one account with the usual set of chats, Task Manager → Details, column "Memory (private working set)", reading taken after start and after 10–15 minutes of use. The figures were not re-measured on 1.0.0 (no big changes in how chats are held in memory are expected, but check on your own PC). It is not a fully like-for-like comparison: Tg-Lite is text-only and does less than Telegram Desktop. Other columns also count shared system libraries and show more.
+How it was measured: Tg-Lite 0.0.8 on Windows 10 LTSC, one account with the usual set of chats, Task Manager → Details, column "Memory (private working set)", reading taken after start and after 10–15 minutes of use. The figures were not re-measured on 1.0.0 (no big changes in how chats are held in memory are expected, but check on your own PC). It is not a fully like-for-like comparison: Tg-Lite is text-only and does less than Telegram Desktop. Other columns also count shared system libraries and show more. To measure on your own PC: start `tg-lite.exe`, open a chat and run `powershell -ExecutionPolicy Bypass -File tools\measure.ps1 -Minutes 10` (it prints a ready table row). A test in the repository also checks that 100 chats with 60 messages each stay under 4 MB of heap (about 2.2 MB now).
 
 ¹ Telegram Desktop figures are user reports, not lab measurements: [tdesktop #30151](https://github.com/telegramdesktop/tdesktop/issues/30151)
 ("starts use RAM up to 2.0-2.5gb", "less than 800mb" after a restart). The real value depends a lot on how many chats
@@ -72,6 +72,8 @@ which is the main reason it is so small.
 **Files and links**
 - `/send path [caption]` uploads a file up to 2000 MB (drag a file into the window to paste its path). jpg, jpeg and png images under 10 MB go as photos, everything else as a file.
 - `/save` downloads an attachment to the `downloads` folder next to the exe, with progress in the status bar.
+- `/open` (or `O` in `F7`) downloads an attachment to the temporary `tglite-view` folder and opens it with the default Windows program. Only pictures, PDF, plain text, JSON, audio and video up to 50 MB are opened this way (never programs, scripts or spreadsheets); the `tglite-view` folder is emptied on lock, on exit and on the next start.
+- `/copy` (or `C` in `F7`) puts the text of a message on the clipboard.
 - `/links` lists links of the chat, Enter opens one in the browser.
 
 **Managing chats**
@@ -129,6 +131,7 @@ Every action has both a key and a command, in case a key does not work in your c
 | Shift+Enter | | new line (pasted multi-line text is kept together) |
 | Ctrl+V / Shift+Insert | `/paste` | paste from the clipboard |
 | ↑ / ↓, Tab / Shift+Tab | | choose a chat, switch tabs |
+| Alt+↑ / Alt+↓ | | earlier messages and commands (↑ ↓ do this too when the input has text) |
 | PgUp / PgDn | | scroll the conversation |
 | Esc | | clear the input; then cancel edit or reply; then reset search |
 | F1 | `/help` | help |
@@ -137,11 +140,11 @@ Every action has both a key and a command, in case a key does not work in your c
 | F4 | `/settings` | settings |
 | F5 | `/refresh` | refresh chat list |
 | F6 | `/find text` | search chats |
-| F7 | | pick a message: R reply, F forward, E edit, D delete, S save, L links |
+| F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links |
 | F10 | `/quit` | quit |
 | | `/pin` `/readall` `/export` | pin chat, read everything, export |
 | | `/edit` `/del` `/note` `/later` `/scheduled` | edit, delete, note, schedule, scheduled list |
-| | `/send` `/save` `/links` | upload file, download attachment, links |
+| | `/send` `/save` `/open` `/copy` `/links` | upload file, download attachment, open attachment, copy message, links |
 | | `/passwd` `/proxy` `/faq` | change password, proxy, troubleshooting |
 
 `Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` also work, in the Latin and Russian keyboard layouts. `Alt+Enter` and `Ctrl+J` also insert a new line (Windows may take Alt+Enter for full screen).
@@ -149,7 +152,7 @@ Every action has both a key and a command, in case a key does not work in your c
 ## Security
 
 - `api_id`, `api_hash` and the Telegram session live in `tglite.vault`, encrypted with your password (Argon2id + ChaCha20-Poly1305). Without the password the file cannot be read and tampering is detected.
-- The conversation is never written to disk. Exceptions are `/export` and `/save`, which you run yourself. Drafts live in memory only.
+- The conversation is never written to disk. Exceptions are `/export` and `/save`, which you run yourself, and the short-lived files of `/open` (the `tglite-view` folder, emptied on lock, on exit and on start). Drafts and the input history live in memory only.
 - Auto-lock after 1–60 minutes (or never) and on `F2`; the lock screen shows no messages.
 - Optional self-destruct: overwrite and delete `tglite.vault` after 3, 5 or 10 wrong passwords on the lock screen (off by default). Other files stay, and you should end the session in Telegram → Settings → Devices.
 - The log never contains message text. The chosen language is stored in `tglite.lang` (not secret).
@@ -168,7 +171,7 @@ Details and how to report a vulnerability: [SECURITY.md](SECURITY.md) (English a
 Nothing needs to be typed. In "auto" mode the order is: manually set address, environment variables
 (`TGLITE_PROXY`, `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`), the Windows system proxy, then a direct connection. Plain HTTP proxies are handled by a
 small local bridge the program starts itself. If nothing works it asks for a proxy address (SOCKS5 or HTTP; Enter retries, `0` means no proxy, `q` quits) and remembers it (for example
-`127.0.0.1:10808`). Manual: `/proxy 127.0.0.1:10808` uses only that address; `/proxy auto` restores the order above; `/proxy off` goes direct (applied on the next start).
+`127.0.0.1:10808`). Manual: `/proxy 127.0.0.1:10808` uses only that address; `/proxy auto` restores the order above; `/proxy off` goes direct (applied on the next start). A proxy with a login: `/proxy user:password@127.0.0.1:3128` (for HTTP proxies an `@` or `:` inside the password is written as `%40` or `%3A`; the address must have a port). The password is never shown on screen or written to the log.
 
 ## Build
 
@@ -199,18 +202,20 @@ The same list is available in the program as `/faq`.
 
 ## Limits
 
-- Text only: photos, voice, stickers and video are shown as labels (download with `/save` and open in another program). Emoji are hidden.
+- Text only: photos, voice, stickers and video are shown as labels (open them with `/open` or download with `/save`). Emoji are hidden.
 - No secret chats and no calls.
 - Only the first 120 chats are loaded; all tabs and folders are built from them.
 - The proxy mode is applied on the next start; the sign-in screen always uses the "Aurora" background (settings are inside the encrypted vault).
 - Self-destruct works on the lock screen, not at the startup password prompt.
 - If Telegram is blocked where you live you need a VPN or a proxy.
-- HTTP proxies that need a login are not supported.
+- HTTP proxies with a login are supported as `/proxy user:password@host:port` (basic authorization only; the password is kept in the encrypted vault).
 - Telegram is a trademark of its owners; this project is not affiliated with them.
 
 ## Roadmap
 
-**1.0.0 (this version)** is the first complete release: clipboard paste, English and Russian interface, first-run wizard, built-in FAQ,
+**1.0.1 (this version):** `/open` and `/copy`, input history on Alt+↑ / Alt+↓, HTTP proxies with a login.
+
+**1.0.0** is the first complete release: clipboard paste, English and Russian interface, first-run wizard, built-in FAQ,
 CI with checksummed releases, and a full code audit whose findings are covered by regression tests. Not planned: a graphical app with
 photos, video and voice, tray mode, a reusable core crate.
 
@@ -271,7 +276,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | Размер | один exe, **3,84 МБ** (3934 КБ) | десятки МБ установки плюс кэш |
 | Установка | не нужна, exe кладётся в любую папку | установщик |
 
-Как мерили: Tg-Lite 0.0.8, Windows 10 LTSC, один аккаунт с обычным набором чатов, Диспетчер задач → «Подробности», столбец «Память (закрытый рабочий набор)», значения сразу после запуска и через 10–15 минут работы. На 1.0.0 замеры не повторялись (сильных изменений в хранении чатов в памяти не ожидается, но проверьте на своём ПК). Сравнение не полностью равноценное: Tg-Lite показывает только текст и умеет меньше, чем Telegram Desktop. Другие столбцы учитывают и общие системные библиотеки, поэтому показывают больше.
+Как мерили: Tg-Lite 0.0.8, Windows 10 LTSC, один аккаунт с обычным набором чатов, Диспетчер задач → «Подробности», столбец «Память (закрытый рабочий набор)», значения сразу после запуска и через 10–15 минут работы. На 1.0.0 замеры не повторялись (сильных изменений в хранении чатов в памяти не ожидается, но проверьте на своём ПК). Сравнение не полностью равноценное: Tg-Lite показывает только текст и умеет меньше, чем Telegram Desktop. Другие столбцы учитывают и общие системные библиотеки, поэтому показывают больше. Замерить у себя: запустите `tg-lite.exe`, откройте чат и выполните `powershell -ExecutionPolicy Bypass -File tools\measure.ps1 -Minutes 10` (скрипт выведет готовую строку для таблицы). Тест в репозитории следит, чтобы 100 чатов по 60 сообщений занимали меньше 4 МБ кучи (сейчас около 2,2 МБ).
 
 ¹ Данные по Telegram Desktop — отзывы пользователей, а не лабораторные замеры: [tdesktop #30151](https://github.com/telegramdesktop/tdesktop/issues/30151)
 («starts use RAM up to 2.0-2.5gb», после перезапуска «less than 800mb»). Реальный расход сильно зависит от числа чатов и
@@ -296,6 +301,8 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 **Файлы и ссылки**
 - `/send путь подпись` — отправить файл (подпись необязательна) до 2000 МБ (путь можно просто перетащить в окно). Картинки jpg, jpeg и png меньше 10 МБ идут как фото, остальное как файл.
 - `/save` — скачать вложение в папку `downloads` рядом с exe, с прогрессом в строке состояния.
+- `/open` (или `O` в `F7`) скачивает вложение во временную папку `tglite-view` и открывает обычной программой Windows. Так открываются только картинки, PDF, простой текст, JSON, звук и видео до 50 МБ (никогда программы, скрипты и таблицы); папка `tglite-view` очищается при блокировке, выходе и следующем запуске.
+- `/copy` (или `C` в `F7`) кладёт текст сообщения в буфер обмена.
 - `/links` — ссылки чата, Enter открывает ссылку в браузере.
 
 **Управление чатами**
@@ -353,6 +360,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | Shift+Enter | | новая строка (вставленный многострочный текст не рвётся) |
 | Ctrl+V / Shift+Insert | `/paste` | вставить из буфера обмена |
 | ↑ / ↓, Tab / Shift+Tab | | выбор чата, вкладки |
+| Alt+↑ / Alt+↓ | | прошлые сообщения и команды (↑ ↓ делают то же, когда в поле есть текст) |
 | PgUp / PgDn | | прокрутка переписки |
 | Esc | | очистить ввод; затем отменить правку или ответ; затем сбросить поиск |
 | F1 | `/help` | справка |
@@ -361,11 +369,11 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | F4 | `/settings` | настройки |
 | F5 | `/refresh` | обновить список чатов |
 | F6 | `/find текст` | поиск по чатам |
-| F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, S скачать, L ссылки |
+| F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки |
 | F10 | `/quit` | выход |
 | | `/pin` `/readall` `/export` | закрепить чат, прочитать всё, сохранить переписку |
 | | `/edit` `/del` `/note` `/later` `/scheduled` | править, удалить, заметка, отложить, список отложенных |
-| | `/send` `/save` `/links` | отправить файл, скачать вложение, ссылки |
+| | `/send` `/save` `/open` `/copy` `/links` | отправить файл, скачать вложение, открыть вложение, копировать сообщение, ссылки |
 | | `/passwd` `/proxy` `/faq` | сменить пароль, прокси, подсказки |
 
 `Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` тоже работают, в латинской и русской раскладках. `Alt+Enter` и `Ctrl+J` тоже вставляют новую строку (Windows может забрать Alt+Enter для полноэкранного режима).
@@ -373,7 +381,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 ## Безопасность
 
 - `api_id`, `api_hash` и сессия Telegram лежат в `tglite.vault`, зашифрованном вашим паролем (Argon2id + ChaCha20-Poly1305). Без пароля файл не прочитать, подмена данных обнаруживается.
-- Переписка на диск не пишется. Исключения — `/export` и `/save`, которые вы запускаете сами. Черновики живут только в памяти.
+- Переписка на диск не пишется. Исключения — `/export` и `/save`, которые вы запускаете сами, и недолгие файлы `/open` (папка `tglite-view`, очищается при блокировке, выходе и запуске). Черновики и история ввода живут только в памяти.
 - Автоблокировка через 1–60 минут (или никогда) и по `F2`; на экране блокировки переписки нет.
 - Самоуничтожение по желанию: затереть и удалить `tglite.vault` после 3, 5 или 10 неверных паролей на экране блокировки (по умолчанию выключено). Остальные файлы остаются; завершите сессию в Telegram → Настройки → Устройства.
 - В журнале нет текстов сообщений. Выбранный язык хранится в `tglite.lang` (не секрет).
@@ -392,7 +400,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 Вводить ничего не нужно. Порядок в режиме «авто»: адрес, заданный вручную, переменные окружения
 (`TGLITE_PROXY`, `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`), системный прокси Windows, затем напрямую. Для обычных HTTP-прокси программа сама поднимает
 небольшой локальный мост. Если ничего не сработало, спросит адрес прокси (SOCKS5 или HTTP; Enter повторяет, `0` — без прокси, `q` — выход) и запомнит его (например `127.0.0.1:10808`).
-Вручную: `/proxy 127.0.0.1:10808` использует только этот адрес, `/proxy auto` возвращает порядок выше, `/proxy off` — напрямую (применяется при следующем запуске).
+Вручную: `/proxy 127.0.0.1:10808` использует только этот адрес, `/proxy auto` возвращает порядок выше, `/proxy off` — напрямую (применяется при следующем запуске). Прокси с логином: `/proxy логин:пароль@127.0.0.1:3128` (для HTTP-прокси `@` или `:` внутри пароля пишутся как `%40` и `%3A`; в адресе обязателен порт). Пароль не показывается на экране и не попадает в журнал.
 
 ## Сборка
 
@@ -423,18 +431,20 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Ограничения
 
-- Только текст: фото, голосовые, стикеры и видео показываются подписями (скачайте через `/save` и откройте другой программой). Эмодзи скрыты.
+- Только текст: фото, голосовые, стикеры и видео показываются подписями (откройте через `/open` или скачайте через `/save`). Эмодзи скрыты.
 - Нет секретных чатов и звонков.
 - Загружаются только первые 120 чатов; все вкладки и папки строятся из них.
 - Режим прокси применяется при следующем запуске; экран входа всегда с фоном «Аврора» (настройки лежат внутри зашифрованного файла).
 - Самоуничтожение работает на экране блокировки, но не при первом запросе пароля при запуске.
 - Если Telegram у вас заблокирован, нужен VPN или прокси.
-- HTTP-прокси с логином не поддерживаются.
+- HTTP-прокси с логином поддерживаются в виде `/proxy логин:пароль@адрес:порт` (только базовая авторизация; пароль хранится в зашифрованном хранилище).
 - Telegram — торговая марка своих владельцев; проект с ними не связан.
 
 ## Планы
 
-**1.0.0 (эта версия)** — первый законченный выпуск: вставка из буфера, интерфейс на русском и английском, мастер первого запуска,
+**1.0.1 (эта версия):** `/open` и `/copy`, история ввода на Alt+↑ / Alt+↓, HTTP-прокси с логином.
+
+**1.0.0** — первый законченный выпуск: вставка из буфера, интерфейс на русском и английском, мастер первого запуска,
 подсказки внутри программы, CI с релизами и контрольными суммами, полный аудит кода, все находки которого закрыты регрессионными
 тестами. Не планируется: графическое приложение с фото, видео и голосовыми, режим в трее, общий core-крейт.
 

@@ -299,6 +299,144 @@ pub fn clipboard_text() -> Option<String> {
     }
 }
 
+/// Кладёт текст в буфер обмена. На Windows через встроенную программу `clip` (кодировка UTF-16 с меткой порядка
+/// байтов, поэтому русский текст и эмодзи не портятся), на других системах через wl-copy / xclip / xsel / pbcopy.
+pub fn clipboard_set(text: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let run = |mut cmd: Command, data: &[u8]| -> bool {
+        let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return false };
+        if let Some(mut stdin) = child.stdin.take()
+            && stdin.write_all(data).is_err()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        // Ждём не дольше пары секунд: зависшая программа буфера обмена не должна замораживать интерфейс.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("clip");
+        cmd.creation_flags(0x0800_0000); // без окна консоли
+        run(cmd, &utf16le_with_bom(&windows_newlines(text)))
+    }
+    #[cfg(not(windows))]
+    {
+        let tools: [(&str, &[&str]); 4] =
+            [("wl-copy", &[]), ("xclip", &["-selection", "clipboard", "-i"]), ("xsel", &["--clipboard", "--input"]), ("pbcopy", &[])];
+        for (prog, args) in tools {
+            let mut cmd = Command::new(prog);
+            cmd.args(args);
+            if run(cmd, text.as_bytes()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Переводы строк Windows (`\r\n`): без них многострочный текст вставляется в Блокнот одной строкой.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n").replace('\n', "\r\n")
+}
+
+/// Текст в UTF-16 (little endian) с меткой порядка байтов: так `clip.exe` понимает Юникод.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn utf16le_with_bom(text: &str) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xFE];
+    for u in text.encode_utf16() {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out
+}
+
+/// Расширения, которые можно открывать программой по умолчанию прямо из чата: картинки, PDF, простой текст,
+/// звук и видео. Исполняемые файлы, скрипты, ярлыки и документы Office с макросами сюда не входят.
+const OPENABLE: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "pdf", "txt", "md", "log", "json", "mp3", "ogg", "oga", "opus", "m4a", "wav", "flac",
+    "mp4", "mkv", "webm", "avi", "mov",
+];
+
+/// Максимальный размер файла для `/open` (байт): больше качайте через `/save`.
+pub const MAX_OPEN_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Можно ли открывать файл с таким именем программой по умолчанию.
+pub fn is_openable(file_name: &str) -> bool {
+    match file_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => OPENABLE.contains(&ext.to_ascii_lowercase().as_str()),
+        _ => false,
+    }
+}
+
+/// Папка для файлов, скачанных только для просмотра (`/open`): `tglite-view` рядом с программой.
+/// Имя особое, чтобы очистка никогда не задела чужую папку.
+pub fn view_dir() -> PathBuf {
+    data_dir().join("tglite-view")
+}
+
+/// Удаляет файлы из папки. Возвращает, сколько удалить не удалось (например, файл ещё открыт в просмотрщике).
+pub fn clear_dir(dir: &std::path::Path) -> usize {
+    // Ссылка или точка соединения вместо папки: не идём по ней, чтобы не стереть чужое.
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+        _ => return 0,
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut left = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        let is_real_dir = e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink());
+        let ok = if is_real_dir { std::fs::remove_dir_all(&p).is_ok() } else { std::fs::remove_file(&p).is_ok() };
+        if !ok {
+            left += 1;
+        }
+    }
+    if left == 0 {
+        let _ = std::fs::remove_dir(dir);
+    }
+    left
+}
+
+/// Стирает временные файлы просмотра. Вызывается при блокировке, выходе и запуске.
+pub fn clear_view_dir() -> usize {
+    clear_dir(&view_dir())
+}
+
+/// Открывает файл программой по умолчанию. Только файлы из списка разрешённых расширений.
+pub fn open_path(path: &std::path::Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !is_openable(name) || !path.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("rundll32").arg("url.dll,FileProtocolHandler").arg(path).creation_flags(0x0800_0000).spawn().is_ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn().is_ok()
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn().is_ok()
+    }
+}
+
 /// Приводит вставленный текст к виду для поля ввода: переводы строк `\n`, без символов,
 /// которые консоль не рисует, не длиннее `max` символов.
 pub fn paste_clean(s: &str, max: usize) -> String {
@@ -334,6 +472,92 @@ mod tests {
         assert_eq!(safe_file_name("COM10.txt"), "COM10.txt"); // не устройство
         assert_eq!(safe_filename("con"), "_con");
         assert_eq!(safe_filename("Рабочий чат"), "Рабочий чат");
+    }
+
+    #[test]
+    fn only_harmless_file_types_can_be_opened() {
+        for ok in ["a.jpg", "A.PNG", "doc.pdf", "notes.txt", "v.mp4", "song.mp3", "a.b.webp"] {
+            assert!(is_openable(ok), "{ok}");
+        }
+        for bad in [
+            "a.csv",
+            "a.xml",
+            "a.exe",
+            "a.EXE",
+            "a.bat",
+            "a.cmd",
+            "a.scr",
+            "a.msi",
+            "a.ps1",
+            "a.vbs",
+            "a.js",
+            "a.lnk",
+            "a.hta",
+            "a.jar",
+            "a.reg",
+            "a.dll",
+            "a.docm",
+            "a.xlsm",
+            "a.zip",
+            "a.svg",
+            "a.html",
+            "a.jpg.exe",
+            "noext",
+            ".jpg",
+            "photo.",
+            "",
+        ] {
+            assert!(!is_openable(bad), "{bad}");
+        }
+        assert!(!open_path(std::path::Path::new("/definitely/not/here.png")));
+    }
+
+    #[test]
+    fn utf16_for_clip_has_bom_and_handles_non_bmp() {
+        assert_eq!(utf16le_with_bom(""), vec![0xFF, 0xFE]);
+        assert_eq!(utf16le_with_bom("Aя"), vec![0xFF, 0xFE, 0x41, 0x00, 0x4F, 0x04]);
+        // эмодзи за пределами BMP: пара суррогатов
+        assert_eq!(utf16le_with_bom("\u{1F600}"), vec![0xFF, 0xFE, 0x3D, 0xD8, 0x00, 0xDE]);
+    }
+
+    #[test]
+    fn newlines_become_crlf_for_windows() {
+        assert_eq!(windows_newlines("a\nb"), "a\r\nb");
+        assert_eq!(windows_newlines("a\r\nb\rc"), "a\r\nb\r\nc");
+        assert_eq!(windows_newlines("one"), "one");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clear_dir_does_not_follow_symlinks() {
+        let base = std::env::temp_dir().join(format!("tglite-test-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = base.join("precious");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+        let link = base.join("view");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(clear_dir(&link), 0);
+        assert!(target.join("keep.txt").exists(), "содержимое цели ссылки цело");
+        // вложенная ссылка внутри папки просмотра удаляется как ссылка, цель не трогается
+        let dir = base.join("tglite-view");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("inner")).unwrap();
+        clear_dir(&dir);
+        assert!(target.join("keep.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clear_dir_removes_files_and_the_folder() {
+        let dir = std::env::temp_dir().join(format!("tglite-test-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.png"), b"x").unwrap();
+        std::fs::write(dir.join("sub").join("b.txt"), b"y").unwrap();
+        assert_eq!(clear_dir(&dir), 0);
+        assert!(!dir.exists());
+        assert_eq!(clear_dir(&dir), 0, "нет папки: не ошибка");
     }
 
     #[test]

@@ -1,0 +1,368 @@
+<title>Tg-Lite карта идей</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: sticky filter bar over a grouped ledger; one row per idea, columns collapse to a card on phones. */
+:root{
+  --bg:#f4f6f9; --surface:#ffffff; --fg:#141a22; --muted:#5a6676; --line:#dde2ea; --accent:#177ac0; --accent-fg:#ffffff;
+  --p1:#d4452a; --p2:#b87a05; --p3:#2f72b0; --p4:#7656c4; --p5:#6f7888;
+  --font:"Golos Text",system-ui,"Segoe UI",sans-serif; --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0d1219; --surface:#141b25; --fg:#e7ebf1; --muted:#9aa5b6; --line:#25303f; --accent:#4cb3f0; --accent-fg:#06121c;
+  --p1:#ff7b5e; --p2:#e9b24c; --p3:#6fa9e3; --p4:#a98ff2; --p5:#8f99aa; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0d1219; --surface:#141b25; --fg:#e7ebf1; --muted:#9aa5b6; --line:#25303f; --accent:#4cb3f0; --accent-fg:#06121c;
+  --p1:#ff7b5e; --p2:#e9b24c; --p3:#6fa9e3; --p4:#a98ff2; --p5:#8f99aa; color-scheme:dark }
+body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:15px;line-height:1.5;
+  padding-block:28px 56px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+h1{font-size:clamp(26px,5vw,38px);line-height:1.1;margin:0;font-weight:700;letter-spacing:-.02em;text-wrap:balance}
+h1 span{color:var(--accent)}
+.sub{margin:8px 0 0;color:var(--muted);max-width:62ch}
+.mono{font-family:var(--mono)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px}
+
+/* priority overview */
+.over{padding:16px;display:flex;flex-direction:column;gap:12px}
+.bar{display:flex;height:12px;border-radius:6px;overflow:hidden;gap:2px}
+.bar i{display:block;min-width:4px;background:var(--c)}
+.legend{display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:inherit;font-size:13px;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:999px;padding:5px 12px;cursor:pointer;display:inline-flex;gap:7px;align-items:center}
+.chip:hover{border-color:var(--muted)}
+.chip[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.chip .dot{width:9px;height:9px;border-radius:50%;background:var(--c)}
+.chip .n{font-family:var(--mono);font-size:12px;opacity:.75}
+.chip:focus-visible,select:focus-visible,input:focus-visible,.star:focus-visible,.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* controls */
+.ctl{padding:12px;display:flex;flex-direction:column;gap:10px}
+.line{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+input[type=search],select{font:inherit;font-size:14px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:7px 10px;min-width:0}
+input[type=search]{flex:1 1 220px}
+label.sel{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.btn{font:inherit;font-size:13px;font-weight:600;color:var(--accent-fg);background:var(--accent);border:0;border-radius:8px;padding:8px 14px;cursor:pointer}
+.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--line);font-weight:500}
+.count{font-size:13px;color:var(--muted);margin-left:auto}
+
+/* ledger */
+.head,.row{display:grid;grid-template-columns:34px minmax(0,1fr) 150px 128px 84px 52px 52px;gap:12px;align-items:start;padding:10px 14px}
+.head{font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);border-bottom:1px solid var(--line);align-items:center}
+.group{padding:18px 14px 8px;display:flex;align-items:baseline;gap:10px;border-top:1px solid var(--line);background:var(--bg)}
+.group:first-of-type{border-top:0}
+.group h2{margin:0;font-size:16px;font-weight:700}
+.group .n{font:12px var(--mono);color:var(--muted)}
+.group .tag{width:10px;height:10px;border-radius:3px;background:var(--c);align-self:center}
+.row{border-top:1px solid var(--line)}
+.row:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.row.picked{background:color-mix(in srgb,var(--accent) 11%,transparent)}
+.idea b{font-weight:600;display:block}
+.idea span{color:var(--muted);font-size:13.5px;display:block;max-width:64ch}
+.star{font-size:18px;line-height:1;background:none;border:0;color:var(--muted);cursor:pointer;padding:2px;border-radius:4px}
+.star[aria-pressed="true"]{color:var(--p2)}
+.cat{font-size:13px;color:var(--muted)}
+.pill{display:inline-block;font-size:12px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border-radius:999px;padding:2px 10px;white-space:nowrap}
+.eff{display:inline-flex;gap:2px;align-items:center}
+.eff i{width:9px;height:14px;border-radius:2px;background:var(--line)}
+.eff i.on{background:var(--fg)}
+.eff em{font:normal 12px var(--mono);margin-left:6px;color:var(--muted)}
+.ram,.ver{font:13px var(--mono);color:var(--muted)}
+.ver{color:var(--fg)}
+.empty{padding:36px 14px;text-align:center;color:var(--muted)}
+.table{overflow:hidden}
+
+.key{padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 24px;font-size:13px;color:var(--muted)}
+.key b{color:var(--fg);font-weight:600}
+.out{padding:12px 16px;font:13px var(--mono);white-space:pre-wrap;word-break:break-word}
+
+@media (max-width:820px){
+  .head{display:none}
+  .row{grid-template-columns:34px minmax(0,1fr);row-gap:8px}
+  .row .meta{grid-column:2;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+}
+@media (min-width:821px){ .row .meta{display:contents} .ctl{position:sticky;top:0;z-index:5} }
+@media (prefers-reduced-motion:no-preference){ .bar i{transition:flex-grow .3s} }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Tg-Lite <span>карта идей</span></h1>
+    <p class="sub" id="sub"></p>
+  </header>
+
+  <section class="panel over" aria-label="Обзор по приоритетам">
+    <div class="bar" id="bar"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="panel ctl" aria-label="Фильтры">
+    <div class="line">
+      <input type="search" id="q" placeholder="Поиск по идеям, например прокси или фото" aria-label="Поиск">
+      <label class="sel">Группы
+        <select id="group"><option value="prio">по важности</option><option value="cat">по разделам</option><option value="ver">по версиям</option><option value="none">без групп</option></select>
+      </label>
+      <label class="sel">Порядок
+        <select id="sort"><option value="prio">важность</option><option value="effort">трудоёмкость</option><option value="ram">влияние на ОЗУ</option><option value="title">название</option></select>
+      </label>
+    </div>
+    <div class="line" id="cats"></div>
+    <div class="line">
+      <button class="chip" id="quick" aria-pressed="false" title="Важные и желательные идеи, на которые уходит не больше дня">Быстрые победы</button>
+      <button class="chip" id="mine" aria-pressed="false">Отмеченные звездой <span class="n" id="minen">0</span></button>
+      <button class="btn ghost" id="copy">Скопировать отмеченные</button>
+      <button class="btn ghost" id="reset">Сбросить</button>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="panel out" id="out" hidden></div>
+  </section>
+
+  <section class="panel table" aria-label="Идеи">
+    <div class="head" aria-hidden="true"><span></span><span>Идея</span><span>Раздел</span><span>Важность</span><span>Работа</span><span>ОЗУ</span><span>Версия</span></div>
+    <div id="list"></div>
+  </section>
+
+  <section class="panel key" aria-label="Обозначения">
+    <div><b>Работа.</b> S до дня, M несколько дней, L около недели, XL месяцы.</div>
+    <div><b>ОЗУ.</b> «–» не меняет, «+» чуть больше на время работы функции, «++» заметно, требует отдельного решения.</div>
+    <div><b>Версия.</b> 1.0.x исправления, 1.1 и 1.2 ближайшие выпуски, 1.x когда дойдут руки, 2.0 большие изменения, «–» без срока.</div>
+    <div><b>Звезда.</b> Ваш выбор. Он остаётся в этом браузере; кнопка копирует список, чтобы прислать его в чат.</div>
+  </section>
+</div>
+
+<script>
+const PRIO=[{k:1,n:"Важно",c:"var(--p1)"},{k:2,n:"Желательно",c:"var(--p2)"},{k:3,n:"Не важно",c:"var(--p3)"},{k:4,n:"Далёкое будущее",c:"var(--p4)"},{k:5,n:"Не планируется",c:"var(--p5)"}];
+const CATS={msg:"Сообщения",files:"Файлы и медиа",sec:"Безопасность",net:"Сеть и прокси",perf:"Скорость и ОЗУ",ui:"Удобство",vis:"Визуал",auto:"Автоматизация",plat:"Платформы",qa:"Качество и CI",comm:"Сообщество и раздача"};
+const VERS=["1.0.x","1.1","1.2","1.x","2.0","–"];
+const EFF={S:1,M:2,L:3,XL:4};
+// [раздел, важность, работа, ОЗУ(0-2), версия, название, описание]
+const D=[
+["msg",1,"M",0,"1.1","Все чаты, а не первые 120","Подгружать список страницами; вкладки и папки строятся из полного списка."],
+["msg",1,"M",1,"1.1","Старая история по PgUp","Листать переписку вверх с подгрузкой, а не только последние сообщения."],
+["msg",1,"M",0,"1.1","Поиск по сообщениям","В текущем чате и по всем чатам; результат открывается в контексте."],
+["msg",1,"S",0,"1.0.x","Копировать сообщение","В режиме F7 клавиша C кладёт текст выбранного сообщения в буфер."],
+["msg",1,"M",0,"1.1","Кнопки у сообщений ботов","Нажимать inline-кнопки стрелками или цифрами; без этого многие боты бесполезны."],
+["msg",2,"M",0,"1.2","Топики форумов","Для групп с темами нужен экран выбора темы."],
+["msg",2,"M",0,"1.2","Реакции","Видеть реакции под сообщением и ставить свою одной клавишей."],
+["msg",2,"M",0,"1.2","Опросы","Варианты с процентами и голосование."],
+["msg",2,"S",0,"1.1","Отправка без звука","Флаг «тихо» для обычной отправки и для /later."],
+["msg",2,"S",0,"1.1","Переход к оригиналу ответа","Из цитаты прыгнуть к исходному сообщению и вернуться."],
+["msg",2,"M",0,"1.2","Выбор нескольких сообщений","Отметить пробелом и переслать, удалить или скопировать пачкой."],
+["msg",2,"S",0,"1.1","Список закреплённых","Сейчас показывается одно закреплённое сообщение; добавить /pinned со всеми."],
+["msg",2,"S",0,"1.1","Вступить по ссылке, выйти из чата","Вставить t.me/… и вступить; команда выхода из чата или канала."],
+["msg",2,"M",0,"1.2","Открыть чат по @username","Глобальный поиск пользователя или канала, чтобы написать первым."],
+["msg",2,"M",0,"1.2","Автодополнение @упоминаний","Tab подставляет имя участника группы."],
+["msg",2,"S",0,"1.1","Отметки прочтения","Показывать, прочитано ли своё сообщение."],
+["msg",2,"M",0,"1.2","Облачные черновики","Синхронизировать черновики с телефоном и другими устройствами."],
+["msg",3,"S",0,"1.x","Шаблоны ответов","/tpl: сохранить фразу и вставлять по короткому имени."],
+["msg",3,"M",0,"1.x","Профиль и участники чата","Описание, список участников, ссылка-приглашение."],
+["msg",3,"M",0,"1.x","Просмотры постов канала","Счётчик просмотров под постами, чтобы не открывать телефон."],
+["msg",3,"L",0,"2.0","Управление группой","Кик, бан, права админов, создание групп и каналов."],
+["msg",4,"L",0,"2.0","Истории (stories)","Хотя бы список и текстовые подписи."],
+["msg",5,"XL",2,"–","Секретные чаты","Библиотека grammers не умеет сквозное шифрование, писать своё слишком дорого и рискованно."],
+["msg",5,"XL",2,"–","Звонки и видеозвонки","Нужен звуковой и видеостек; он сломает цель «несколько МБ памяти»."],
+["msg",5,"XL",2,"–","Mini Apps и платежи","Требуют встроенного браузера."],
+
+["files",1,"S",0,"1.1","/open: открыть программой Windows","Скачать во временную папку и открыть обычным просмотрщиком. Первый шаг к фото."],
+["files",1,"S",0,"1.1","Очистка временных файлов","Удалять скачанное для просмотра при блокировке и выходе."],
+["files",2,"M",1,"1.2","Превью фото в консоли","Миниатюра полублоками ▀ из маленькой копии фото Telegram, около 80×40 ячеек."],
+["files",2,"M",0,"1.2","Докачка и очередь загрузок","Большие файлы не начинаются заново после обрыва связи."],
+["files",2,"M",0,"1.2","Скриншот из буфера в чат","Ctrl+V с картинкой отправляет её как фото."],
+["files",2,"M",0,"1.2","Альбомы","Несколько фото одним сообщением."],
+["files",2,"M",1,"1.2","Сжатие фото перед отправкой","Уменьшать большие снимки, чтобы уходили быстро на слабом интернете."],
+["files",2,"S",0,"1.1","Просмотр текстовых файлов","txt, md, log, json читаются прямо в окне."],
+["files",3,"M",1,"1.x","Голосовые через системный плеер","Скачать и запустить в плеере Windows."],
+["files",3,"S",0,"1.x","Автозагрузка по правилам","Скачивать картинки до N МБ в выбранных чатах."],
+["files",3,"M",0,"1.x","Отправка папки архивом","Сжать в zip и отправить одним файлом."],
+["files",3,"S",0,"1.x","Карточки ссылок","Показывать заголовок и описание страницы, которые уже прислал Telegram."],
+["files",4,"L",2,"2.0","Фото через Sixel","Настоящие картинки в новых Windows Terminal; в cmd не заработает."],
+["files",4,"L",1,"2.0","Встроенный плеер голосовых","Своё воспроизведение; цена в памяти и размере exe."],
+["files",4,"M",0,"2.0","Проверка файлов Защитником","Прогонять скачанное через Windows Defender перед открытием."],
+
+["sec",1,"M",0,"1.1","Подпись exe","Сертификат подписи кода уберёт часть жалоб антивирусов и SmartScreen. Платно."],
+["sec",1,"S",0,"1.1","Стирание секретов в памяти","Обнулять пароль и ключи сразу после использования (zeroize)."],
+["sec",1,"S",0,"1.1","Пауза после неверных паролей","Растущая задержка между попытками, а не только самоудаление."],
+["sec",2,"S",0,"1.1","Босс-клавиша","Одна клавиша мгновенно прячет экран и показывает безобидный вывод."],
+["sec",2,"S",0,"1.1","Блокировка при потере фокуса","Блокировать, если окно было не в фокусе дольше N секунд."],
+["sec",2,"S",0,"1.1","Очистка буфера обмена","Через N секунд стирать то, что вставляли или копировали."],
+["sec",2,"M",0,"1.2","Шифрование /export и /save","Сохранять переписку и файлы в зашифрованный контейнер по желанию."],
+["sec",2,"M",0,"1.2","Аттестация релизов и SBOM","GitHub attestation: можно проверить, что exe собран именно из этого кода."],
+["sec",3,"S",0,"1.x","Параметры Argon2","Выбор: быстрее на слабом ПК или надёжнее."],
+["sec",3,"M",0,"1.x","Режим «без следов»","Ничего не пишет на диск, кроме хранилища; лог только в памяти."],
+["sec",3,"M",0,"1.x","Защита от скриншотов","Запрет захвата окна средствами Windows, где это возможно."],
+["sec",4,"M",0,"2.0","Файл-ключ или USB-ключ","Второй фактор для хранилища, кроме пароля."],
+["sec",4,"L",0,"2.0","Несколько аккаунтов","Переключение между аккаунтами с одним паролем."],
+["sec",4,"XL",0,"–","Независимый аудит","Профессиональная проверка; пока был только собственный разбор и автоматические проверки."],
+
+["net",1,"S",0,"1.0.x","HTTP-прокси с логином","Добавить Proxy-Authorization; сейчас такие прокси не работают."],
+["net",2,"S",0,"1.1","Индикатор связи","Пинг и состояние соединения в строке статуса."],
+["net",2,"M",0,"1.1","Очередь исходящих без сети","Сообщения уходят сами, когда связь вернётся."],
+["net",2,"M",0,"1.2","Список прокси с автопереключением","Если один упал, пробовать следующий."],
+["net",2,"L",0,"1.x","MTProto-прокси","Прокси Telegram с секретом; нужен собственный транспорт."],
+["net",3,"S",0,"1.x","Режим экономии трафика","Не загружать лишнее, реже обновлять список."],
+["net",3,"S",0,"1.x","/netcheck","Проверка DNS, порта, прокси и дата-центров с понятным выводом."],
+
+["perf",1,"M",0,"1.1","Бюджет ОЗУ в CI","Тест падает, если 100 чатов съедают больше заданного."],
+["perf",1,"S",0,"1.1","Замеры на каждый релиз","Сценарий замера и таблица в README обновляются вместе с версией."],
+["perf",2,"S",0,"1.1","Экономная анимация","Реже кадры и пауза без фокуса; сейчас на экране блокировки 1,4–2% CPU."],
+["perf",2,"M",0,"1.2","Сборка для 32-bit Windows","Для самых старых ПК с 32-битной системой."],
+["perf",3,"S",0,"1.x","Сжатие exe через UPX","Размер 3,8 → около 1,5 МБ, но антивирусы такое не любят."],
+["perf",3,"M",0,"1.x","Ленивая история","Держать в памяти только видимые сообщения и небольшой запас."],
+["perf",4,"L",0,"2.0","Сборка для Windows 7","Через неофициальную цель Rust; хрупкая и ограниченная поддержка."],
+
+["ui",1,"S",0,"1.1","История ввода и Tab","Стрелка вверх возвращает прошлую команду, Tab дополняет /команды."],
+["ui",1,"M",0,"1.1","Мышь","Клик по чату и вкладке, колесо для прокрутки."],
+["ui",1,"S",0,"1.1","Избранные чаты на Alt+1…9","Любимые чаты на цифрах, переход одним нажатием."],
+["ui",2,"M",0,"1.2","Палитра Ctrl+K","Быстрый переход к чату или команде с нечётким поиском."],
+["ui",2,"M",0,"1.2","Свои горячие клавиши","Файл keys.toml, чтобы переназначить любую клавишу."],
+["ui",2,"S",0,"1.1","Разделители дат","«Сегодня», «Вчера» и дата между сообщениями разных дней."],
+["ui",2,"S",0,"1.1","Тихие часы и мелодии","Расписание, когда не звучит сигнал; выбор звука."],
+["ui",2,"M",0,"1.2","Уведомления Windows","Всплывающие окна о новых сообщениях при свёрнутом окне."],
+["ui",2,"S",0,"1.1","Проверка консоли при первом запуске","Тест шрифта и цветов и подсказка, как настроить окно."],
+["ui",2,"M",0,"1.2","Другие языки интерфейса","Украинский, казахский, турецкий, испанский; переводы от сообщества."],
+["ui",3,"S",0,"1.x","Vim-клавиши","j/k, gg, G для прокрутки по желанию."],
+["ui",3,"S",0,"1.x","Режим чтения","Скрыть список чатов и оставить одну переписку."],
+["ui",3,"M",0,"1.x","Два чата рядом","Окно делится на две переписки."],
+["ui",3,"S",0,"1.x","Отмена и повтор в поле ввода","Ctrl+Z и Ctrl+Y в тексте."],
+["ui",3,"M",0,"1.x","Подсветка кода","Блоки ``` с окраской ключевых слов."],
+["ui",3,"S",0,"1.x","Автозапуск с Windows","Опция: запускаться при входе и сразу показывать экран блокировки."],
+["ui",3,"M",0,"1.x","Глобальная горячая клавиша","Вызвать или спрятать окно из любой программы."],
+["ui",4,"L",1,"2.0","Значок в трее","Работа свёрнутой в трей; сейчас сознательно не планируется."],
+
+["vis",2,"S",0,"1.1","Цветовые темы","Тёмная, светлая, высокий контраст, Solarized; сейчас меняется только акцент."],
+["vis",2,"S",0,"1.1","Цветные имена в группах","Каждому участнику стабильный цвет, проще читать."],
+["vis",2,"S",0,"1.1","Режим для скриншотов","Прячет номера и имена, чтобы показывать программу без утечек."],
+["vis",3,"S",0,"1.x","Новые фоны блокировки","Дождь, камин, часы, огни города; сейчас Аврора, Матрица, Звёзды."],
+["vis",3,"S",0,"1.x","Стили рамок","Одинарные, двойные, скруглённые или без рамок."],
+["vis",3,"S",0,"1.x","Красивый прогресс загрузки","Полоса с размером, скоростью и оставшимся временем."],
+["vis",3,"S",0,"1.x","Заставка при запуске","Короткая анимация логотипа."],
+["vis",3,"M",1,"1.x","Эмодзи как :имена:","Вместо скрытия показывать :smile: или ASCII-смайл."],
+["vis",3,"S",0,"1.x","Пасхалки и игры","Змейка на время ожидания, команда /matrix."],
+["vis",4,"M",1,"2.0","Аватарки полублоками","Мини-аватар рядом с чатом из маленького фото профиля."],
+["vis",4,"L",2,"2.0","Графический режим","Окно с фото, стикерами и плавной анимацией; отдельное приложение на общем ядре."],
+
+["auto",1,"M",0,"1.1","Режим командной строки","tg-lite send @имя «текст» и tg-lite post канал файл.txt для скриптов."],
+["auto",1,"M",0,"1.1","Планировщик постов канала","Очередь постов, шаблоны, предпросмотр и время выхода; для вашего канала."],
+["auto",2,"M",0,"1.2","Режим бота","Публиковать в канал через бота без личной сессии на этом ПК."],
+["auto",2,"M",0,"1.2","Экспорт в HTML, JSON, Markdown","Сейчас только текст в .txt."],
+["auto",3,"S",0,"1.x","Импорт и экспорт настроек","Один зашифрованный файл для переноса на другой ПК."],
+["auto",3,"L",0,"2.0","Резервная копия переписки","Зашифрованный архив чатов по расписанию."],
+["auto",4,"L",0,"2.0","Правила и автоответчик","Если пришло X, ответить Y; фильтры по ключевым словам."],
+["auto",4,"XL",1,"2.0","Плагины и скрипты","Rhai или Lua для собственных команд."],
+["auto",4,"L",0,"2.0","Источники → канал","Автопубликация новостей из RSS по расписанию."],
+["auto",4,"L",0,"2.0","Синхронизация настроек","Через Избранное в зашифрованном виде между своими ПК."],
+
+["plat",2,"M",0,"1.2","Сборки для Linux и macOS","Код буфера обмена уже есть; добавить в release.yml."],
+["plat",3,"S",0,"1.x","ARM64 Windows","Ещё одна цель сборки."],
+["plat",3,"M",0,"1.x","Termux на Android","Запуск в терминале на телефоне."],
+["plat",4,"XL",0,"2.0","tg-lite-core","Вынести ядро в библиотеку, чтобы делать другие интерфейсы."],
+
+["qa",1,"S",0,"1.0.x","Тесты на Windows в CI","Сейчас тесты идут на Linux; буфер и звук Windows проверены только вручную."],
+["qa",1,"S",0,"1.0.x","Dependabot","Автообновление зависимостей и уведомления об уязвимостях."],
+["qa",1,"S",0,"1.1","/report для поддержки","Версия, ОС и лог без секретов одним файлом для issue."],
+["qa",1,"S",0,"1.1","Отчёт о сбое","При панике сохранять причину без текста сообщений и подсказывать, куда отправить."],
+["qa",2,"M",0,"1.2","Фаззинг парсеров","cargo-fuzz для разбора команд, времени и markdown."],
+["qa",2,"S",0,"1.1","Покрытие кода","Отчёт и бейдж покрытия тестами."],
+["qa",2,"L",0,"1.2","Тесты на серверах Telegram","Вход и отправка в CI на тестовом дата-центре, без реального аккаунта."],
+["qa",3,"S",0,"1.x","Фиксация версии Rust","rust-toolchain.toml и проверка минимальной версии."],
+["qa",3,"M",0,"1.x","Дымовой тест в ConPTY","Запуск exe в псевдоконсоли Windows и проверка экранов."],
+["qa",3,"S",0,"1.x","Автоописание релизов","Release drafter собирает список изменений."],
+["qa",5,"S",0,"–","Телеметрия","Не будет: никаких отправок данных об использовании. Обещание можно закрепить в README."],
+
+["comm",1,"S",0,"1.0.x","GIF-демо в README","Короткая запись: вход, чат, отправка. Первое, что смотрят."],
+["comm",1,"S",0,"1.0.x","Инструкция по api_id","Пошагово со скриншотами my.telegram.org; самый сложный шаг для новичка."],
+["comm",2,"M",0,"1.1","Scoop и winget","Установка и обновление одной командой."],
+["comm",2,"M",0,"1.1","Обновление /update","Проверка новой версии на GitHub и скачивание с проверкой SHA256."],
+["comm",2,"S",0,"1.1","CONTRIBUTING и good first issue","Чтобы другим было понятно, с чего начать."],
+["comm",2,"S",0,"1.1","Посты на Habr, Pikabu, в Telegram","История «клиент на 3 МБ для старых ПК»."],
+["comm",3,"M",0,"1.x","Сайт на GitHub Pages","Описание, скачивание и FAQ на одной странице."],
+["comm",3,"M",0,"1.x","README на других языках","Помимо русского и английского."],
+["comm",3,"S",0,"1.x","Discussions и Wiki","Отдельное место для вопросов и руководств."],
+["comm",4,"S",0,"–","Поддержка проекта","Ссылка на донаты, если захочется."]
+].map((r,i)=>({id:i,cat:r[0],prio:r[1],eff:r[2],ram:r[3],ver:r[4],title:r[5],desc:r[6]}));
+
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pc=k=>PRIO.find(p=>p.k===k);
+const S={q:"",prio:0,cat:"",quick:false,mine:false,group:"prio",sort:"prio"};
+let picked=new Set();
+try{picked=new Set(JSON.parse(localStorage.getItem("tglite-ideas-picked")||"[]"))}catch(e){}
+const save=()=>{try{localStorage.setItem("tglite-ideas-picked",JSON.stringify([...picked]))}catch(e){}};
+
+function counts(){const o={};D.forEach(d=>o[d.prio]=(o[d.prio]||0)+1);return o}
+function head(){
+  const c=counts();
+  $("#sub").textContent=D.length+" идей: от мелких правок для 1.0.x до задач на 2.0 и дальше. Нажмите на приоритет, раздел или быструю победу, отметьте звездой то, что хочется сделать первым.";
+  $("#bar").innerHTML=PRIO.map(p=>`<i style="--c:${p.c};flex:${c[p.k]||0} 1 0" title="${p.n}: ${c[p.k]||0}"></i>`).join("");
+  $("#legend").innerHTML=PRIO.map(p=>`<button class="chip" data-prio="${p.k}" aria-pressed="false" style="--c:${p.c}"><span class="dot"></span>${p.n}<span class="n">${c[p.k]||0}</span></button>`).join("");
+  $("#cats").innerHTML=`<button class="chip" data-cat="" aria-pressed="true">Все разделы</button>`+Object.entries(CATS).map(([k,v])=>`<button class="chip" data-cat="${k}" aria-pressed="false">${v}<span class="n">${D.filter(d=>d.cat===k).length}</span></button>`).join("");
+}
+function pass(d){
+  if(S.prio&&d.prio!==S.prio)return false;
+  if(S.cat&&d.cat!==S.cat)return false;
+  if(S.quick&&!(d.prio<=2&&d.eff==="S"))return false;
+  if(S.mine&&!picked.has(d.id))return false;
+  if(S.q){const t=(d.title+" "+d.desc+" "+CATS[d.cat]).toLowerCase();if(!t.includes(S.q))return false}
+  return true;
+}
+const cmp={
+  prio:(a,b)=>a.prio-b.prio||a.id-b.id,
+  effort:(a,b)=>EFF[a.eff]-EFF[b.eff]||a.prio-b.prio||a.id-b.id,
+  ram:(a,b)=>a.ram-b.ram||a.prio-b.prio||a.id-b.id,
+  title:(a,b)=>a.title.localeCompare(b.title,"ru")
+};
+function rowHtml(d){
+  const p=pc(d.prio),on=picked.has(d.id);
+  const eff=[1,2,3,4].map(i=>`<i class="${i<=EFF[d.eff]?"on":""}"></i>`).join("")+`<em>${d.eff}</em>`;
+  const ram=["–","+","++"][d.ram];
+  return `<div class="row${on?" picked":""}">
+    <button class="star" data-id="${d.id}" aria-pressed="${on}" aria-label="Отметить: ${esc(d.title)}">${on?"★":"☆"}</button>
+    <div class="idea"><b>${esc(d.title)}</b><span>${esc(d.desc)}</span></div>
+    <div class="meta">
+      <span class="cat">${CATS[d.cat]}</span>
+      <span class="pillc"><span class="pill" style="--c:${p.c}">${p.n}</span></span>
+      <span class="effc"><span class="eff" title="Работа: ${d.eff}">${eff}</span></span>
+      <span class="ram" title="Влияние на ОЗУ">ОЗУ ${ram}</span>
+      <span class="ver" title="Версия">${d.ver}</span>
+    </div></div>`;
+}
+function render(){
+  const items=D.filter(pass).sort(cmp[S.sort]);
+  $("#count").textContent=items.length+" из "+D.length;
+  $("#minen").textContent=picked.size;
+  if(!items.length){$("#list").innerHTML=`<div class="empty">Ничего не найдено. Ослабьте фильтры или нажмите «Сбросить».</div>`;return}
+  let groups;
+  if(S.group==="none")groups=[{h:null,items}];
+  else if(S.group==="prio")groups=PRIO.map(p=>({h:p.n,c:p.c,items:items.filter(d=>d.prio===p.k)}));
+  else if(S.group==="cat")groups=Object.entries(CATS).map(([k,v])=>({h:v,items:items.filter(d=>d.cat===k)}));
+  else groups=VERS.map(v=>({h:v==="–"?"Без срока":"Версия "+v,items:items.filter(d=>d.ver===v)}));
+  $("#list").innerHTML=groups.filter(g=>g.items.length).map(g=>
+    (g.h?`<div class="group"><span class="tag" style="--c:${g.c||"var(--accent)"}"></span><h2>${g.h}</h2><span class="n">${g.items.length}</span></div>`:"")+g.items.map(rowHtml).join("")).join("");
+}
+function sync(){
+  document.querySelectorAll("[data-prio]").forEach(b=>b.setAttribute("aria-pressed",String(+b.dataset.prio===S.prio)));
+  document.querySelectorAll("[data-cat]").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.cat===S.cat)));
+  $("#quick").setAttribute("aria-pressed",String(S.quick));
+  $("#mine").setAttribute("aria-pressed",String(S.mine));
+}
+document.addEventListener("click",e=>{
+  const t=e.target.closest("button");if(!t)return;
+  if(t.dataset.prio!==undefined){const k=+t.dataset.prio;S.prio=S.prio===k?0:k}
+  else if(t.dataset.cat!==undefined){S.cat=t.dataset.cat}
+  else if(t.id==="quick"){S.quick=!S.quick}
+  else if(t.id==="mine"){S.mine=!S.mine}
+  else if(t.id==="reset"){Object.assign(S,{q:"",prio:0,cat:"",quick:false,mine:false});$("#q").value="";$("#out").hidden=true}
+  else if(t.classList.contains("star")){const id=+t.dataset.id;picked.has(id)?picked.delete(id):picked.add(id);save()}
+  else if(t.id==="copy"){
+    const list=D.filter(d=>picked.has(d.id)).sort(cmp.prio).map(d=>"- "+d.title+" ("+pc(d.prio).n+", "+d.ver+")");
+    const text=list.length?"Хочу сделать:\n"+list.join("\n"):"Ничего не отмечено звездой.";
+    const out=$("#out");out.textContent=text;out.hidden=false;
+    if(navigator.clipboard&&list.length)navigator.clipboard.writeText(text).catch(()=>{});
+    return;
+  } else return;
+  sync();render();
+});
+$("#q").addEventListener("input",e=>{S.q=e.target.value.trim().toLowerCase();render()});
+$("#group").addEventListener("change",e=>{S.group=e.target.value;render()});
+$("#sort").addEventListener("change",e=>{S.sort=e.target.value;render()});
+head();sync();render();
+</script>

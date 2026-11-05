@@ -250,6 +250,11 @@ pub enum Cmd {
         chat: ChatInfo,
         id: i32,
     },
+    /// Скачать вложение во временную папку `view` и открыть его программой по умолчанию.
+    Open {
+        chat: ChatInfo,
+        id: i32,
+    },
     /// Отправить файл с диска.
     SendFile {
         chat: ChatInfo,
@@ -327,6 +332,8 @@ pub enum Event {
         chat: PeerId,
         items: Vec<ScheduledMsg>,
     },
+    /// Файл для просмотра скачан: интерфейс открывает его.
+    Open(PathBuf),
     Status(String),
     Error(String),
 }
@@ -716,7 +723,13 @@ pub fn download_dir() -> PathBuf {
 }
 
 /// Скачивает вложение сообщения. Прогресс сообщается в строку состояния.
-pub async fn save_attachment(client: &Client, chat: &ChatInfo, id: i32, events: &mpsc::UnboundedSender<Event>) -> Result<PathBuf> {
+pub async fn save_attachment(
+    client: &Client,
+    chat: &ChatInfo,
+    id: i32,
+    events: &mpsc::UnboundedSender<Event>,
+    for_view: bool,
+) -> Result<PathBuf> {
     use tokio::io::AsyncWriteExt;
     let msgs = client.get_messages_by_id(chat.peer, &[id]).await.map_err(|e| anyhow!("{e}"))?;
     let msg = msgs.into_iter().next().flatten().ok_or_else(|| anyhow!(tr!("сообщение не найдено", "message not found")))?;
@@ -727,6 +740,10 @@ pub async fn save_attachment(client: &Client, chat: &ChatInfo, id: i32, events: 
         Media::Document(d) => {
             let base = d.name().map(str::to_string).filter(|n| !n.trim().is_empty());
             match base {
+                // Имя без расширения, но с известным типом: добавляем расширение, чтобы файл можно было открыть.
+                Some(n) if !n.contains('.') && !ext_from_mime(d.mime_type().unwrap_or("")).is_empty() => {
+                    format!("{n}.{}", ext_from_mime(d.mime_type().unwrap_or("")))
+                }
                 Some(n) => n,
                 None => {
                     let ext = ext_from_mime(d.mime_type().unwrap_or(""));
@@ -736,7 +753,18 @@ pub async fn save_attachment(client: &Client, chat: &ChatInfo, id: i32, events: 
         }
         _ => return Err(anyhow!(tr!("это вложение нельзя скачать", "this attachment cannot be downloaded"))),
     };
-    let dir = download_dir();
+    if for_view {
+        if !crate::util::is_openable(&crate::util::safe_file_name(&name)) {
+            return Err(anyhow!(tr!(
+                "такой тип файла не открывается из чата (только картинки, PDF, текст, звук, видео): сохраните его через /save",
+                "this file type is not opened from the chat (only images, PDF, text, audio, video): save it with /save"
+            )));
+        }
+        if Downloadable::size(&media).is_some_and(|n| n as u64 > crate::util::MAX_OPEN_BYTES) {
+            return Err(anyhow!(tr!("файл больше 50 МБ: сохраните его через /save", "the file is larger than 50 MB: save it with /save")));
+        }
+    }
+    let dir = if for_view { crate::util::view_dir() } else { download_dir() };
     std::fs::create_dir_all(&dir)?;
     let path = crate::util::reserve_unique(&dir, &crate::util::safe_file_name(&name))?;
     // Имя `path` уже занято пустым файлом, поэтому и временное имя уникально.
@@ -756,6 +784,12 @@ pub async fn save_attachment(client: &Client, chat: &ChatInfo, id: i32, events: 
         while let Some(chunk) = it.next().await.map_err(|e| anyhow!("{e}"))? {
             file.write_all(&chunk).await?;
             done += chunk.len();
+            if for_view && done as u64 > crate::util::MAX_OPEN_BYTES {
+                return Err(anyhow!(tr!(
+                    "файл больше 50 МБ: сохраните его через /save",
+                    "the file is larger than 50 MB: save it with /save"
+                )));
+            }
             let pct = total.filter(|t| *t > 0).map(|t| (done as u64 * 100 / t as u64).min(100));
             if let Some(p) = pct
                 && p / 5 != last_pct / 5
@@ -993,7 +1027,7 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                     let client = client.clone();
                     let events = events.clone();
                     tokio::spawn(async move {
-                        match save_attachment(&client, &chat, id, &events).await {
+                        match save_attachment(&client, &chat, id, &events, false).await {
                             Ok(p) => {
                                 let _ = events.send(Event::Status(trf!("Сохранено: {}", "Saved: {}", p.display())));
                             }
@@ -1001,6 +1035,21 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                                 log(&format!("save: {e}"));
                                 let _ =
                                     events.send(Event::Error(trf!("не скачано: {}", "not downloaded: {}", friendly_error(&e.to_string()))));
+                            }
+                        }
+                    });
+                }
+                Cmd::Open { chat, id } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match save_attachment(&client, &chat, id, &events, true).await {
+                            Ok(p) => {
+                                let _ = events.send(Event::Open(p));
+                            }
+                            Err(e) => {
+                                log(&format!("open: {e}"));
+                                let _ = events.send(Event::Error(trf!("не открыто: {}", "not opened: {}", friendly_error(&e.to_string()))));
                             }
                         }
                     });

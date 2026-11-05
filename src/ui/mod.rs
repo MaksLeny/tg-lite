@@ -60,6 +60,8 @@ const COMMANDS: &[&str] = &[
     "/quit",
     "/search",
     "/save",
+    "/open",
+    "/copy",
     "/send",
     "/links",
     "/scheduled",
@@ -237,6 +239,12 @@ pub struct App {
     pw_first: String,
     last_activity: Instant,
     last_key_at: Instant,
+    /// Отправленные сообщения и команды этого сеанса (только в памяти) для перелистывания стрелками.
+    input_history: Vec<String>,
+    /// Позиция в истории: `None`, пока человек пишет своё.
+    hist_pos: Option<usize>,
+    /// Недописанный текст, который вернётся, если дойти стрелкой вниз до конца истории.
+    hist_draft: String,
     pending_load: Option<Instant>,
     reload_pending: bool,
     should_quit: bool,
@@ -293,6 +301,9 @@ impl App {
             pw_first: String::new(),
             last_activity: Instant::now(),
             last_key_at: Instant::now() - Duration::from_secs(10),
+            input_history: Vec::new(),
+            hist_pos: None,
+            hist_draft: String::new(),
             pending_load: None,
             reload_pending: false,
             should_quit: false,
@@ -467,6 +478,7 @@ impl App {
         self.pw_stage = 0;
         self.fwd_src = None;
         self.overlay = None;
+        util::clear_view_dir(); // файлы, открытые через /open, не должны лежать на диске при блокировке
     }
 
     fn should_autolock(&self) -> bool {
@@ -515,6 +527,7 @@ impl App {
         let b = self.byte_idx(self.cursor);
         self.input.insert(b, c);
         self.cursor += 1;
+        self.hist_pos = None;
     }
 
     fn backspace(&mut self) {
@@ -522,6 +535,7 @@ impl App {
             let b = self.byte_idx(self.cursor - 1);
             self.input.remove(b);
             self.cursor -= 1;
+            self.hist_pos = None;
         }
     }
 
@@ -529,6 +543,7 @@ impl App {
         if self.cursor < self.input_len() {
             let b = self.byte_idx(self.cursor);
             self.input.remove(b);
+            self.hist_pos = None;
         }
     }
 
@@ -536,6 +551,51 @@ impl App {
         self.input.clear();
         self.cursor = 0;
         self.edit_target = None;
+        self.hist_pos = None;
+    }
+
+    /// Запоминает отправленный текст для стрелки вверх. Строки с адресом прокси и паролем не сохраняются.
+    fn remember_input(&mut self, text: &str) {
+        if text.is_empty() || (text.starts_with("/proxy") && text.contains('@')) {
+            return;
+        }
+        if self.input_history.last().map(String::as_str) != Some(text) {
+            self.input_history.push(text.to_string());
+            if self.input_history.len() > 100 {
+                self.input_history.remove(0);
+            }
+        }
+        self.hist_pos = None;
+    }
+
+    /// Стрелка вверх (`dir = -1`) и вниз (`dir = 1`) по истории ввода.
+    fn history_step(&mut self, dir: i32) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        let last = self.input_history.len() - 1;
+        let next = match (self.hist_pos, dir) {
+            (None, d) if d < 0 => {
+                self.hist_draft = self.input.clone();
+                Some(last)
+            }
+            (None, _) => return,
+            (Some(i), d) if d < 0 => Some(i.saturating_sub(1)),
+            (Some(i), _) if i < last => Some(i + 1),
+            (Some(_), _) => None,
+        };
+        match next {
+            Some(i) => {
+                self.input = self.input_history[i].clone();
+                self.cursor = self.input_len();
+                self.hist_pos = Some(i);
+            }
+            None => {
+                self.input = std::mem::take(&mut self.hist_draft);
+                self.cursor = self.input_len();
+                self.hist_pos = None;
+            }
+        }
     }
 
     fn toggle_markdown(&mut self) {
@@ -759,6 +819,18 @@ impl App {
                     confirm: None,
                 });
                 self.mode = Mode::Overlay;
+            }
+            Event::Open(path) => {
+                if self.mode == Mode::Locked {
+                    // Блокировка наступила, пока файл скачивался: ничего не открываем и не оставляем на диске.
+                    let _ = std::fs::remove_file(&path);
+                    return;
+                }
+                self.status = if util::open_path(&path) {
+                    trf!("Открыто: {}", "Opened: {}", path.file_name().and_then(|n| n.to_str()).unwrap_or(""))
+                } else {
+                    tr!("Не удалось открыть файл. Сохраните его командой /save", "Could not open the file. Save it with /save").into()
+                };
             }
             Event::Status(s) => self.status = s,
             Event::Error(e) => self.status = trf!("Ошибка: {e}", "Error: {e}"),
@@ -989,6 +1061,13 @@ impl App {
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.input_len()),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.input_len(),
+            // Alt+↑/↓ всегда листают историю; просто ↑/↓ — когда в поле что-то есть (иначе выбирают чат).
+            KeyCode::Up if alt || ((!self.input.is_empty() || self.hist_pos.is_some()) && !self.input_history.is_empty()) => {
+                self.history_step(-1)
+            }
+            KeyCode::Down if alt || ((!self.input.is_empty() || self.hist_pos.is_some()) && !self.input_history.is_empty()) => {
+                self.history_step(1)
+            }
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::PageUp => self.scroll += 8,
@@ -1021,6 +1100,7 @@ impl App {
         if text.is_empty() {
             return;
         }
+        self.remember_input(&text);
         if let Some(rest) = text.strip_prefix("/proxy")
             && (rest.is_empty() || rest.starts_with(' '))
         {
@@ -1108,6 +1188,7 @@ impl App {
             [one] => {
                 self.input = format!("{one} ");
                 self.cursor = self.input_len();
+                self.hist_pos = None;
             }
             many => {
                 let first = many[0];
@@ -1230,6 +1311,8 @@ impl App {
                 'd' | 'в' => Some('d'),
                 's' | 'ы' => Some('s'),
                 'l' | 'д' => Some('l'),
+                'c' | 'с' => Some('c'),
+                'o' | 'щ' => Some('o'),
                 _ => None,
             },
             _ => None,
@@ -1310,6 +1393,22 @@ impl App {
                     }
                 }
             }
+            (_, Some('c')) => {
+                if let Some(m) = self.picked().cloned() {
+                    self.pick_note = self.copy_message(&m);
+                }
+            }
+            (_, Some('o')) => {
+                if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
+                    if m.caption.is_none() {
+                        self.pick_note = tr!("В этом сообщении нет вложения", "This message has no attachment").into();
+                    } else {
+                        let _ = cmd.send(Cmd::Open { chat, id: m.id });
+                        self.status = tr!("Скачиваю для просмотра…", "Downloading to view…").into();
+                        self.mode = Mode::Chat;
+                    }
+                }
+            }
             (_, Some('l')) => {
                 if let Some(m) = self.picked().cloned() {
                     let links = util::extract_links(&m.text);
@@ -1334,6 +1433,20 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Кладёт текст сообщения в буфер обмена и возвращает сообщение для строки состояния.
+    fn copy_message(&mut self, m: &ChatMsg) -> String {
+        let text = m.raw.trim_end();
+        let note = if text.is_empty() {
+            tr!("В этом сообщении нет текста", "This message has no text").to_string()
+        } else if util::clipboard_set(text) {
+            trf!("Скопировано: {} симв.", "Copied: {} chars", text.chars().count())
+        } else {
+            tr!("Не удалось скопировать: буфер обмена недоступен", "Could not copy: clipboard is not available").to_string()
+        };
+        self.status = note.clone();
+        note
     }
 
     fn handle_forward_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>) {
@@ -1520,6 +1633,32 @@ impl App {
                 let _ = cmd.send(Cmd::Save { chat, id: m.id });
                 self.status = tr!("Скачиваю последнее вложение…", "Downloading the latest attachment…").into();
             }
+            "/open" => {
+                self.clear_input();
+                let (Some(chat), Some(m)) = (
+                    self.selected().cloned(),
+                    self.sel.and_then(|id| self.histories.get(&id)).and_then(|h| h.iter().rev().find(|m| m.caption.is_some())).cloned(),
+                ) else {
+                    self.status = tr!("В загруженных сообщениях нет вложений", "No attachments in the loaded messages").into();
+                    return true;
+                };
+                let _ = cmd.send(Cmd::Open { chat, id: m.id });
+                self.status = tr!("Скачиваю последнее вложение для просмотра…", "Downloading the latest attachment to view…").into();
+            }
+            "/copy" => {
+                self.clear_input();
+                let last = self
+                    .sel
+                    .and_then(|id| self.histories.get(&id))
+                    .and_then(|h| h.iter().rev().find(|m| !m.raw.trim().is_empty()))
+                    .cloned();
+                match last {
+                    Some(m) => {
+                        self.copy_message(&m);
+                    }
+                    None => self.status = tr!("Нет сообщения с текстом", "No message with text").into(),
+                }
+            }
             "/send" => {
                 let Some(chat) = self.selected().cloned() else {
                     self.clear_input();
@@ -1627,6 +1766,7 @@ pub async fn run(
     mut events: mpsc::UnboundedReceiver<Event>,
     saver: Arc<Saver>,
 ) -> Result<()> {
+    util::clear_view_dir(); // остатки прошлого сеанса (например, файл был открыт в просмотрщике при выходе)
     // Клавиатура читается в отдельном потоке и пересылается в async-цикл.
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<TermEvent>();
     std::thread::spawn(move || {
@@ -1735,6 +1875,7 @@ pub async fn run(
             break;
         }
     }
+    util::clear_view_dir();
     Ok(())
 }
 

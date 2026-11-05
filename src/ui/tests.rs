@@ -1647,8 +1647,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.0.0"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.0.0");
+    assert!(README.contains("1.0.1"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.0.1");
 }
 
 #[test]
@@ -1675,4 +1675,303 @@ fn workflows_exist_and_release_runs_on_version_tags() {
     assert!(ci.contains("cargo clippy") && ci.contains("cargo test") && ci.contains("cargo fmt --check"));
     assert!(rel.contains("tags:") && rel.contains("\"v*\"") && rel.contains("sha256"));
     assert!(!rel.contains("TGLITE_API"), "релизный exe не должен содержать ключи");
+}
+
+// ---- пачка 1.0.1: история ввода, копирование, /open, прокси с логином
+
+fn alt(app: &mut App, code: KeyCode, tx: &mpsc::UnboundedSender<Cmd>, s: &Arc<Saver>) {
+    slow(app);
+    app.handle_key(key(code, KeyModifiers::ALT), tx, s);
+}
+
+#[test]
+fn input_history_walks_back_and_restores_the_draft() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "один", &tx, &s);
+    submit_text(&mut app, "два", &tx, &s);
+    submit_text(&mut app, "два", &tx, &s); // повтор подряд не плодит записи
+    assert_eq!(app.input_history, vec!["один", "два"]);
+
+    app.clear_input();
+    type_text(&mut app, "чер", &tx, &s);
+    press(&mut app, KeyCode::Up, &tx, &s);
+    assert_eq!(app.input, "два");
+    press(&mut app, KeyCode::Up, &tx, &s);
+    assert_eq!(app.input, "один");
+    press(&mut app, KeyCode::Up, &tx, &s);
+    assert_eq!(app.input, "один", "дальше начала не уходит");
+    press(&mut app, KeyCode::Down, &tx, &s);
+    assert_eq!(app.input, "два");
+    press(&mut app, KeyCode::Down, &tx, &s);
+    assert_eq!(app.input, "чер", "после конца истории возвращается недописанный текст");
+    assert_eq!(app.cursor, 3);
+    press(&mut app, KeyCode::Down, &tx, &s);
+    assert_eq!(app.input, "чер", "вниз без истории ничего не ломает");
+}
+
+#[test]
+fn plain_arrows_still_pick_chats_when_the_input_is_empty() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "привет", &tx, &s);
+    app.clear_input();
+    let before = app.sel;
+    press(&mut app, KeyCode::Down, &tx, &s);
+    assert_ne!(app.sel, before, "стрелка вниз при пустом поле выбирает следующий чат");
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn alt_arrows_recall_history_from_an_empty_input() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "первое", &tx, &s);
+    submit_text(&mut app, "второе", &tx, &s);
+    app.clear_input();
+    let chat_before = app.sel;
+    alt(&mut app, KeyCode::Up, &tx, &s);
+    assert_eq!(app.input, "второе");
+    assert_eq!(app.sel, chat_before, "чат не переключился");
+    alt(&mut app, KeyCode::Up, &tx, &s);
+    assert_eq!(app.input, "первое");
+    alt(&mut app, KeyCode::Down, &tx, &s);
+    alt(&mut app, KeyCode::Down, &tx, &s);
+    assert_eq!(app.input, "", "пустой черновик возвращается");
+}
+
+#[test]
+fn typing_after_recall_leaves_history_mode() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "abc", &tx, &s);
+    app.clear_input();
+    alt(&mut app, KeyCode::Up, &tx, &s);
+    assert_eq!(app.input, "abc");
+    type_text(&mut app, "d", &tx, &s);
+    assert_eq!(app.hist_pos, None);
+    assert_eq!(app.input, "abcd");
+}
+
+#[test]
+fn history_is_capped_and_skips_proxy_passwords() {
+    let mut app = app_with_chats();
+    for i in 0..130 {
+        app.remember_input(&format!("m{i}"));
+    }
+    assert_eq!(app.input_history.len(), 100);
+    assert_eq!(app.input_history.first().map(String::as_str), Some("m30"));
+    app.remember_input("/proxy user:secret@127.0.0.1:3128");
+    assert!(!app.input_history.iter().any(|h| h.contains("secret")));
+    app.remember_input("/proxy 127.0.0.1:1080");
+    assert_eq!(app.input_history.last().map(String::as_str), Some("/proxy 127.0.0.1:1080"));
+    app.remember_input("");
+    assert_eq!(app.input_history.last().map(String::as_str), Some("/proxy 127.0.0.1:1080"));
+}
+
+#[test]
+fn proxy_with_login_is_stored_but_never_shown() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "/proxy bob:secret@127.0.0.1:3128", &tx, &s);
+    assert_eq!(app.settings.proxy_manual, "bob:secret@127.0.0.1:3128", "в настройках адрес с логином целиком");
+    assert!(!app.status.contains("secret") && !app.status.contains("bob"), "на экране пароля нет: {}", app.status);
+    assert!(app.status.contains("***@127.0.0.1:3128"));
+    assert!(!app.input_history.iter().any(|h| h.contains("secret")));
+    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
+    app.mode = Mode::Settings;
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(!text.contains("secret"), "в настройках пароля нет");
+}
+
+#[test]
+fn pick_c_copies_message_text_in_both_layouts() {
+    crate::i18n::set(0);
+    for letter in ['c', 'с', 'C'] {
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let s = saver();
+        app.histories.get_mut(&app.sel.unwrap()).unwrap()[1].raw = "Всё хорошо!".into();
+        press(&mut app, KeyCode::F(7), &tx, &s);
+        press(&mut app, KeyCode::Char(letter), &tx, &s);
+        // Программы буфера обмена в тестовой среде может не быть: важно, что действие отработало и сказало результат.
+        assert!(
+            app.pick_note.starts_with("Скопировано") || app.pick_note.starts_with("Не удалось скопировать"),
+            "{letter}: {}",
+            app.pick_note
+        );
+        assert_eq!(app.mode, Mode::Pick, "режим выбора остаётся");
+    }
+}
+
+#[test]
+fn copy_without_text_says_so() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    app.histories.get_mut(&id).unwrap()[1].raw = "Всё хорошо!".into();
+    app.histories.get_mut(&id).unwrap().push(msg_with_attachment(3, "[фото]", ""));
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    assert_eq!(app.pick, 2);
+    press(&mut app, KeyCode::Char('c'), &tx, &s);
+    assert_eq!(app.pick_note, "В этом сообщении нет текста");
+    app.mode = Mode::Chat;
+    submit_text(&mut app, "/copy", &tx, &s);
+    assert!(app.status.starts_with("Скопировано") || app.status.starts_with("Не удалось скопировать"), "{}", app.status);
+}
+
+#[test]
+fn copy_command_needs_a_message_with_text() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    for m in app.histories.get_mut(&app.sel.unwrap()).unwrap() {
+        m.raw.clear();
+    }
+    submit_text(&mut app, "/copy", &tx, &s);
+    assert_eq!(app.status, "Нет сообщения с текстом");
+}
+
+#[test]
+fn open_command_and_pick_o_request_a_temporary_download() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    app.histories.get_mut(&id).unwrap().push(msg_with_attachment(7, "[файл a.pdf, 1 МБ]", "подпись"));
+    submit_text(&mut app, "/open", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::Open { id: 7, .. })));
+
+    for letter in ['o', 'щ'] {
+        app.mode = Mode::Chat;
+        press(&mut app, KeyCode::F(7), &tx, &s);
+        press(&mut app, KeyCode::Char(letter), &tx, &s);
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Open { id: 7, .. })), "{letter}");
+        assert_eq!(app.mode, Mode::Chat);
+    }
+}
+
+#[test]
+fn open_without_attachment_does_nothing() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "/open", &tx, &s);
+    assert_eq!(app.status, "В загруженных сообщениях нет вложений");
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('o'), &tx, &s);
+    assert_eq!(app.pick_note, "В этом сообщении нет вложения");
+    assert!(rx.try_recv().is_err(), "ничего не скачивается");
+}
+
+#[test]
+fn opened_file_event_refuses_unsafe_types() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.handle_event(Event::Open(std::path::PathBuf::from("/tmp/virus.exe")), &tx);
+    assert!(app.status.starts_with("Не удалось открыть"), "{}", app.status);
+    app.handle_event(Event::Open(std::path::PathBuf::from("/tmp/definitely-missing.png")), &tx);
+    assert!(app.status.starts_with("Не удалось открыть"), "несуществующий файл: {}", app.status);
+}
+
+#[test]
+fn new_commands_are_listed_for_tab_completion_and_help() {
+    assert!(COMMANDS.contains(&"/open") && COMMANDS.contains(&"/copy"));
+    crate::i18n::set(1);
+    let mut app = demo_app();
+    app.mode = Mode::Help;
+    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    for needle in ["/open", "/copy", "Alt+"] {
+        assert!(text.contains(needle), "в справке нет {needle}");
+    }
+    app.mode = Mode::Pick;
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("C copy") && text.contains("O open"), "подсказка режима выбора: {text}");
+    crate::i18n::set(0);
+}
+
+#[test]
+fn help_fits_a_30_row_console() {
+    // Стандартное окно cmd: 30 строк. Справка не должна быть выше.
+    for lang in [0, 1] {
+        crate::i18n::set(lang);
+        let mut app = demo_app();
+        app.mode = Mode::Help;
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let text = dump(&term);
+        assert!(text.contains("Tg-Lite"), "нижняя строка справки видна ({lang})");
+    }
+    crate::i18n::set(0);
+}
+
+#[test]
+fn opened_file_is_deleted_if_the_app_was_locked_meanwhile() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let path = std::env::temp_dir().join(format!("tglite-late-open-{}.png", std::process::id()));
+    std::fs::write(&path, b"x").unwrap();
+    app.mode = Mode::Locked;
+    app.handle_event(Event::Open(path.clone()), &tx);
+    assert!(!path.exists(), "файл стёрт, а не открыт");
+    assert_eq!(app.mode, Mode::Locked);
+}
+
+#[test]
+fn arrows_with_text_but_no_history_still_move_the_chat_selection() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    type_text(&mut app, "abc", &tx, &s);
+    let before = app.sel;
+    press(&mut app, KeyCode::Down, &tx, &s);
+    assert_ne!(app.sel, before, "истории нет, поэтому стрелка работает как раньше");
+    assert_eq!(app.drafts.get(&before.unwrap()).map(|d| d.0.as_str()), Some("abc"), "набранное осталось черновиком прежнего чата");
+}
+
+/// Бюджет памяти: модель данных для 100 чатов по 60 сообщений (настройка по умолчанию) должна занимать мало.
+/// Считается куча, выделенная под чаты и переписки; сам процесс на Windows занимает больше (код, стек, консоль).
+#[test]
+fn memory_budget_for_100_chats_with_history() {
+    let before = crate::alloc_count::live();
+    let mut app = App::new(Settings::default());
+    let mut chats = Vec::new();
+    for i in 0..100 {
+        let c = chat(1000 + i, &format!("Чат номер {i} с достаточно длинным названием"), Kind::Group, (i % 7) as i32);
+        let hist: Vec<ChatMsg> = (0..60)
+            .map(|n| {
+                msg(
+                    n,
+                    n % 3 == 0,
+                    "Участник чата",
+                    "Обычное сообщение средней длины, примерно как в живой переписке: привет, как дела, что нового?",
+                )
+            })
+            .collect();
+        app.histories.insert(c.id, hist);
+        chats.push(c);
+    }
+    app.chats = chats;
+    app.ensure_selection();
+    let used = crate::alloc_count::live() - before;
+    eprintln!("100 чатов x 60 сообщений: {:.2} МБ", used as f64 / 1048576.0);
+    assert!(used > 0, "счётчик работает");
+    assert!(used < 4 * 1024 * 1024, "бюджет 4 МБ превышен: {:.2} МБ. Что-то стало хранить слишком много", used as f64 / 1048576.0);
+    drop(app);
 }
