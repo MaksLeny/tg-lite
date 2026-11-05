@@ -41,6 +41,8 @@ pub struct Settings {
     pub bubble_width: u8,
     /// Язык интерфейса: 0 русский, 1 английский.
     pub lang: u8,
+    /// Мышь: клик по чату и вкладке, колесо для прокрутки.
+    pub mouse: bool,
 }
 
 impl Default for Settings {
@@ -59,6 +61,7 @@ impl Default for Settings {
             list_width: 1,
             bubble_width: 1,
             lang: 0,
+            mouse: true,
         }
     }
 }

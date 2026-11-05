@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use grammers_client::session::types::PeerId;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -222,13 +222,17 @@ enum Tab {
     Folder(i32),
 }
 
-const SETTINGS_ROWS: usize = 12;
+const SETTINGS_ROWS: usize = 13;
 
 pub struct App {
     chats: Vec<ChatInfo>,
     /// Выбранный чат хранится по id, а не по номеру: так выбор не «съезжает» при обновлении списка.
     sel: Option<PeerId>,
     list_state: ListState,
+    /// Области для мыши, заполняются при отрисовке: вкладки (x от, x до, вкладка), список чатов, лента сообщений.
+    hit_tabs: Vec<(u16, u16, Tab)>,
+    hit_list: Rect,
+    hit_msgs: Rect,
     tab: Tab,
     folders: Vec<Folder>,
     histories: HashMap<PeerId, Vec<ChatMsg>>,
@@ -306,6 +310,9 @@ impl App {
             chats: Vec::new(),
             sel: None,
             list_state: ListState::default(),
+            hit_tabs: Vec::new(),
+            hit_list: Rect::default(),
+            hit_msgs: Rect::default(),
             tab: Tab::All,
             folders: Vec::new(),
             histories: HashMap::new(),
@@ -1058,6 +1065,7 @@ impl App {
                 crate::i18n::save();
                 self.status = tr!("Язык: русский", "Language: English").into();
             }
+            11 => s.mouse = !s.mouse,
             _ => {
                 if activate {
                     self.mode = Mode::NewPassword;
@@ -1120,6 +1128,58 @@ impl App {
     }
 
     // --- клавиши
+
+    /// Мышь: клик по вкладке или чату, колесо прокручивает ленту под указателем или список чатов.
+    /// Работает только в обычном режиме и если включено в настройках.
+    fn handle_mouse(&mut self, ev: MouseEvent, cmd: &mpsc::UnboundedSender<Cmd>) -> bool {
+        if !self.settings.mouse || self.mode != Mode::Chat {
+            return false;
+        }
+        let (x, y) = (ev.column, ev.row);
+        let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.last_activity = Instant::now();
+                if y == 0 {
+                    if let Some((_, _, t)) = self.hit_tabs.iter().find(|(a, b, _)| x >= *a && x < *b) {
+                        self.tab = t.clone();
+                        self.ensure_selection();
+                    }
+                } else if inside(self.hit_list) && y > self.hit_list.y && y + 1 < self.hit_list.y + self.hit_list.height {
+                    let row = (y - self.hit_list.y - 1) as usize + self.list_state.offset();
+                    if let Some(&id) = self.visible_ids().get(row)
+                        && self.sel != Some(id)
+                    {
+                        self.set_sel(Some(id));
+                        self.scroll = 0;
+                        self.pending_load = Some(Instant::now());
+                    }
+                }
+                true
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.last_activity = Instant::now();
+                let up = ev.kind == MouseEventKind::ScrollUp;
+                if inside(self.hit_msgs) {
+                    if up {
+                        if self.scroll >= self.max_scroll {
+                            self.request_older(cmd);
+                        }
+                        self.scroll += 3;
+                    } else {
+                        if self.scroll == 0 && self.jumped.is_some() && self.jumped == self.sel {
+                            self.go_latest(cmd);
+                        }
+                        self.scroll = self.scroll.saturating_sub(3);
+                    }
+                } else if inside(self.hit_list) {
+                    self.move_selection(if up { -1 } else { 1 });
+                }
+                true
+            }
+            _ => false,
+        }
+    }
 
     fn handle_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>, saver: &Arc<Saver>) {
         if key.kind != KeyEventKind::Press {
@@ -2048,6 +2108,7 @@ pub async fn run(
     // это не поддерживается, там работает чтение буфера по Ctrl+V).
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
     let mut app = App::new(saver.settings());
+    let mut mouse_on = false;
     let _ = cmd.send(Cmd::LoadAllDialogs);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut last_save = Instant::now();
@@ -2058,6 +2119,14 @@ pub async fn run(
     let mut flood_shown = false;
 
     loop {
+        if app.settings.mouse != mouse_on {
+            mouse_on = app.settings.mouse;
+            let _ = if mouse_on {
+                crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+            } else {
+                crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)
+            };
+        }
         if dirty {
             terminal.draw(|f| draw(f, &mut app))?;
             dirty = false;
@@ -2078,6 +2147,11 @@ pub async fn run(
                         let _ = terminal.clear();
                     }
                     dirty = true;
+                }
+                TermEvent::Mouse(m) => {
+                    if app.handle_mouse(m, &cmd) {
+                        dirty = true;
+                    }
                 }
                 TermEvent::Paste(text) => {
                     app.last_activity = Instant::now();
@@ -2141,6 +2215,9 @@ pub async fn run(
         if app.should_quit {
             break;
         }
+    }
+    if mouse_on {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     }
     util::clear_view_dir();
     Ok(())

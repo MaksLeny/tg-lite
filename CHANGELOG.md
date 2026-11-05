@@ -1,5 +1,9 @@
 # Changelog / История версий
 
+## 1.1.0
+- EN: mouse support (click a tab or a chat, the wheel scrolls the conversation or moves the selection over the chat list; new setting "Mouse", on by default); short demo GIFs in the README; README measurements now include memory after long heavy use (12.3 MB on 1.0.2).
+- RU: поддержка мыши (клик по вкладке или чату, колесо прокручивает переписку или двигает выбор над списком чатов; новая настройка «Мышь», по умолчанию включена); короткие GIF-демо в README; в замерах README теперь есть память после долгой активной работы (12,3 МБ на 1.0.2).
+
 ## 1.0.2
 - EN: all chats are loaded (up to 3000) instead of the first 120, the first page appears at once; older history on PgUp at the top of a chat (up to 1500 messages per chat); `/findmsg text` searches the current chat, `/findall text` searches all chats, Enter on a result opens it in its context (`/latest`, PgDn or Esc returns to the newest messages).
 - RU: загружаются все чаты (до 3000) вместо первых 120, первая страница появляется сразу; старая история по PgUp в верху чата (до 1500 сообщений на чат); `/findmsg текст` ищет в текущем чате, `/findall текст` во всех чатах, Enter на результате открывает его в контексте (`/latest`, PgDn или Esc возвращают к последним сообщениям).

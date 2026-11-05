@@ -8,10 +8,10 @@
 <a href="https://github.com/MaksLeny/tg-lite/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/MaksLeny/tg-lite/total?style=flat-square&color=2AABEE"></a>
 <a href="https://github.com/MaksLeny/tg-lite/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/MaksLeny/tg-lite/ci.yml?style=flat-square&label=CI"></a>
 <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-555?style=flat-square">
-<img alt="memory" src="https://img.shields.io/badge/RAM-~3%20MB-brightgreen?style=flat-square">
+<img alt="memory" src="https://img.shields.io/badge/RAM-3%E2%80%9312%20MB-brightgreen?style=flat-square">
 <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
 
-**A tiny Telegram client for the terminal. One ~3.8 MB exe, about 3 MB of RAM.**
+**A tiny Telegram client for the terminal. One ~3.8 MB exe, about 3 MB of RAM at start, up to about 12 MB after long heavy use.**
 
 [Download](https://github.com/MaksLeny/tg-lite/releases/latest) • [Quick start](#quick-start) • [Security](SECURITY.md) • [Changelog](CHANGELOG.md) • [Report a bug](https://github.com/MaksLeny/tg-lite/issues/new/choose)
 
@@ -19,11 +19,13 @@ English · [Русский](#tg-lite-на-русском)
 
 ![Chat screen](docs/chat-en.png)
 
+![Short demo](docs/demo-en.gif)
+
 </div>
 
 Tg-Lite is an unofficial Telegram client written in Rust for old and weak computers (it was built on a Pentium T4400
 with 2 GB of RAM and a hard disk, where Telegram Desktop crawls). There is no Qt and no Electron: the interface is drawn
-right in the console, and memory only holds what is on screen.
+right in the console, and memory only holds the latest messages of the chats you have opened.
 
 > Unofficial client. It speaks the open Telegram protocol (MTProto) through the
 > [grammers](https://github.com/Lonami/grammers) library. You need your own `api_id` and `api_hash` from <https://my.telegram.org>.
@@ -36,17 +38,18 @@ right in the console, and memory only holds what is on screen.
 
 Measured on a Lenovo B550 (Pentium T4400, 2 GB DDR2, HDD, Windows 10 LTSC):
 
-| | Tg-Lite (measured on 0.0.8) | Telegram Desktop |
+| | Tg-Lite (measured) | Telegram Desktop |
 |---|---|---|
 | RAM, chat screen right after start | **2.8 MB** | 800 MB and more¹ |
 | RAM after 10–15 minutes of use | **2.8 MB** | up to 2–2.5 GB after long use¹ |
+| RAM after 10–15 minutes of browsing many chats and opening files (measured on 1.0.2) | **12.3 MB**, then stays flat | up to 2–2.5 GB after long use¹ |
 | RAM on the lock screen with the animated background | **2.9 MB** | – |
 | CPU | ~0 % on the chat screen, 1.4–2 % while the animated lock screen is shown | depends on version and number of chats |
 | Start to chat list | about 1 second | – |
-| Size | one exe, **3.84 MB** (3934 KB) | tens of MB installed plus cache |
+| Size | one exe, about **3.8–3.9 MB** (3934 KB on 0.0.8; the exact size is on the release page) | tens of MB installed plus cache |
 | Installation | none, put the exe in any folder | installer |
 
-How it was measured: Tg-Lite 0.0.8 on Windows 10 LTSC, one account with the usual set of chats, Task Manager → Details, column "Memory (private working set)", reading taken after start and after 10–15 minutes of use. The figures were not re-measured on 1.0.0 (no big changes in how chats are held in memory are expected, but check on your own PC). It is not a fully like-for-like comparison: Tg-Lite is text-only and does less than Telegram Desktop. Other columns also count shared system libraries and show more. To measure on your own PC: start `tg-lite.exe`, open a chat and run `powershell -ExecutionPolicy Bypass -File tools\measure.ps1 -Minutes 10` (it prints a ready table row). A test in the repository also checks that 100 chats with 60 messages each stay under 4 MB of heap (about 2.2 MB now).
+How it was measured: Windows 10 LTSC, one account with the usual set of chats, Task Manager → Details, column "Memory (private working set)". The first rows are from 0.0.8 (start and 10–15 minutes of ordinary use); the 12.3 MB row is from 1.0.2 after 10–15 minutes of opening many different chats and files, and the figure did not grow further. Memory grows with the number of chats you have opened, because their latest messages are kept in memory (up to 1500 per chat). It is not a fully like-for-like comparison: Tg-Lite is text-only and does less than Telegram Desktop. Other columns also count shared system libraries and show more. To measure on your own PC: start `tg-lite.exe`, open a chat and run `powershell -ExecutionPolicy Bypass -File tools\measure.ps1 -Minutes 10` (it prints a ready table row). A test in the repository also checks that 100 chats with 60 messages each stay under 4 MB of heap (about 2.2 MB now).
 
 ¹ Telegram Desktop figures are user reports, not lab measurements: [tdesktop #30151](https://github.com/telegramdesktop/tdesktop/issues/30151)
 ("starts use RAM up to 2.0-2.5gb", "less than 800mb" after a restart). The real value depends a lot on how many chats
@@ -64,8 +67,8 @@ which is the main reason it is so small.
 - A pinned message is shown above the conversation.
 
 **Messages**
-- `F7` picks a message: reply with a quote (R), forward (F), edit (E), delete (D), save the attachment (S), links (L).
-- `/edit`, `/del`, `/note` (quick note to Saved Messages), `/later 30 text` (schedule in 30 minutes), `/scheduled` (list and cancel).
+- `F7` picks a message: reply with a quote (R), forward (F), edit (E), delete (D), copy the text (C), save the attachment (S), open it (O), links (L).
+- `/edit` and `/del` act on your last message in the open chat (`/del` asks you to repeat it to confirm), `/note` (quick note to Saved Messages), `/later 30 text` (schedule in 30 minutes), `/scheduled` (list and cancel).
 - Markdown (`F3` or `/md`): `**bold**`, `_italic_`, `` `code` ``, `[link](https://…)`.
 - Reply quotes, forwarded-from notes and "(edited)" marks. Photos, voice and files appear as labels such as `[photo]`, `[file report.pdf, 2 MB]`.
 
@@ -77,14 +80,15 @@ which is the main reason it is so small.
 - `/links` lists links of the chat, Enter opens one in the browser.
 
 **Managing chats**
-- `/findmsg text` searches messages in the open chat, `/findall text` in all chats; `Enter` on a result opens it in its surroundings (`PgDn` or `Esc` goes back to the latest messages, also `/latest`). `PgUp` at the top of a conversation loads older messages (up to 1500 per chat; use search beyond that).
+- `/findmsg text` searches messages in the open chat, `/findall text` in all chats (up to 40 results); `Enter` on a result opens it in its surroundings (`PgDn` or `Esc` goes back to the latest messages, also `/latest`). `PgUp` at the top of a conversation loads older messages (up to 1500 per chat; use search beyond that).
 - `/find text` (`F6`, `Ctrl+F`) filters chats by name, `/pin` pins a chat, `/readall` marks everything read, `/export` saves a conversation to `export/<chat>.txt`.
 
 **Comfort**
 - Paste works: `Ctrl+V`, `Shift+Insert`, the terminal's own paste, or `/paste`.
 - English and Russian interface (setting "Interface language", chosen at first start).
 - Animated sign-in screen (always Aurora) and lock screen (Aurora, Matrix, Stars or none, your choice in settings).
-- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, password.
+- Mouse: click a tab or a chat, the wheel scrolls the conversation (over the chat list it moves the selection). Can be turned off in the settings. While the mouse is on, selecting text by dragging and right-click paste may not work in the console (in Windows Terminal hold `Shift` to select); use `/copy` and `Ctrl+V`, or turn the mouse off.
+- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, mouse, password.
 - `/faq` shows troubleshooting tips inside the program. `tglite.log` records errors and `tg-lite --debug` makes it detailed (never message text).
 - Emoji, invisible characters and scripts other than Latin, Greek and Cyrillic are hidden: the Windows console cannot draw them and the screen would fall apart.
 
@@ -131,10 +135,11 @@ Every action has both a key and a command, in case a key does not work in your c
 | Enter | | send |
 | Shift+Enter | | new line (pasted multi-line text is kept together) |
 | Ctrl+V / Shift+Insert | `/paste` | paste from the clipboard |
-| ↑ / ↓, Tab / Shift+Tab | | choose a chat, switch tabs |
+| ↑ / ↓, Tab / Shift+Tab | | choose a chat, switch tabs (after a leading `/`, Tab completes the command) |
 | Alt+↑ / Alt+↓ | | earlier messages and commands (↑ ↓ do this too when the input has text) |
 | PgUp / PgDn | | scroll the conversation; PgUp at the top loads older messages |
-| Esc | | clear the input; then cancel edit or reply; then reset search |
+| Mouse | | click a tab or a chat, wheel scrolls (see settings) |
+| Esc | | clear the input; then cancel edit or reply; then return to the latest messages after a search jump; then reset the chat filter |
 | F1 | `/help` | help |
 | F2 | `/lock` | lock |
 | F3 | `/md` | Markdown on/off |
@@ -145,7 +150,7 @@ Every action has both a key and a command, in case a key does not work in your c
 | F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links |
 | F10 | `/quit` | quit |
 | | `/pin` `/readall` `/export` | pin chat, read everything, export |
-| | `/edit` `/del` `/note` `/later` `/scheduled` | edit, delete, note, schedule, scheduled list |
+| | `/edit` `/del` `/note` `/later` `/scheduled` | edit or delete your last message, note, schedule, scheduled list |
 | | `/send` `/save` `/open` `/copy` `/links` | upload file, download attachment, open attachment, copy message, links |
 | | `/passwd` `/proxy` `/faq` | change password, proxy, troubleshooting |
 
@@ -161,7 +166,7 @@ Every action has both a key and a command, in case a key does not work in your c
 
 **Security model in short**
 
-- *What is stored locally?* Only `tglite.vault` (keys and Telegram session, encrypted) and `tglite.lang` (language). Messages are not stored.
+- *What is stored locally?* `tglite.vault` (keys and Telegram session, encrypted) and `tglite.lang` (language) always. Besides those only what you ask for or what the program lists: `tglite.log` (log, passwords hidden), `downloads/`, `export/` and the temporary `tglite-view/`. Messages are not stored.
 - *What if I delete `tglite.vault`?* The program forgets the keys and the session; sign in again. End the old session in Telegram → Settings → Devices.
 - *Is a third-party exe safe?* Not by default: the exe is unsigned. Download it only from this repository's Releases, compare SHA256 (shown in the CI job summary), or build it yourself.
 - *Was the code audited?* It was reviewed and tested by the author and by automated checks (clippy, `cargo audit`). This is not an independent professional security audit.
@@ -194,7 +199,7 @@ The same list is available in the program as `/faq`.
 
 | Problem | What to do |
 |---|---|
-| Text will not paste | `Ctrl+V`, `Shift+Insert` or `/paste`; in the old Windows console right-click also works |
+| Text will not paste | `Ctrl+V`, `Shift+Insert` or `/paste`; in the old Windows console right-click also works, but only with the mouse turned off in the settings |
 | Boxes instead of letters | Use the Consolas font or Windows Terminal; the program hides emoji itself |
 | No connection | Telegram may be blocked: use a VPN or `/proxy 127.0.0.1:port`, then restart |
 | Antivirus complains | The exe is unsigned and built from open source; build it yourself or compare SHA256 with the release |
@@ -215,9 +220,11 @@ The same list is available in the program as `/faq`.
 
 ## Roadmap
 
-**1.0.1:** `/open` and `/copy`, input history on Alt+↑ / Alt+↓, HTTP proxies with a login.
+**1.1.0 (this version):** mouse (click a tab or a chat, wheel scrolling; can be turned off in the settings), a short demo GIF, measured memory use after long heavy use.
 
-**1.0.2 (this version):** all chats instead of the first 120, older history on PgUp, message search (`/findmsg`, `/findall`) with the result opened in its context.
+**1.0.2:** all chats instead of the first 120, older history on PgUp, message search (`/findmsg`, `/findall`) with the result opened in its context.
+
+**1.0.1:** `/open` and `/copy`, input history on Alt+↑ / Alt+↓, HTTP proxies with a login.
 
 **1.0.0** is the first complete release: clipboard paste, English and Russian interface, first-run wizard, built-in FAQ,
 CI with checksummed releases, and a full code audit whose findings are covered by regression tests. Not planned: a graphical app with
@@ -241,10 +248,10 @@ photos, video and voice, tray mode, a reusable core crate.
 <a href="https://github.com/MaksLeny/tg-lite/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/MaksLeny/tg-lite/total?style=flat-square&color=2AABEE"></a>
 <a href="https://github.com/MaksLeny/tg-lite/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/MaksLeny/tg-lite/ci.yml?style=flat-square&label=CI"></a>
 <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-555?style=flat-square">
-<img alt="memory" src="https://img.shields.io/badge/RAM-~3%20MB-brightgreen?style=flat-square">
+<img alt="memory" src="https://img.shields.io/badge/RAM-3%E2%80%9312%20MB-brightgreen?style=flat-square">
 <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
 
-**Крошечный клиент Telegram для терминала. Один exe около 3,8 МБ, около 3 МБ памяти.**
+**Крошечный клиент Telegram для терминала. Один exe около 3,8 МБ, около 3 МБ памяти при запуске и до 12 МБ после долгой активной работы.**
 
 [Скачать](https://github.com/MaksLeny/tg-lite/releases/latest) • [Быстрый старт](#быстрый-старт) • [Безопасность](SECURITY.md) • [История версий](CHANGELOG.md) • [Сообщить об ошибке](https://github.com/MaksLeny/tg-lite/issues/new/choose)
 
@@ -252,11 +259,13 @@ photos, video and voice, tray mode, a reusable core crate.
 
 ![Экран чатов](docs/chat-ru.png)
 
+![Короткое демо](docs/demo-ru.gif)
+
 </div>
 
 Tg-Lite — неофициальный клиент Telegram на Rust для старых и слабых компьютеров (он сделан на Pentium T4400 с 2 ГБ ОЗУ и
 жёстким диском, где Telegram Desktop еле ворочается). Никакого Qt и Electron: интерфейс рисуется прямо в консоли, а в памяти
-лежит только то, что нужно на экране.
+лежат только последние сообщения открытых вами чатов.
 
 > Неофициальный клиент. Использует открытый протокол Telegram (MTProto) через библиотеку
 > [grammers](https://github.com/Lonami/grammers). Нужны ваши собственные `api_id` и `api_hash` с <https://my.telegram.org>.
@@ -270,17 +279,18 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 
 Замеры на Lenovo B550 (Pentium T4400, 2 ГБ DDR2, жёсткий диск, Windows 10 LTSC):
 
-| | Tg-Lite (замер на 0.0.8) | Telegram Desktop |
+| | Tg-Lite (замер) | Telegram Desktop |
 |---|---|---|
 | ОЗУ на экране чатов сразу после запуска | **2,8 МБ** | 800 МБ и больше¹ |
 | ОЗУ через 10–15 минут работы | **2,8 МБ** | до 2–2,5 ГБ после долгой работы¹ |
+| ОЗУ через 10–15 минут просмотра многих чатов и открытия файлов (замер на 1.0.2) | **12,3 МБ**, дальше не растёт | до 2–2,5 ГБ после долгой работы¹ |
 | ОЗУ на экране блокировки с анимированным фоном | **2,9 МБ** | – |
 | Процессор | ~0 % на экране чатов, 1,4–2 % пока показан анимированный экран блокировки | зависит от версии и числа чатов |
 | От запуска до списка чатов | около секунды | – |
-| Размер | один exe, **3,84 МБ** (3934 КБ) | десятки МБ установки плюс кэш |
+| Размер | один exe, около **3,8–3,9 МБ** (3934 КБ на 0.0.8; точный размер указан на странице релиза) | десятки МБ установки плюс кэш |
 | Установка | не нужна, exe кладётся в любую папку | установщик |
 
-Как мерили: Tg-Lite 0.0.8, Windows 10 LTSC, один аккаунт с обычным набором чатов, Диспетчер задач → «Подробности», столбец «Память (закрытый рабочий набор)», значения сразу после запуска и через 10–15 минут работы. На 1.0.0 замеры не повторялись (сильных изменений в хранении чатов в памяти не ожидается, но проверьте на своём ПК). Сравнение не полностью равноценное: Tg-Lite показывает только текст и умеет меньше, чем Telegram Desktop. Другие столбцы учитывают и общие системные библиотеки, поэтому показывают больше. Замерить у себя: запустите `tg-lite.exe`, откройте чат и выполните `powershell -ExecutionPolicy Bypass -File tools\measure.ps1 -Minutes 10` (скрипт выведет готовую строку для таблицы). Тест в репозитории следит, чтобы 100 чатов по 60 сообщений занимали меньше 4 МБ кучи (сейчас около 2,2 МБ).
+Как мерили: Windows 10 LTSC, один аккаунт с обычным набором чатов, Диспетчер задач → «Подробности», столбец «Память (закрытый рабочий набор)». Первые строки — на 0.0.8 (запуск и 10–15 минут обычной работы); строка 12,3 МБ — на 1.0.2 после 10–15 минут открытия множества разных чатов и файлов, дальше значение не росло. Память растёт вместе с числом открытых чатов, потому что их последние сообщения хранятся в памяти (до 1500 на чат). Сравнение не полностью равноценное: Tg-Lite показывает только текст и умеет меньше, чем Telegram Desktop. Другие столбцы учитывают и общие системные библиотеки, поэтому показывают больше. Замерить у себя: запустите `tg-lite.exe`, откройте чат и выполните `powershell -ExecutionPolicy Bypass -File tools\measure.ps1 -Minutes 10` (скрипт выведет готовую строку для таблицы). Тест в репозитории следит, чтобы 100 чатов по 60 сообщений занимали меньше 4 МБ кучи (сейчас около 2,2 МБ).
 
 ¹ Данные по Telegram Desktop — отзывы пользователей, а не лабораторные замеры: [tdesktop #30151](https://github.com/telegramdesktop/tdesktop/issues/30151)
 («starts use RAM up to 2.0-2.5gb», после перезапуска «less than 800mb»). Реальный расход сильно зависит от числа чатов и
@@ -297,8 +307,8 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Закреплённое сообщение показывается над перепиской.
 
 **Сообщения**
-- `F7` — выбрать сообщение: ответить с цитатой (R), переслать (F), править (E), удалить (D), скачать вложение (S), ссылки (L).
-- `/edit`, `/del`, `/note` (быстрая заметка в «Избранное»), `/later 30 текст` (отложить на 30 минут), `/scheduled` (список и отмена).
+- `F7` — выбрать сообщение: ответить с цитатой (R), переслать (F), править (E), удалить (D), копировать текст (C), скачать вложение (S), открыть его (O), ссылки (L).
+- `/edit` и `/del` работают с вашим последним сообщением в открытом чате (`/del` просит повторить для подтверждения), `/note` (быстрая заметка в «Избранное»), `/later 30 текст` (отложить на 30 минут), `/scheduled` (список и отмена).
 - Markdown (`F3` или `/md`): `**жирный**`, `_курсив_`, `` `код` ``, `[ссылка](https://…)`.
 - Цитаты ответов, пометки «переслано» и «(изм.)». Фото, голосовые и файлы показываются подписями: `[фото]`, `[файл отчёт.pdf, 2 МБ]`.
 
@@ -310,14 +320,15 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - `/links` — ссылки чата, Enter открывает ссылку в браузере.
 
 **Управление чатами**
-- `/findmsg текст` — поиск сообщений в открытом чате, `/findall текст` — во всех чатах; `Enter` на результате открывает его среди соседних сообщений (`PgDn` или `Esc` возвращает к последним, также `/latest`). `PgUp` у верха переписки подгружает старые сообщения (до 1500 на чат; дальше помогает поиск).
+- `/findmsg текст` — поиск сообщений в открытом чате, `/findall текст` — во всех чатах (до 40 результатов); `Enter` на результате открывает его среди соседних сообщений (`PgDn` или `Esc` возвращает к последним, также `/latest`). `PgUp` у верха переписки подгружает старые сообщения (до 1500 на чат; дальше помогает поиск).
 - `/find текст` (`F6`, `Ctrl+F`) — поиск по названиям, `/pin` — закрепить, `/readall` — всё прочитано, `/export` — сохранить переписку в `export/<чат>.txt`.
 
 **Удобство**
 - Вставка работает: `Ctrl+V`, `Shift+Insert`, вставка самого терминала или команда `/paste`.
 - Интерфейс на русском и английском (настройка «Язык интерфейса», выбирается при первом запуске).
 - Анимированный экран входа (всегда «Аврора») и экран блокировки («Аврора», «Матрица», «Звёзды» или без анимации, выбирается в настройках).
-- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, пароль.
+- Мышь: клик по вкладке или чату, колесо прокручивает переписку (над списком чатов двигает выбор). Выключается в настройках. Пока мышь включена, выделение текста протягиванием и вставка правой кнопкой в консоли могут не работать (в Windows Terminal выделять можно с зажатым `Shift`); используйте `/copy` и `Ctrl+V` или выключите мышь.
+- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, мышь, пароль.
 - `/faq` — подсказки «Если не работает» прямо в программе. В `tglite.log` пишутся ошибки, а `tg-lite --debug` делает журнал подробным (тексты переписки не пишутся никогда).
 - Эмодзи, невидимые символы и письменности кроме латиницы, греческого и кириллицы скрываются: консоль Windows не умеет их рисовать, и экран «рассыпался» бы.
 
@@ -364,10 +375,11 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | Enter | | отправить |
 | Shift+Enter | | новая строка (вставленный многострочный текст не рвётся) |
 | Ctrl+V / Shift+Insert | `/paste` | вставить из буфера обмена |
-| ↑ / ↓, Tab / Shift+Tab | | выбор чата, вкладки |
+| ↑ / ↓, Tab / Shift+Tab | | выбор чата, вкладки (после начального `/` Tab дополняет команду) |
 | Alt+↑ / Alt+↓ | | прошлые сообщения и команды (↑ ↓ делают то же, когда в поле есть текст) |
 | PgUp / PgDn | | прокрутка переписки; PgUp у верха подгружает старые сообщения |
-| Esc | | очистить ввод; затем отменить правку или ответ; затем сбросить поиск |
+| Мышь | | клик по вкладке или чату, колесо — прокрутка (см. настройки) |
+| Esc | | очистить ввод; затем отменить правку или ответ; затем вернуться к последним после перехода из поиска; затем сбросить фильтр чатов |
 | F1 | `/help` | справка |
 | F2 | `/lock` | заблокировать |
 | F3 | `/md` | Markdown вкл/выкл |
@@ -378,7 +390,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки |
 | F10 | `/quit` | выход |
 | | `/pin` `/readall` `/export` | закрепить чат, прочитать всё, сохранить переписку |
-| | `/edit` `/del` `/note` `/later` `/scheduled` | править, удалить, заметка, отложить, список отложенных |
+| | `/edit` `/del` `/note` `/later` `/scheduled` | править или удалить своё последнее сообщение, заметка, отложить, список отложенных |
 | | `/send` `/save` `/open` `/copy` `/links` | отправить файл, скачать вложение, открыть вложение, копировать сообщение, ссылки |
 | | `/passwd` `/proxy` `/faq` | сменить пароль, прокси, подсказки |
 
@@ -394,7 +406,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 
 **Модель безопасности кратко**
 
-- *Что хранится на диске?* Только `tglite.vault` (ключи и сессия Telegram, зашифрованы) и `tglite.lang` (язык). Сообщения не сохраняются.
+- *Что хранится на диске?* Всегда `tglite.vault` (ключи и сессия Telegram, зашифрованы) и `tglite.lang` (язык). Кроме них только то, что вы запросили или что перечислено здесь: `tglite.log` (журнал, пароли скрыты), `downloads/`, `export/` и временная `tglite-view/`. Сообщения не сохраняются.
 - *Что будет, если удалить `tglite.vault`?* Программа забудет ключи и сессию, войти нужно заново. Старую сессию завершите в Telegram → Настройки → Устройства.
 - *Безопасен ли чужой exe?* По умолчанию нет: exe не подписан. Скачивайте только из Releases этого репозитория, сверяйте SHA256 (виден в сводке CI) или собирайте сами.
 - *Был ли аудит кода?* Код проверен и протестирован автором и автоматикой (clippy, `cargo audit`). Это не независимый профессиональный аудит безопасности.
@@ -427,7 +439,7 @@ workflow релиза их не использует, поэтому exe из р
 
 | Проблема | Что делать |
 |---|---|
-| Не вставляется текст | `Ctrl+V`, `Shift+Insert` или `/paste`; в старой консоли Windows работает и правая кнопка мыши |
+| Не вставляется текст | `Ctrl+V`, `Shift+Insert` или `/paste`; в старой консоли Windows работает и правая кнопка мыши, но только при выключенной в настройках мыши |
 | Вместо букв квадраты | Шрифт Consolas или Windows Terminal; эмодзи программа скрывает сама |
 | Нет подключения | Telegram может быть заблокирован: VPN или `/proxy 127.0.0.1:порт`, затем перезапуск |
 | Антивирус ругается | exe не подписан и собран из открытого кода; соберите сами или сверьте SHA256 с релизом |
@@ -448,9 +460,11 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Планы
 
-**1.0.1:** `/open` и `/copy`, история ввода на Alt+↑ / Alt+↓, HTTP-прокси с логином.
+**1.1.0 (эта версия):** мышь (клик по вкладке или чату, прокрутка колесом; выключается в настройках), короткое GIF-демо, замер памяти после долгой активной работы.
 
-**1.0.2 (эта версия):** все чаты вместо первых 120, старая история по PgUp, поиск сообщений (`/findmsg`, `/findall`) с открытием найденного в контексте.
+**1.0.2:** все чаты вместо первых 120, старая история по PgUp, поиск сообщений (`/findmsg`, `/findall`) с открытием найденного в контексте.
+
+**1.0.1:** `/open` и `/copy`, история ввода на Alt+↑ / Alt+↓, HTTP-прокси с логином.
 
 **1.0.0** — первый законченный выпуск: вставка из буфера, интерфейс на русском и английском, мастер первого запуска,
 подсказки внутри программы, CI с релизами и контрольными суммами, полный аудит кода, все находки которого закрыты регрессионными

@@ -63,7 +63,7 @@ pub(super) fn draw_main(f: &mut Frame, app: &mut App) {
     draw_status(f, app, rows[2]);
 }
 
-pub(super) fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
+pub(super) fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let tabs = app.tabs();
     let active = tabs.iter().position(|(t, _)| *t == app.tab).unwrap_or(0);
     // Заготовки подписей вместе с шириной.
@@ -87,6 +87,7 @@ pub(super) fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
 
     let mut spans: Vec<Span> = Vec::new();
     let mut used = 0;
+    let mut hits: Vec<(u16, u16, Tab)> = Vec::new();
     if start > 0 {
         spans.push(Span::styled("‹", Style::new().fg(MUTED)));
         used += 1;
@@ -101,6 +102,8 @@ pub(super) fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::new().fg(Color::Gray)
         };
+        let x0 = area.x + used as u16;
+        hits.push((x0, x0 + *w as u16, tabs[i].0.clone()));
         spans.push(Span::styled(format!(" {title} "), style));
         if let Some(b) = badge {
             let bs = if i == active {
@@ -114,6 +117,7 @@ pub(super) fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         used += w + 1;
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+    app.hit_tabs = hits;
 }
 
 pub(super) fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -174,6 +178,7 @@ pub(super) fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_style(Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD));
     f.render_stateful_widget(list, area, &mut app.list_state);
+    app.hit_list = area;
 }
 
 pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
@@ -210,6 +215,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         None => Line::from(tr!(" Переписка ", " Chat ")),
     };
     let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(MUTED)).title(title);
+    app.hit_msgs = area;
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
 
@@ -496,6 +502,7 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
         key("↑ ↓", tr!("выбрать чат", "select chat")),
         key("Tab / Shift+Tab", tr!("вкладки; после «/» — дополнить команду", "tabs; after \"/\" — complete command")),
         key("PgUp / PgDn", tr!("прокрутка переписки", "scroll the chat")),
+        key(tr!("Мышь", "Mouse"), tr!("клик — чат или вкладка, колесо — прокрутка", "click — chat or tab, wheel — scroll")),
         key(
             "F7",
             tr!("выбор сообщения: R ответить, F переслать, E править, D удалить", "pick message: R reply, F forward, E edit, D delete"),
@@ -604,6 +611,7 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
             Settings::width_name(s.bubble_width, [tr!("узкие", "narrow"), tr!("обычные", "normal"), tr!("широкие", "wide")]).to_string(),
         ),
         (tr!("Язык интерфейса", "Interface language"), if s.lang == 0 { "Русский".to_string() } else { "English".to_string() }),
+        (tr!("Мышь", "Mouse"), on_off(s.mouse).to_string()),
         (tr!("Пароль приложения", "App password"), tr!("сменить…", "change…").to_string()),
     ];
     let width = 78u16;

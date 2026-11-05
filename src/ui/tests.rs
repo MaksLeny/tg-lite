@@ -1171,7 +1171,7 @@ fn altgr_characters_are_not_ctrl_shortcuts() {
 fn settings_scroll_keeps_selected_row_visible_on_short_windows() {
     let mut app = demo_app();
     app.mode = Mode::Settings;
-    for row in [0usize, 5, 10, 11] {
+    for row in [0usize, 5, 10, 11, 12] {
         app.settings_row = row;
         let mut term = Terminal::new(TestBackend::new(100, 10)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -1180,6 +1180,7 @@ fn settings_scroll_keeps_selected_row_visible_on_short_windows() {
             0 => "Автоблокировка",
             5 => "Цвет интерфейса",
             10 => "Язык интерфейса",
+            11 => "Мышь",
             _ => "Пароль приложения",
         };
         assert!(text.contains(label), "строка {row} не видна:\n{text}");
@@ -1589,6 +1590,114 @@ fn dump_ui_frames() {
     }
 }
 
+/// Кадры для GIF-демо: `TGLITE_SHOTS=/путь [TGLITE_LANG=en] cargo test dump_demo_frames -- --ignored`.
+#[test]
+#[ignore]
+fn dump_demo_frames() {
+    let Some(dir) = std::env::var_os("TGLITE_SHOTS") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::i18n::set(u8::from(std::env::var("TGLITE_LANG").is_ok_and(|v| v == "en")));
+    let col = |c: Color| match c {
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Black => "#000000".to_string(),
+        Color::White => "#ffffff".to_string(),
+        Color::Gray => "#aaaaaa".to_string(),
+        _ => String::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let mut app = demo_app();
+    app.status = tr!("Готово", "Done").into();
+    let mut n = 0;
+    let mut shot = |app: &mut App, ms: u32| {
+        let mut term = Terminal::new(TestBackend::new(110, 28)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer();
+        let rows: Vec<Vec<String>> = (0..28)
+            .map(|y| {
+                (0..110)
+                    .map(|x| {
+                        let c = &buf[(x, y)];
+                        format!("{}|{}|{}", c.symbol(), col(c.fg), col(c.bg))
+                    })
+                    .collect()
+            })
+            .collect();
+        std::fs::write(std::path::Path::new(&dir).join(format!("f{n:02}_{ms}.json")), serde_json::to_string(&rows).unwrap()).unwrap();
+        n += 1;
+    };
+    shot(&mut app, 1800);
+    // набор сообщения
+    let text = tr!("Спасибо, прочитал. Завтра отвечу", "Thanks, read it. I will reply tomorrow");
+    let chars: Vec<char> = text.chars().collect();
+    for chunk in chars.chunks(6) {
+        for c in chunk {
+            app.handle_key(key(KeyCode::Char(*c), KeyModifiers::NONE), &tx, &s);
+        }
+        shot(&mut app, 140);
+    }
+    shot(&mut app, 900);
+    app.clear_input();
+    // вкладки и выбор чата с клавиатуры
+    press(&mut app, KeyCode::Tab, &tx, &s);
+    shot(&mut app, 1200);
+    press(&mut app, KeyCode::BackTab, &tx, &s);
+    // поиск
+    let cmd = tr!("/findall отчёт", "/findall report");
+    for c in cmd.chars() {
+        app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE), &tx, &s);
+    }
+    shot(&mut app, 1000);
+    app.clear_input();
+    let q = tr!("отчёт", "report");
+    let hit = |chat: PeerId, name: &str, id: i32, who: &str, text: &str| tg::SearchHit {
+        chat,
+        chat_name: name.into(),
+        id,
+        ts: 1_761_650_000 + i64::from(id) * 60,
+        when: "10:01".into(),
+        sender: who.into(),
+        text: text.into(),
+    };
+    let anna = app.chats[0].id;
+    let team = app.chats[2].id;
+    let hits = vec![
+        hit(
+            anna,
+            tr!("Анна", "Anna"),
+            1,
+            tr!("Анна", "Anna"),
+            tr!("Привет! Ты посмотрел отчёт, который я присылала?", "Hi! Did you look at the report I sent?"),
+        ),
+        hit(
+            team,
+            tr!("Команда проекта", "Project Team"),
+            7,
+            tr!("Борис", "Boris"),
+            tr!("Отчёт за квартал готов, смотрите в общей папке", "The quarterly report is ready, see the shared folder"),
+        ),
+    ];
+    app.handle_event(Event::SearchResults { query: q.into(), scope: None, hits }, &tx);
+    shot(&mut app, 2200);
+    press(&mut app, KeyCode::Esc, &tx, &s);
+    // выбор сообщения
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    shot(&mut app, 1200);
+    press(&mut app, KeyCode::Up, &tx, &s);
+    shot(&mut app, 1500);
+    press(&mut app, KeyCode::Esc, &tx, &s);
+    // настройки
+    app.mode = Mode::Settings;
+    shot(&mut app, 1500);
+    app.settings_row = 5;
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+    shot(&mut app, 1000);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+    shot(&mut app, 1500);
+    app.mode = Mode::Chat;
+    shot(&mut app, 1500);
+}
+
 /// Демонстрационные данные для скриншотов: вымышленные имена и тексты.
 fn demo_app() -> App {
     let mut app = App::new(Settings::default());
@@ -1648,8 +1757,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.0.2"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.0.2");
+    assert!(README.contains("1.1.0"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.1.0");
 }
 
 #[test]
@@ -2286,4 +2395,110 @@ fn search_overlay_and_help_render_on_small_screens() {
         assert!(dump(&term).contains("Enter"), "подсказка окна поиска ({lang})");
     }
     crate::i18n::set(0);
+}
+
+// ---- пачка 1.1.0: мышь
+
+fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+    MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
+}
+
+fn drawn(app: &mut App) {
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, app)).unwrap();
+}
+
+#[test]
+fn mouse_click_selects_chat_and_tab() {
+    let mut app = app_with_chats(); // Мама, Мой канал, Рабочий чат
+    let (tx, _rx) = mpsc::unbounded_channel();
+    drawn(&mut app);
+    // чат во второй строке списка (первая строка — рамка)
+    assert!(app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 3), &tx));
+    assert_eq!(app.sel, Some(app.chats[1].id));
+    assert!(app.pending_load.is_some(), "история загрузится как при выборе клавишей");
+    // клик по рамке и по пустому месту ничего не ломает
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 1), &tx);
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 25), &tx);
+    assert_eq!(app.sel, Some(app.chats[1].id));
+    // вкладка «Каналы»
+    drawn(&mut app);
+    let (x0, _, tab) = app.hit_tabs.iter().find(|(_, _, t)| *t == Tab::Channels).cloned().unwrap();
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x0 + 1, 0), &tx);
+    assert_eq!(app.tab, tab);
+    assert_eq!(app.visible_ids(), vec![app.chats[1].id]);
+    assert_eq!(app.sel, Some(app.chats[1].id));
+}
+
+#[test]
+fn mouse_wheel_scrolls_messages_or_moves_in_the_list() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.histories.insert(id, long_history(60));
+    drawn(&mut app);
+    let m = app.hit_msgs;
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, m.x + 5, m.y + 5), &tx);
+    assert_eq!(app.scroll, 3);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, m.x + 5, m.y + 5), &tx);
+    assert_eq!(app.scroll, 0);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, m.x + 5, m.y + 5), &tx);
+    assert_eq!(app.scroll, 0, "ниже последнего не уходит");
+    // у верха колесо подгружает старую историю
+    app.scroll = app.max_scroll;
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, m.x + 5, m.y + 5), &tx);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::LoadOlder { .. })));
+    // над списком чатов колесо двигает выбор
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 3, 5), &tx);
+    assert_eq!(app.sel, Some(app.chats[1].id));
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, 3, 5), &tx);
+    assert_eq!(app.sel, Some(app.chats[0].id));
+}
+
+#[test]
+fn mouse_is_ignored_when_off_locked_or_in_dialogs() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    drawn(&mut app);
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 3, 3);
+    app.settings.mouse = false;
+    assert!(!app.handle_mouse(click, &tx));
+    assert_eq!(app.sel, Some(app.chats[0].id));
+    app.settings.mouse = true;
+    for mode in [Mode::Locked, Mode::Settings, Mode::Help, Mode::Overlay, Mode::Pick] {
+        app.mode = mode;
+        assert!(!app.handle_mouse(click, &tx));
+        assert_eq!(app.sel, Some(app.chats[0].id));
+    }
+    // простое движение мыши не вызывает перерисовку
+    app.mode = Mode::Chat;
+    assert!(!app.handle_mouse(mouse(MouseEventKind::Moved, 3, 3), &tx));
+}
+
+#[test]
+fn mouse_setting_toggles_and_is_saved() {
+    let mut app = App::new(Settings::default());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    assert!(app.settings.mouse, "по умолчанию включена");
+    app.mode = Mode::Settings;
+    app.settings_row = 11;
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+    assert!(!app.settings.mouse);
+    assert!(!s.settings().mouse);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::NONE), &tx, &s);
+    assert!(app.settings.mouse);
+}
+
+#[test]
+fn mouse_tab_hit_areas_match_what_is_drawn() {
+    let mut app = demo_app();
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let first_row: String = (0..110).map(|x| term.backend().buffer()[(x, 0)].symbol().to_string()).collect();
+    for (a, b, tab) in app.hit_tabs.clone() {
+        let title = app.tabs().into_iter().find(|(t, _)| *t == tab).unwrap().1;
+        let cells: String = (a..b).map(|x| term.backend().buffer()[(x, 0)].symbol().to_string()).collect();
+        assert!(cells.contains(&title), "область вкладки {title:?} не совпала с нарисованным: {cells:?} в {first_row:?}");
+    }
 }
