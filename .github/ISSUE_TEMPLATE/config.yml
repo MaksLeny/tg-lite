@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability / Уязвимость
+    url: https://github.com/MaksLeny/tg-lite/blob/main/SECURITY.md
+    about: Please read SECURITY.md first / Сначала прочитайте SECURITY.md
