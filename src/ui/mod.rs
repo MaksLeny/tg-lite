@@ -4,7 +4,7 @@
 //! Клавиши сделаны так, чтобы работать в обычной консоли Windows:
 //! F-клавиши и /команды не зависят от раскладки, а Ctrl-комбинации — запасной вариант.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,9 @@ const MAX_MESSAGE_CHARS: usize = 4096;
 /// Команды для автодополнения по Tab.
 const COMMANDS: &[&str] = &[
     "/find",
+    "/findmsg",
+    "/findall",
+    "/latest",
     "/pin",
     "/readall",
     "/export",
@@ -176,14 +179,19 @@ enum OverlayKind {
     Scheduled,
     /// Подсказки «Если не работает».
     Faq,
+    /// Результаты поиска сообщений.
+    Search,
 }
 
+#[derive(Default)]
 struct OverlayItem {
     label: String,
     /// Для ссылок — адрес.
     data: String,
     /// Для отложенных — номер сообщения.
     id: i32,
+    /// Для результатов поиска: чат, номер и время найденного сообщения.
+    target: Option<(PeerId, i32, i64)>,
 }
 
 struct Overlay {
@@ -195,6 +203,9 @@ struct Overlay {
     /// Номер элемента, для которого ждём подтверждения отмены.
     confirm: Option<usize>,
 }
+
+/// Больше этого числа сообщений одного чата в памяти не копим: дальше помогает поиск.
+const MAX_LOADED: usize = 1500;
 
 /// Сколько секунд показывать «печатает…» без новых обновлений.
 const TYPING_TTL: Duration = Duration::from_secs(6);
@@ -228,6 +239,18 @@ pub struct App {
     markdown: bool,
     /// Сколько строк прокручено вверх от самого низа переписки.
     scroll: usize,
+    /// Наибольшая прокрутка переписки по последней отрисовке (ставит `draw`).
+    max_scroll: usize,
+    /// Идёт подгрузка старых сообщений.
+    older_busy: bool,
+    /// Чаты, у которых загружена вся история.
+    older_done: HashSet<PeerId>,
+    /// Чат, в котором показан кусок старой переписки после перехода из поиска (новые сообщения в него не добавляются).
+    jumped: Option<PeerId>,
+    /// Найденное сообщение, которое выделено и показано посередине.
+    focus_msg: Option<i32>,
+    /// Надо ли при следующей отрисовке поставить `focus_msg` посередине.
+    focus_pending: bool,
     mode: Mode,
     lock_input: String,
     lock_error: String,
@@ -291,6 +314,12 @@ impl App {
             status: tr!("Загружаю чаты…", "Loading chats…").into(),
             markdown: false,
             scroll: 0,
+            max_scroll: 0,
+            older_busy: false,
+            older_done: HashSet::new(),
+            jumped: None,
+            focus_msg: None,
+            focus_pending: false,
             mode: Mode::Chat,
             lock_input: String::new(),
             lock_error: String::new(),
@@ -359,6 +388,61 @@ impl App {
         self.chats.iter().filter(|c| c.unread > 0 && self.in_tab(tab, c)).count()
     }
 
+    /// Делает чат выбранным и видимым, даже если он не входит в открытую вкладку.
+    fn reveal_chat(&mut self, id: PeerId) {
+        if !self.visible_ids().contains(&id) {
+            self.tab = Tab::All;
+            self.filter.clear();
+        }
+        self.set_sel(Some(id));
+    }
+
+    /// Вливает свежую первую страницу чатов в список: порядок сервера сверху, остальные чаты без изменений ниже.
+    fn merge_dialogs(&mut self, page: Vec<ChatInfo>) {
+        let ids: HashSet<PeerId> = page.iter().map(|c| c.id).collect();
+        let mut merged = page;
+        merged.extend(std::mem::take(&mut self.chats).into_iter().filter(|c| !ids.contains(&c.id)));
+        self.chats = merged;
+    }
+
+    /// Просит старые сообщения выбранного чата (PgUp у самого верха переписки).
+    fn request_older(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) {
+        let (Some(chat), Some(id)) = (self.selected().cloned(), self.sel) else { return };
+        let Some(h) = self.histories.get(&id) else { return };
+        let Some(first) = h.first() else { return };
+        if self.older_busy {
+            return;
+        }
+        if self.older_done.contains(&id) {
+            self.status = tr!("Это начало переписки", "This is the start of the conversation").into();
+            return;
+        }
+        if h.len() >= MAX_LOADED {
+            self.status = tr!(
+                "Загружено максимум сообщений: нужное найдите через /findmsg",
+                "Loaded the maximum number of messages: use /findmsg to find the one you need"
+            )
+            .into();
+            return;
+        }
+        self.older_busy = true;
+        self.status = tr!("Загружаю старые сообщения…", "Loading older messages…").into();
+        let _ = cmd.send(Cmd::LoadOlder { chat, before: first.id, limit: (self.settings.history_limit as usize).max(30) });
+    }
+
+    /// Возвращает из куска старой переписки к последним сообщениям.
+    fn go_latest(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) {
+        if self.jumped.take().is_none() {
+            return;
+        }
+        self.focus_msg = None;
+        self.scroll = 0;
+        if let Some(c) = self.selected().cloned() {
+            let _ = cmd.send(Cmd::LoadHistory(c, self.settings.history_limit as usize));
+            self.status = tr!("Возвращаюсь к последним сообщениям…", "Going back to the latest messages…").into();
+        }
+    }
+
     fn is_pinned(&self, c: &ChatInfo) -> bool {
         c.id.bot_api_dialog_id().is_some_and(|d| self.settings.pinned.contains(&d))
     }
@@ -421,6 +505,12 @@ impl App {
             None if had_old => self.cursor = 0, // текст ушёл в черновик, поле пустое
             None => {}                          // выбора не было: набранный текст не трогаем
         }
+        if let Some(j) = self.jumped.take_if(|j| Some(*j) != new) {
+            // Ушли из чата с куском старой переписки: при возвращении загрузим свежую.
+            self.histories.remove(&j);
+            self.focus_msg = None;
+        }
+        self.older_busy = false;
         self.sel = new;
         self.pending_delete = None;
     }
@@ -627,6 +717,84 @@ impl App {
 
     fn handle_event(&mut self, ev: Event, cmd: &mpsc::UnboundedSender<Cmd>) {
         match ev {
+            Event::DialogsPage(page) => {
+                self.merge_dialogs(page);
+                let keys: Vec<PeerId> = self.histories.keys().copied().collect();
+                for k in keys {
+                    self.resolve_fwd(k);
+                }
+                self.reload_pending = false;
+                self.ensure_selection();
+                if let Some(id) = self.sel
+                    && !self.histories.contains_key(&id)
+                    && self.pending_load.is_none()
+                {
+                    self.pending_load = Some(Instant::now());
+                }
+            }
+            Event::Older { chat, msgs } => {
+                self.older_busy = false;
+                let Some(h) = self.histories.get_mut(&chat) else { return };
+                let first = h.first().map_or(i32::MAX, |m| m.id);
+                let new: Vec<ChatMsg> = msgs.into_iter().filter(|m| m.id < first).collect();
+                if new.is_empty() {
+                    self.older_done.insert(chat);
+                    self.status = tr!("Это начало переписки", "This is the start of the conversation").into();
+                    return;
+                }
+                let added = new.len();
+                self.status = trf!("Загружено ещё сообщений: {added}", "Older messages loaded: {added}");
+                h.splice(0..0, new);
+                self.resolve_fwd(chat);
+                if self.mode == Mode::Pick && self.sel == Some(chat) {
+                    self.pick += added; // выбранное сообщение остаётся тем же
+                }
+            }
+            Event::Around { chat, msgs, focus } => {
+                if self.mode == Mode::Locked {
+                    return;
+                }
+                if !msgs.iter().any(|m| m.id == focus) {
+                    self.status = tr!("Не удалось открыть найденное сообщение", "Could not open the found message").into();
+                    return;
+                }
+                self.reveal_chat(chat);
+                self.histories.insert(chat, msgs);
+                self.older_done.remove(&chat);
+                self.resolve_fwd(chat);
+                self.jumped = Some(chat);
+                self.focus_msg = Some(focus);
+                self.focus_pending = true;
+                self.mode = Mode::Chat;
+                self.status = tr!(
+                    "Найденное сообщение выделено. PgDn или Esc — к последним",
+                    "Found message highlighted. PgDn or Esc: back to the latest"
+                )
+                .into();
+            }
+            Event::SearchResults { query, scope, hits } => {
+                if self.mode == Mode::Locked {
+                    return;
+                }
+                if hits.is_empty() {
+                    self.status = trf!("По запросу «{query}» ничего не найдено", "Nothing found for “{query}”");
+                    return;
+                }
+                let items: Vec<OverlayItem> = hits
+                    .iter()
+                    .map(|h| {
+                        let text = h.text.replace('\n', " ");
+                        let label = if scope.is_some() {
+                            format!("{}  {}: {text}", h.when, h.sender)
+                        } else {
+                            format!("[{}] {}  {}: {text}", h.chat_name, h.when, h.sender)
+                        };
+                        OverlayItem { label, target: Some((h.chat, h.id, h.ts)), ..Default::default() }
+                    })
+                    .collect();
+                let title = trf!(" Найдено: {} · «{query}» ", " Found: {} · “{query}” ", items.len());
+                self.open_overlay(OverlayKind::Search, &title, items);
+            }
             Event::Dialogs(list) => {
                 self.chats = list;
                 let keys: Vec<PeerId> = self.histories.keys().copied().collect();
@@ -654,6 +822,9 @@ impl App {
                 self.ensure_selection();
             }
             Event::History { chat, mut msgs } => {
+                if self.jumped == Some(chat) {
+                    return; // запоздавший ответ не должен затереть кусок старой переписки
+                }
                 // Сообщения, пришедшие, пока грузилась история, не теряем.
                 if let Some(old) = self.histories.get(&chat) {
                     let last = msgs.last().map_or(0, |m| m.id);
@@ -673,6 +844,16 @@ impl App {
                 }
             }
             Event::Incoming { chat, chat_name, msg } => {
+                if self.jumped == Some(chat) {
+                    // Показан кусок старой переписки: новое сообщение не вставляем посреди, только отмечаем.
+                    if !msg.outgoing {
+                        if let Some(c) = self.chats.iter_mut().find(|c| c.id == chat) {
+                            c.unread += 1;
+                        }
+                        self.status = trf!("Новое сообщение: {chat_name} (PgDn — к последним)", "New message: {chat_name} (PgDn: latest)");
+                    }
+                    return;
+                }
                 let is_open = self.sel == Some(chat);
                 let outgoing = msg.outgoing;
                 if !outgoing {
@@ -807,7 +988,12 @@ impl App {
                         let when = jiff::Timestamp::from_second(m.date)
                             .map(|t| t.to_zoned(tz.clone()).strftime("%d.%m %H:%M").to_string())
                             .unwrap_or_default();
-                        OverlayItem { label: format!("{when}  {}", m.text.replace('\n', " ")), data: String::new(), id: m.id }
+                        OverlayItem {
+                            label: format!("{when}  {}", m.text.replace('\n', " ")),
+                            data: String::new(),
+                            id: m.id,
+                            ..Default::default()
+                        }
                     })
                     .collect();
                 self.overlay = Some(Overlay {
@@ -833,7 +1019,10 @@ impl App {
                 };
             }
             Event::Status(s) => self.status = s,
-            Event::Error(e) => self.status = trf!("Ошибка: {e}", "Error: {e}"),
+            Event::Error(e) => {
+                self.older_busy = false;
+                self.status = trf!("Ошибка: {e}", "Error: {e}");
+            }
         }
     }
 
@@ -939,6 +1128,7 @@ impl App {
         let since_prev = self.last_key_at.elapsed();
         self.last_key_at = Instant::now();
         self.last_activity = Instant::now();
+        self.focus_msg = None; // подсветка найденного сообщения живёт до первого нажатия
 
         if is_paste_key(&key) && matches!(self.mode, Mode::Chat | Mode::Locked | Mode::NewPassword) {
             self.paste(None);
@@ -1070,8 +1260,18 @@ impl App {
             }
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
-            KeyCode::PageUp => self.scroll += 8,
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(8),
+            KeyCode::PageUp => {
+                if self.scroll >= self.max_scroll {
+                    self.request_older(cmd);
+                }
+                self.scroll += 8;
+            }
+            KeyCode::PageDown => {
+                if self.scroll == 0 && self.jumped.is_some() && self.jumped == self.sel {
+                    self.go_latest(cmd);
+                }
+                self.scroll = self.scroll.saturating_sub(8);
+            }
             KeyCode::Esc => {
                 if !self.input.is_empty() {
                     self.clear_input();
@@ -1079,6 +1279,8 @@ impl App {
                     self.status = tr!("Правка отменена", "Edit cancelled").into();
                 } else if self.reply.take().is_some() {
                     self.status = tr!("Ответ отменён", "Reply cancelled").into();
+                } else if self.jumped.is_some() && self.jumped == self.sel {
+                    self.go_latest(cmd);
                 } else if !self.filter.is_empty() {
                     self.set_filter("");
                 }
@@ -1090,7 +1292,7 @@ impl App {
 
     fn refresh(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) {
         self.status = tr!("Обновляю список чатов…", "Refreshing chat list…").into();
-        let _ = cmd.send(Cmd::LoadDialogs);
+        let _ = cmd.send(Cmd::LoadAllDialogs);
     }
 
     /// Отправка и команды: `/later <минуты> <текст>`, `/md`, `/lock`, `/settings`, `/passwd`,
@@ -1210,6 +1412,24 @@ impl App {
         self.mode = Mode::Overlay;
     }
 
+    /// Открывает найденное сообщение: если оно уже загружено, выделяет его, иначе грузит окружение.
+    fn open_found(&mut self, chat_id: PeerId, id: i32, ts: i64, cmd: &mpsc::UnboundedSender<Cmd>) {
+        let Some(chat) = self.chats.iter().find(|c| c.id == chat_id).cloned() else {
+            self.status = tr!("Чат найденного сообщения не в списке", "The chat of the found message is not in the list").into();
+            return;
+        };
+        let loaded = self.histories.get(&chat_id).is_some_and(|h| h.iter().any(|m| m.id == id));
+        if loaded {
+            self.reveal_chat(chat_id);
+            self.focus_msg = Some(id);
+            self.focus_pending = true;
+            self.status = tr!("Найденное сообщение выделено", "Found message highlighted").into();
+        } else {
+            self.status = tr!("Открываю найденное сообщение…", "Opening the found message…").into();
+            let _ = cmd.send(Cmd::LoadAround { chat, id, ts });
+        }
+    }
+
     fn handle_overlay_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>) {
         let Some(ov) = self.overlay.as_mut() else {
             self.mode = Mode::Chat;
@@ -1246,6 +1466,14 @@ impl App {
                     };
                 }
                 OverlayKind::Faq => {}
+                OverlayKind::Search => {
+                    let target = ov.items[ov.sel].target;
+                    self.overlay = None;
+                    self.mode = Mode::Chat;
+                    if let Some((chat_id, id, ts)) = target {
+                        self.open_found(chat_id, id, ts, cmd);
+                    }
+                }
                 OverlayKind::Scheduled => {
                     if ov.confirm == Some(ov.sel) {
                         let item = ov.items.remove(ov.sel);
@@ -1323,9 +1551,19 @@ impl App {
         match (key.code, letter) {
             (KeyCode::Esc | KeyCode::F(7) | KeyCode::Enter, _) => self.mode = Mode::Chat,
             (KeyCode::F(10), _) => self.should_quit = true,
-            (KeyCode::Up, _) => self.pick = self.pick.saturating_sub(1),
+            (KeyCode::Up, _) => {
+                if self.pick == 0 {
+                    self.request_older(cmd);
+                }
+                self.pick = self.pick.saturating_sub(1);
+            }
             (KeyCode::Down, _) => self.pick = (self.pick + 1).min(len - 1),
-            (KeyCode::PageUp, _) => self.pick = self.pick.saturating_sub(5),
+            (KeyCode::PageUp, _) => {
+                if self.pick < 5 {
+                    self.request_older(cmd);
+                }
+                self.pick = self.pick.saturating_sub(5);
+            }
             (KeyCode::PageDown, _) => self.pick = (self.pick + 5).min(len - 1),
             (KeyCode::Home, _) => self.pick = 0,
             (KeyCode::End, _) => self.pick = len - 1,
@@ -1415,7 +1653,8 @@ impl App {
                     if links.is_empty() {
                         self.pick_note = tr!("В этом сообщении нет ссылок", "This message has no links").into();
                     } else {
-                        let items = links.into_iter().map(|u| OverlayItem { label: u.clone(), data: u, id: 0 }).collect();
+                        let items =
+                            links.into_iter().map(|u| OverlayItem { label: u.clone(), data: u, id: 0, ..Default::default() }).collect();
                         self.open_overlay(OverlayKind::Links, tr!(" Ссылки сообщения ", " Message links "), items);
                     }
                 }
@@ -1517,6 +1756,31 @@ impl App {
             "/find" | "/search" => {
                 self.clear_input();
                 self.set_filter(arg);
+            }
+            "/findmsg" | "/findall" => {
+                self.clear_input();
+                if arg.is_empty() {
+                    self.status = tr!("Что искать? Например: /findmsg отчёт", "What to look for? For example: /findmsg report").into();
+                    return true;
+                }
+                if name == "/findmsg" {
+                    let Some(chat) = self.selected().cloned() else {
+                        self.status = tr!("Сначала выберите чат", "Select a chat first").into();
+                        return true;
+                    };
+                    let _ = cmd.send(Cmd::SearchChat { chat, query: arg.to_string() });
+                } else {
+                    let _ = cmd.send(Cmd::SearchAll { query: arg.to_string() });
+                }
+                self.status = tr!("Ищу…", "Searching…").into();
+            }
+            "/latest" => {
+                self.clear_input();
+                if self.jumped.is_some() && self.jumped == self.sel {
+                    self.go_latest(cmd);
+                } else {
+                    self.scroll = 0;
+                }
             }
             "/pin" => {
                 self.clear_input();
@@ -1694,7 +1958,7 @@ impl App {
                 for m in h.iter().rev().take(80) {
                     for u in util::extract_links(&m.text) {
                         if !items.iter().any(|i| i.data == u) {
-                            items.push(OverlayItem { label: format!("{}: {u}", m.sender), data: u, id: 0 });
+                            items.push(OverlayItem { label: format!("{}: {u}", m.sender), data: u, id: 0, ..Default::default() });
                         }
                     }
                 }
@@ -1710,7 +1974,10 @@ impl App {
             }
             "/faq" => {
                 self.clear_input();
-                let items = faq().iter().map(|(q, a)| OverlayItem { label: format!("{q} — {a}"), data: String::new(), id: 0 }).collect();
+                let items = faq()
+                    .iter()
+                    .map(|(q, a)| OverlayItem { label: format!("{q} — {a}"), data: String::new(), id: 0, ..Default::default() })
+                    .collect();
                 self.open_overlay(OverlayKind::Faq, tr!(" Если не работает ", " If something doesn't work "), items);
             }
             "/scheduled" => {
@@ -1781,7 +2048,7 @@ pub async fn run(
     // это не поддерживается, там работает чтение буфера по Ctrl+V).
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
     let mut app = App::new(saver.settings());
-    let _ = cmd.send(Cmd::LoadDialogs);
+    let _ = cmd.send(Cmd::LoadAllDialogs);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut last_save = Instant::now();
     let mut last_refresh = Instant::now();

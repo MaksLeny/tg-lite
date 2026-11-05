@@ -621,6 +621,7 @@ fn renders_all_screens_at_various_sizes() {
                     label: "Мама: https://example.com/очень/длинная/ссылка".into(),
                     data: "https://example.com".into(),
                     id: 0,
+                    ..Default::default()
                 }],
                 sel: 0,
                 confirm: None,
@@ -1647,8 +1648,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.0.1"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.0.1");
+    assert!(README.contains("1.0.2"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.0.2");
 }
 
 #[test]
@@ -1974,4 +1975,315 @@ fn memory_budget_for_100_chats_with_history() {
     assert!(used > 0, "счётчик работает");
     assert!(used < 4 * 1024 * 1024, "бюджет 4 МБ превышен: {:.2} МБ. Что-то стало хранить слишком много", used as f64 / 1048576.0);
     drop(app);
+}
+
+// ---- пачка 1.0.2: весь список чатов, старая история, поиск сообщений
+
+fn id_of(app: &App, i: usize) -> PeerId {
+    app.chats[i].id
+}
+
+fn long_history(n: i32) -> Vec<ChatMsg> {
+    (1..=n).map(|i| msg(i, i % 2 == 0, "Мама", &format!("сообщение №{i}"))).collect()
+}
+
+#[test]
+fn dialogs_page_merges_without_losing_chats() {
+    let mut app = app_with_chats(); // Мама(1), Мой канал(2), Рабочий чат(3)
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let selected = app.sel;
+    let page = vec![chat(2, "Мой канал", Kind::Channel, 5), chat(4, "Новый", Kind::User, 1)];
+    app.handle_event(Event::DialogsPage(page), &tx);
+    let names: Vec<&str> = app.chats.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Мой канал", "Новый", "Мама", "Рабочий чат"], "свежие сверху, остальные на месте");
+    assert_eq!(app.chats[0].unread, 5, "данные страницы новее");
+    assert_eq!(app.sel, selected, "выбранный чат остался");
+    assert!(!app.status.starts_with("Чатов"), "слияние не пишет итог загрузки");
+    // полный список заменяет всё
+    app.handle_event(Event::Dialogs(vec![chat(9, "Единственный", Kind::User, 0)]), &tx);
+    assert_eq!(app.chats.len(), 1);
+}
+
+#[test]
+fn full_dialog_list_beyond_120_is_kept() {
+    let mut app = App::new(Settings::default());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let list: Vec<ChatInfo> = (1..=500).map(|i| chat(i, &format!("Чат {i}"), Kind::Group, 0)).collect();
+    app.handle_event(Event::Dialogs(list), &tx);
+    assert_eq!(app.chats.len(), 500);
+    assert_eq!(app.visible_ids().len(), 500, "вкладка «Все» показывает все чаты");
+    app.handle_event(Event::DialogsPage((1..=100).rev().map(|i| chat(i, &format!("Чат {i}"), Kind::Group, 0)).collect()), &tx);
+    assert_eq!(app.chats.len(), 500, "быстрое обновление не теряет чаты за пределами первой страницы");
+    assert_eq!(app.chats[0].name, "Чат 100");
+}
+
+#[test]
+fn page_up_at_the_top_requests_older_messages_once() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    app.histories.insert(id, long_history(10)[5..].to_vec()); // 6..=10
+    app.max_scroll = 20;
+    app.scroll = 5;
+    press(&mut app, KeyCode::PageUp, &tx, &s);
+    assert!(rx.try_recv().is_err(), "ещё не наверху: сеть не нужна");
+    assert_eq!(app.scroll, 13);
+    app.scroll = 20;
+    press(&mut app, KeyCode::PageUp, &tx, &s);
+    match rx.try_recv() {
+        Ok(Cmd::LoadOlder { before, limit, .. }) => {
+            assert_eq!(before, 6, "старше самого раннего загруженного");
+            assert!(limit >= 30);
+        }
+        _ => panic!("ждали LoadOlder"),
+    }
+    press(&mut app, KeyCode::PageUp, &tx, &s);
+    assert!(rx.try_recv().is_err(), "пока идёт загрузка, второй запрос не отправляется");
+}
+
+#[test]
+fn older_messages_are_prepended_without_duplicates_and_mark_the_start() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.histories.insert(id, long_history(10)[5..].to_vec());
+    app.older_busy = true;
+    app.handle_event(Event::Older { chat: id, msgs: long_history(8) }, &tx); // 1..=8, из них 6..=8 уже есть
+    let ids: Vec<i32> = app.histories[&id].iter().map(|m| m.id).collect();
+    assert_eq!(ids, (1..=10).collect::<Vec<_>>());
+    assert!(!app.older_busy);
+    assert_eq!(app.status, "Загружено ещё сообщений: 5");
+    app.handle_event(Event::Older { chat: id, msgs: vec![] }, &tx);
+    assert!(app.older_done.contains(&id));
+    assert_eq!(app.status, "Это начало переписки");
+    // повторный PgUp у верха ничего не просит
+    let (tx2, mut rx2) = mpsc::unbounded_channel();
+    app.request_older(&tx2);
+    assert!(rx2.try_recv().is_err());
+}
+
+#[test]
+fn older_messages_keep_the_picked_message_selected() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.histories.insert(id, long_history(10)[5..].to_vec());
+    app.mode = Mode::Pick;
+    app.pick = 0;
+    app.handle_event(Event::Older { chat: id, msgs: long_history(5) }, &tx);
+    assert_eq!(app.pick, 5);
+    assert_eq!(app.histories[&id][app.pick].id, 6, "всё то же сообщение");
+}
+
+#[test]
+fn pick_mode_up_at_the_first_message_loads_older() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    app.pick = 0;
+    press(&mut app, KeyCode::Up, &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::LoadOlder { .. })));
+}
+
+#[test]
+fn history_stops_growing_at_the_memory_cap() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.histories.insert(id, long_history(MAX_LOADED as i32));
+    app.request_older(&tx);
+    assert!(rx.try_recv().is_err());
+    assert!(app.status.contains("/findmsg"), "{}", app.status);
+}
+
+#[test]
+fn find_commands_send_search_requests() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "/findmsg отчёт за квартал", &tx, &s);
+    match rx.try_recv() {
+        Ok(Cmd::SearchChat { query, chat }) => {
+            assert_eq!(query, "отчёт за квартал");
+            assert_eq!(chat.name, "Мама");
+        }
+        _ => panic!("ждали SearchChat"),
+    }
+    submit_text(&mut app, "/findall привет", &tx, &s);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::SearchAll { query }) if query == "привет"));
+    submit_text(&mut app, "/findmsg", &tx, &s);
+    assert!(rx.try_recv().is_err());
+    assert!(app.status.starts_with("Что искать"));
+    app.chats.clear();
+    app.ensure_selection();
+    submit_text(&mut app, "/findmsg abc", &tx, &s);
+    assert_eq!(app.status, "Сначала выберите чат");
+    assert!(rx.try_recv().is_err());
+}
+
+fn hit(chat: i64, id: i32, text: &str) -> tg::SearchHit {
+    let pid = if chat == 3 { PeerId::chat(3).unwrap() } else { PeerId::user(chat).unwrap() };
+    tg::SearchHit {
+        chat: pid,
+        chat_name: format!("Чат {chat}"),
+        id,
+        ts: 1_761_650_000 + i64::from(id) * 60,
+        when: "10:01".into(),
+        sender: "Мама".into(),
+        text: text.into(),
+    }
+}
+
+#[test]
+fn search_results_open_in_an_overlay_and_enter_loads_the_surroundings() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.handle_event(
+        Event::SearchResults {
+            query: "привет".into(), scope: None, hits: vec![hit(1, 77, "привет, как дела"), hit(3, 5, "всем привет")]
+        },
+        &tx,
+    );
+    assert_eq!(app.mode, Mode::Overlay);
+    let ov = app.overlay.as_ref().unwrap();
+    assert_eq!(ov.kind, OverlayKind::Search);
+    assert_eq!(ov.items.len(), 2);
+    assert!(ov.items[0].label.starts_with("[Чат 1]"), "при поиске везде видно, из какого чата: {}", ov.items[0].label);
+    assert!(ov.title.contains("привет") && ov.title.contains('2'));
+    press(&mut app, KeyCode::Down, &tx, &s);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!(app.mode, Mode::Chat);
+    assert!(app.overlay.is_none());
+    match rx.try_recv() {
+        Ok(Cmd::LoadAround { id, chat, .. }) => {
+            assert_eq!(id, 5);
+            assert_eq!(chat.name, "Рабочий чат");
+        }
+        _ => panic!("ждали LoadAround"),
+    }
+}
+
+#[test]
+fn found_message_that_is_already_loaded_is_just_highlighted() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.open_found(id, 2, 0, &tx);
+    assert!(rx.try_recv().is_err(), "загружать нечего");
+    assert_eq!(app.focus_msg, Some(2));
+    assert!(app.focus_pending);
+    assert_eq!(app.jumped, None, "это не кусок старой переписки");
+}
+
+#[test]
+fn search_with_no_hits_or_while_locked_does_nothing_visible() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.handle_event(Event::SearchResults { query: "zzz".into(), scope: None, hits: vec![] }, &tx);
+    assert_eq!(app.mode, Mode::Chat);
+    assert_eq!(app.status, "По запросу «zzz» ничего не найдено");
+    app.mode = Mode::Locked;
+    app.handle_event(Event::SearchResults { query: "a".into(), scope: None, hits: vec![hit(1, 1, "a")] }, &tx);
+    assert_eq!(app.mode, Mode::Locked);
+    assert!(app.overlay.is_none(), "результаты не всплывают поверх блокировки");
+    app.handle_event(Event::Around { chat: id_of(&app, 0), msgs: long_history(3), focus: 2 }, &tx);
+    assert_eq!(app.mode, Mode::Locked);
+    assert_eq!(app.jumped, None);
+}
+
+#[test]
+fn jumping_to_an_old_message_and_coming_back() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    app.handle_event(Event::Around { chat: id, msgs: long_history(40), focus: 10 }, &tx);
+    assert_eq!(app.jumped, Some(id));
+    assert_eq!(app.focus_msg, Some(10));
+    assert_eq!(app.histories[&id].len(), 40);
+
+    // запоздавший ответ загрузки последних сообщений не затирает кусок
+    app.handle_event(Event::History { chat: id, msgs: long_history(3) }, &tx);
+    assert_eq!(app.histories[&id].len(), 40);
+
+    // новое сообщение не вставляется посреди старой переписки, а только отмечается
+    let unread = app.chats.iter().find(|c| c.id == id).unwrap().unread;
+    app.handle_event(Event::Incoming { chat: id, chat_name: "Мама".into(), msg: msg(900, false, "Мама", "новое") }, &tx);
+    assert_eq!(app.histories[&id].len(), 40);
+    assert_eq!(app.chats.iter().find(|c| c.id == id).unwrap().unread, unread + 1);
+
+    // PgDn у самого низа возвращает к последним
+    app.scroll = 0;
+    press(&mut app, KeyCode::PageDown, &tx, &s);
+    assert_eq!(app.jumped, None);
+    assert!(matches!(rx.try_recv(), Ok(Cmd::LoadHistory(..))));
+
+    // то же по Esc и по /latest
+    for how in ["esc", "cmd"] {
+        app.handle_event(Event::Around { chat: id, msgs: long_history(40), focus: 10 }, &tx);
+        app.focus_msg = None;
+        if how == "esc" {
+            press(&mut app, KeyCode::Esc, &tx, &s);
+        } else {
+            submit_text(&mut app, "/latest", &tx, &s);
+        }
+        assert_eq!(app.jumped, None, "{how}");
+        assert!(matches!(rx.try_recv(), Ok(Cmd::LoadHistory(..))), "{how}");
+    }
+}
+
+#[test]
+fn leaving_a_jumped_chat_drops_the_old_slice() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.handle_event(Event::Around { chat: id, msgs: long_history(40), focus: 10 }, &tx);
+    app.move_selection(1);
+    assert_ne!(app.sel, Some(id));
+    assert_eq!(app.jumped, None);
+    assert!(!app.histories.contains_key(&id), "при возвращении история загрузится заново");
+}
+
+#[test]
+fn found_message_is_centered_and_marked_on_screen() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.handle_event(Event::Around { chat: id, msgs: long_history(100), focus: 20 }, &tx);
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("сообщение №20"), "найденное сообщение на экране");
+    assert!(!text.contains("сообщение №100"), "а не последнее");
+    assert!(text.contains("к последним"), "подсказка, как вернуться: {text}");
+    assert!(!app.focus_pending);
+    assert!(app.max_scroll > 0);
+}
+
+#[test]
+fn search_overlay_and_help_render_on_small_screens() {
+    for lang in [0, 1] {
+        crate::i18n::set(lang);
+        let mut app = app_with_chats();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let long = "очень длинный текст найденного сообщения ".repeat(8);
+        app.handle_event(Event::SearchResults { query: "q".into(), scope: None, hits: vec![hit(1, 1, &long), hit(2, 2, "x")] }, &tx);
+        for (w, h) in [(110u16, 40u16), (80, 24), (40, 12)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(f, &mut app)).unwrap();
+        }
+        let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(dump(&term).contains("Enter"), "подсказка окна поиска ({lang})");
+    }
+    crate::i18n::set(0);
 }

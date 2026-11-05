@@ -77,6 +77,7 @@ which is the main reason it is so small.
 - `/links` lists links of the chat, Enter opens one in the browser.
 
 **Managing chats**
+- `/findmsg text` searches messages in the open chat, `/findall text` in all chats; `Enter` on a result opens it in its surroundings (`PgDn` or `Esc` goes back to the latest messages, also `/latest`). `PgUp` at the top of a conversation loads older messages (up to 1500 per chat; use search beyond that).
 - `/find text` (`F6`, `Ctrl+F`) filters chats by name, `/pin` pins a chat, `/readall` marks everything read, `/export` saves a conversation to `export/<chat>.txt`.
 
 **Comfort**
@@ -132,7 +133,7 @@ Every action has both a key and a command, in case a key does not work in your c
 | Ctrl+V / Shift+Insert | `/paste` | paste from the clipboard |
 | ↑ / ↓, Tab / Shift+Tab | | choose a chat, switch tabs |
 | Alt+↑ / Alt+↓ | | earlier messages and commands (↑ ↓ do this too when the input has text) |
-| PgUp / PgDn | | scroll the conversation |
+| PgUp / PgDn | | scroll the conversation; PgUp at the top loads older messages |
 | Esc | | clear the input; then cancel edit or reply; then reset search |
 | F1 | `/help` | help |
 | F2 | `/lock` | lock |
@@ -140,6 +141,7 @@ Every action has both a key and a command, in case a key does not work in your c
 | F4 | `/settings` | settings |
 | F5 | `/refresh` | refresh chat list |
 | F6 | `/find text` | search chats |
+| | `/findmsg text` `/findall text` `/latest` | search messages in this chat or everywhere, back to the latest messages |
 | F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links |
 | F10 | `/quit` | quit |
 | | `/pin` `/readall` `/export` | pin chat, read everything, export |
@@ -204,7 +206,7 @@ The same list is available in the program as `/faq`.
 
 - Text only: photos, voice, stickers and video are shown as labels (open them with `/open` or download with `/save`). Emoji are hidden.
 - No secret chats and no calls.
-- Only the first 120 chats are loaded; all tabs and folders are built from them.
+- Up to 3000 chats are loaded (the first 100 appear at once, the rest follow); all tabs and folders are built from them. At most 1500 messages per chat are kept in memory.
 - The proxy mode is applied on the next start; the sign-in screen always uses the "Aurora" background (settings are inside the encrypted vault).
 - Self-destruct works on the lock screen, not at the startup password prompt.
 - If Telegram is blocked where you live you need a VPN or a proxy.
@@ -213,7 +215,9 @@ The same list is available in the program as `/faq`.
 
 ## Roadmap
 
-**1.0.1 (this version):** `/open` and `/copy`, input history on Alt+↑ / Alt+↓, HTTP proxies with a login.
+**1.0.1:** `/open` and `/copy`, input history on Alt+↑ / Alt+↓, HTTP proxies with a login.
+
+**1.0.2 (this version):** all chats instead of the first 120, older history on PgUp, message search (`/findmsg`, `/findall`) with the result opened in its context.
 
 **1.0.0** is the first complete release: clipboard paste, English and Russian interface, first-run wizard, built-in FAQ,
 CI with checksummed releases, and a full code audit whose findings are covered by regression tests. Not planned: a graphical app with
@@ -306,6 +310,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - `/links` — ссылки чата, Enter открывает ссылку в браузере.
 
 **Управление чатами**
+- `/findmsg текст` — поиск сообщений в открытом чате, `/findall текст` — во всех чатах; `Enter` на результате открывает его среди соседних сообщений (`PgDn` или `Esc` возвращает к последним, также `/latest`). `PgUp` у верха переписки подгружает старые сообщения (до 1500 на чат; дальше помогает поиск).
 - `/find текст` (`F6`, `Ctrl+F`) — поиск по названиям, `/pin` — закрепить, `/readall` — всё прочитано, `/export` — сохранить переписку в `export/<чат>.txt`.
 
 **Удобство**
@@ -361,7 +366,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | Ctrl+V / Shift+Insert | `/paste` | вставить из буфера обмена |
 | ↑ / ↓, Tab / Shift+Tab | | выбор чата, вкладки |
 | Alt+↑ / Alt+↓ | | прошлые сообщения и команды (↑ ↓ делают то же, когда в поле есть текст) |
-| PgUp / PgDn | | прокрутка переписки |
+| PgUp / PgDn | | прокрутка переписки; PgUp у верха подгружает старые сообщения |
 | Esc | | очистить ввод; затем отменить правку или ответ; затем сбросить поиск |
 | F1 | `/help` | справка |
 | F2 | `/lock` | заблокировать |
@@ -369,6 +374,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | F4 | `/settings` | настройки |
 | F5 | `/refresh` | обновить список чатов |
 | F6 | `/find текст` | поиск по чатам |
+| | `/findmsg текст` `/findall текст` `/latest` | поиск сообщений в этом чате или везде, назад к последним |
 | F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки |
 | F10 | `/quit` | выход |
 | | `/pin` `/readall` `/export` | закрепить чат, прочитать всё, сохранить переписку |
@@ -433,7 +439,7 @@ workflow релиза их не использует, поэтому exe из р
 
 - Только текст: фото, голосовые, стикеры и видео показываются подписями (откройте через `/open` или скачайте через `/save`). Эмодзи скрыты.
 - Нет секретных чатов и звонков.
-- Загружаются только первые 120 чатов; все вкладки и папки строятся из них.
+- Загружается до 3000 чатов (первые 100 появляются сразу, остальные следом); все вкладки и папки строятся из них. В памяти хранится не больше 1500 сообщений на чат.
 - Режим прокси применяется при следующем запуске; экран входа всегда с фоном «Аврора» (настройки лежат внутри зашифрованного файла).
 - Самоуничтожение работает на экране блокировки, но не при первом запросе пароля при запуске.
 - Если Telegram у вас заблокирован, нужен VPN или прокси.
@@ -442,7 +448,9 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Планы
 
-**1.0.1 (эта версия):** `/open` и `/copy`, история ввода на Alt+↑ / Alt+↓, HTTP-прокси с логином.
+**1.0.1:** `/open` и `/copy`, история ввода на Alt+↑ / Alt+↓, HTTP-прокси с логином.
+
+**1.0.2 (эта версия):** все чаты вместо первых 120, старая история по PgUp, поиск сообщений (`/findmsg`, `/findall`) с открытием найденного в контексте.
 
 **1.0.0** — первый законченный выпуск: вставка из буфера, интерфейс на русском и английском, мастер первого запуска,
 подсказки внутри программы, CI с релизами и контрольными суммами, полный аудит кода, все находки которого закрыты регрессионными

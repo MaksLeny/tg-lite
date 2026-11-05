@@ -22,7 +22,12 @@ use crate::vault::VaultSession;
 use crate::{tr, trf};
 
 /// Сколько диалогов держим в памяти. Небольшое число = мало ОЗУ.
-const MAX_DIALOGS: usize = 120;
+/// Первая страница списка чатов: приходит быстро и обновляется каждые пару минут.
+const QUICK_DIALOGS: usize = 100;
+/// Предел полного списка чатов (страницами по 100): защита от аккаунтов с десятками тысяч диалогов.
+const MAX_DIALOGS: usize = 3000;
+/// Сколько результатов поиска показывать.
+const MAX_HITS: usize = 40;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -224,11 +229,46 @@ pub struct ChatMsg {
     pub mentioned: bool,
 }
 
+/// Найденное сообщение.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchHit {
+    pub chat: PeerId,
+    pub chat_name: String,
+    pub id: i32,
+    pub ts: i64,
+    pub when: String,
+    pub sender: String,
+    pub text: String,
+}
+
 /// Команды от интерфейса к фоновому обработчику.
 pub enum Cmd {
-    /// Список чатов (а следом и папки).
+    /// Обновить начало списка чатов (первые 100) и папки; новое вливается в имеющийся список.
     LoadDialogs,
+    /// Загрузить весь список чатов страницами по 100 (при запуске и по F5).
+    LoadAllDialogs,
     LoadHistory(ChatInfo, usize),
+    /// Подгрузить сообщения старше `before` (PgUp у самого верха переписки).
+    LoadOlder {
+        chat: ChatInfo,
+        before: i32,
+        limit: usize,
+    },
+    /// Загрузить окружение найденного сообщения: оно и соседние с ним.
+    LoadAround {
+        chat: ChatInfo,
+        id: i32,
+        ts: i64,
+    },
+    /// Найти текст в одном чате.
+    SearchChat {
+        chat: ChatInfo,
+        query: String,
+    },
+    /// Найти текст во всех чатах.
+    SearchAll {
+        query: String,
+    },
     Send {
         chat: ChatInfo,
         text: String,
@@ -331,6 +371,25 @@ pub enum Event {
     Scheduled {
         chat: PeerId,
         items: Vec<ScheduledMsg>,
+    },
+    /// Часть списка чатов (самые свежие): вливается в имеющийся список, ничего не удаляя.
+    DialogsPage(Vec<ChatInfo>),
+    /// Более старые сообщения чата; пустой список значит, что история закончилась.
+    Older {
+        chat: PeerId,
+        msgs: Vec<ChatMsg>,
+    },
+    /// Окружение найденного сообщения `focus`.
+    Around {
+        chat: PeerId,
+        msgs: Vec<ChatMsg>,
+        focus: i32,
+    },
+    /// Результаты поиска; `scope` — чат поиска или `None` для поиска по всем чатам.
+    SearchResults {
+        query: String,
+        scope: Option<PeerId>,
+        hits: Vec<SearchHit>,
     },
     /// Файл для просмотра скачан: интерфейс открывает его.
     Open(PathBuf),
@@ -633,33 +692,47 @@ fn folder_from_raw(f: &tl::enums::DialogFilter) -> Option<Folder> {
 
 // ------------------------------------------------------------ операции
 
-pub async fn load_dialogs(client: &Client) -> Result<Vec<ChatInfo>> {
+fn dialog_info(d: &grammers_client::peer::Dialog) -> ChatInfo {
+    let (name, presence, is_contact, is_bot, is_self) = match d.peer() {
+        Peer::User(u) => {
+            let is_self = u.is_self();
+            let name = if is_self { tr!("Избранное", "Saved Messages").to_string() } else { crate::util::clean(&u.full_name()) };
+            let presence = if is_self { None } else { Some(presence_from(u.status())) };
+            (name, presence, u.contact(), u.is_bot(), is_self)
+        }
+        p => (crate::util::clean(p.name().unwrap_or(tr!("(без имени)", "(no name)"))), None, false, false, false),
+    };
+    ChatInfo {
+        id: d.peer_id(),
+        peer: d.peer_ref(),
+        name: if name.trim().is_empty() { tr!("(без имени)", "(no name)").to_string() } else { name.trim().to_string() },
+        kind: kind_of(d.peer()),
+        unread: dialog_unread(d),
+        mentions: dialog_mentions(d),
+        presence,
+        is_contact,
+        is_bot,
+        is_self,
+    }
+}
+
+/// Загружает чаты страницами (Telegram отдаёт по 100) до `limit`. Если передан `progress`, первая страница уходит
+/// интерфейсу сразу, а дальше сообщается, сколько чатов уже загружено.
+pub async fn load_dialogs(client: &Client, limit: usize, progress: Option<&mpsc::UnboundedSender<Event>>) -> Result<Vec<ChatInfo>> {
     let mut it = client.iter_dialogs();
     let mut out = Vec::new();
     while let Some(d) = it.next().await? {
-        let (name, presence, is_contact, is_bot, is_self) = match d.peer() {
-            Peer::User(u) => {
-                let is_self = u.is_self();
-                let name =
-                    if is_self { tr!("Избранное", "Saved Messages").to_string() } else { crate::util::clean(&u.full_name()) };
-                let presence = if is_self { None } else { Some(presence_from(u.status())) };
-                (name, presence, u.contact(), u.is_bot(), is_self)
+        out.push(dialog_info(&d));
+        if let Some(tx) = progress
+            && out.len() % QUICK_DIALOGS == 0
+        {
+            if out.len() == QUICK_DIALOGS {
+                let _ = tx.send(Event::DialogsPage(out.clone()));
+            } else {
+                let _ = tx.send(Event::Status(trf!("Загружено чатов: {}…", "Chats loaded: {}…", out.len())));
             }
-            p => (crate::util::clean(p.name().unwrap_or(tr!("(без имени)", "(no name)"))), None, false, false, false),
-        };
-        out.push(ChatInfo {
-            id: d.peer_id(),
-            peer: d.peer_ref(),
-            name: if name.trim().is_empty() { tr!("(без имени)", "(no name)").to_string() } else { name.trim().to_string() },
-            kind: kind_of(d.peer()),
-            unread: dialog_unread(&d),
-            mentions: dialog_mentions(&d),
-            presence,
-            is_contact,
-            is_bot,
-            is_self,
-        });
-        if out.len() >= MAX_DIALOGS {
+        }
+        if out.len() >= limit {
             break;
         }
     }
@@ -679,6 +752,68 @@ pub async fn load_history(client: &Client, chat: &ChatInfo, limit: usize) -> Res
         out.push(to_chat_msg(&m, &chat.name));
     }
     out.reverse(); // от старых к новым
+    Ok(out)
+}
+
+/// Сообщения старше `before` (не включая его), от старых к новым.
+pub async fn load_older(client: &Client, chat: &ChatInfo, before: i32, limit: usize) -> Result<Vec<ChatMsg>> {
+    let mut it = client.iter_messages(chat.peer).offset_id(before).limit(limit);
+    let mut out = Vec::new();
+    while let Some(m) = it.next().await? {
+        out.push(to_chat_msg(&m, &chat.name));
+    }
+    out.reverse();
+    Ok(out)
+}
+
+/// Сообщение `id` и его окружение: сначала по дате (чуть позже найденного), а если оно не попало, то по номеру.
+pub async fn load_around(client: &Client, chat: &ChatInfo, id: i32, ts: i64) -> Result<Vec<ChatMsg>> {
+    let after = (ts + 2 * 3600).clamp(0, i64::from(i32::MAX)) as i32;
+    let mut it = client.iter_messages(chat.peer).offset_date(after).limit(60);
+    let mut out = Vec::new();
+    while let Some(m) = it.next().await? {
+        out.push(to_chat_msg(&m, &chat.name));
+    }
+    if !out.iter().any(|m| m.id == id) {
+        out.clear();
+        let mut it = client.iter_messages(chat.peer).offset_id(id.saturating_add(1)).limit(60);
+        while let Some(m) = it.next().await? {
+            out.push(to_chat_msg(&m, &chat.name));
+        }
+    }
+    out.reverse();
+    Ok(out)
+}
+
+fn hit_from(m: &Message, chat_name: &str) -> SearchHit {
+    let c = to_chat_msg(m, chat_name);
+    SearchHit { chat: m.peer_id(), chat_name: chat_name.to_string(), id: c.id, ts: c.ts, when: c.time, sender: c.sender, text: c.text }
+}
+
+/// Поиск текста в одном чате (сервер ищет нечётко: учитывает формы слов).
+pub async fn search_chat(client: &Client, chat: &ChatInfo, query: &str) -> Result<Vec<SearchHit>> {
+    let mut it = client.search_messages(chat.peer).query(query);
+    let mut out = Vec::new();
+    while let Some(m) = it.next().await? {
+        out.push(hit_from(&m, &chat.name));
+        if out.len() >= MAX_HITS {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Поиск текста во всех чатах.
+pub async fn search_all(client: &Client, query: &str) -> Result<Vec<SearchHit>> {
+    let mut it = client.search_all_messages().query(query);
+    let mut out = Vec::new();
+    while let Some(m) = it.next().await? {
+        let name = m.peer().and_then(|p| p.name().map(crate::util::clean)).unwrap_or_default();
+        out.push(hit_from(&m, &name));
+        if out.len() >= MAX_HITS {
+            break;
+        }
+    }
     Ok(out)
 }
 
@@ -978,13 +1113,19 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
-                Cmd::LoadDialogs => {
+                Cmd::LoadDialogs | Cmd::LoadAllDialogs => {
+                    let all = matches!(cmd, Cmd::LoadAllDialogs);
                     let client = client.clone();
                     let events = events.clone();
                     tokio::spawn(async move {
-                        match load_dialogs(&client).await {
+                        let loaded = if all {
+                            load_dialogs(&client, MAX_DIALOGS, Some(&events)).await
+                        } else {
+                            load_dialogs(&client, QUICK_DIALOGS, None).await
+                        };
+                        match loaded {
                             Ok(d) => {
-                                let _ = events.send(Event::Dialogs(d));
+                                let _ = events.send(if all { Event::Dialogs(d) } else { Event::DialogsPage(d) });
                             }
                             Err(e) => {
                                 log(&format!("dialogs: {e}"));
@@ -998,6 +1139,66 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                             }
                             // Папки не критичны: без них остаются вкладки «Все / Личные / Группы / Каналы».
                             Err(e) => log(&format!("folders: {e}")),
+                        }
+                    });
+                }
+                Cmd::LoadOlder { chat, before, limit } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match load_older(&client, &chat, before, limit).await {
+                            Ok(msgs) => {
+                                let _ = events.send(Event::Older { chat: chat.id, msgs });
+                            }
+                            Err(e) => {
+                                log(&format!("older: {e}"));
+                                let _ = events.send(Event::Error(trf!("история: {e}", "history: {e}")));
+                            }
+                        }
+                    });
+                }
+                Cmd::LoadAround { chat, id, ts } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match load_around(&client, &chat, id, ts).await {
+                            Ok(msgs) => {
+                                let _ = events.send(Event::Around { chat: chat.id, msgs, focus: id });
+                            }
+                            Err(e) => {
+                                log(&format!("around: {e}"));
+                                let _ = events.send(Event::Error(trf!("история: {e}", "history: {e}")));
+                            }
+                        }
+                    });
+                }
+                Cmd::SearchChat { chat, query } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match search_chat(&client, &chat, &query).await {
+                            Ok(hits) => {
+                                let _ = events.send(Event::SearchResults { query, scope: Some(chat.id), hits });
+                            }
+                            Err(e) => {
+                                log(&format!("search: {e}"));
+                                let _ = events.send(Event::Error(trf!("поиск: {e}", "search: {e}")));
+                            }
+                        }
+                    });
+                }
+                Cmd::SearchAll { query } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match search_all(&client, &query).await {
+                            Ok(hits) => {
+                                let _ = events.send(Event::SearchResults { query, scope: None, hits });
+                            }
+                            Err(e) => {
+                                log(&format!("search: {e}"));
+                                let _ = events.send(Event::Error(trf!("поиск: {e}", "search: {e}")));
+                            }
                         }
                     });
                 }

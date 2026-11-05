@@ -226,7 +226,8 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
                 vec![Line::from(Span::styled(tr!("Сообщений пока нет", "No messages yet"), Style::new().fg(MUTED)))]
             }
             Some(msgs) => {
-                let sel = if picking { Some(app.pick.min(msgs.len() - 1)) } else { None };
+                let focus = app.focus_msg.and_then(|fid| msgs.iter().position(|m| m.id == fid));
+                let sel = if picking { Some(app.pick.min(msgs.len() - 1)) } else { focus };
                 let (l, r) = build_message_lines(msgs, width, app.settings.bubble_pct(), sel, app.theme.select_bg);
                 ranges = r;
                 l
@@ -255,6 +256,16 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     let max_scroll = lines.len().saturating_sub(height);
+    if app.focus_pending {
+        // Найденное сообщение ставим примерно посередине окна.
+        let idx = app.sel.and_then(|id| app.histories.get(&id)).and_then(|h| h.iter().position(|m| Some(m.id) == app.focus_msg));
+        if let Some(&(s0, e0)) = idx.and_then(|i| ranges.get(i)) {
+            let mid_end = ((s0 + e0) / 2 + height / 2).min(lines.len());
+            app.scroll = lines.len() - mid_end;
+        }
+        app.focus_pending = false;
+    }
+    app.max_scroll = max_scroll;
     app.scroll = app.scroll.min(max_scroll);
     let end = lines.len() - app.scroll;
     let start = end.saturating_sub(height);
@@ -274,6 +285,14 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         let w = display_width(&tag) as u16;
         if area.width > w + 2 {
             let r = Rect { x: area.x + area.width - w - 2, y: area.y, width: w, height: 1 };
+            f.render_widget(Paragraph::new(tag).style(Style::new().fg(Color::Black).bg(app.theme.accent)), r);
+        }
+    }
+    if app.sel.is_some() && app.jumped == app.sel && area.height > 3 {
+        let tag = tr!(" старая переписка · PgDn или Esc — к последним ", " older messages · PgDn or Esc: latest ").to_string();
+        let w = display_width(&tag) as u16;
+        if area.width > w + 2 {
+            let r = Rect { x: area.x + area.width - w - 2, y: area.y + area.height - 1, width: w, height: 1 };
             f.render_widget(Paragraph::new(tag).style(Style::new().fg(Color::Black).bg(app.theme.accent)), r);
         }
     }
@@ -353,6 +372,9 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &App) {
             tr!(" ↑ ↓ выбрать · Enter — открыть в браузере · Esc — закрыть", " ↑ ↓ select · Enter — open in browser · Esc — close")
         }
         OverlayKind::Links => "",
+        OverlayKind::Search => {
+            tr!(" ↑ ↓ выбрать · Enter — открыть в чате · Esc — закрыть", " ↑ ↓ select · Enter — open in chat · Esc — close")
+        }
         OverlayKind::Faq => tr!(
             " ↑ ↓ — читать · Esc — закрыть · связь с автором: @maks1m_salov",
             " ↑ ↓ — read · Esc — close · contact the author: @maks1m_salov"
@@ -508,6 +530,13 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
             tr!(
                 "открыть вложение программой Windows (O в F7); копировать текст сообщения (C в F7)",
                 "open an attachment with the default app (O in F7); copy message text (C in F7)"
+            ),
+        ),
+        key(
+            "/findmsg /findall",
+            tr!(
+                "найти сообщения в чате или во всех чатах; PgUp у верха подгружает старые",
+                "search messages in this chat or in all chats; PgUp at the top loads older ones"
             ),
         ),
         key(
