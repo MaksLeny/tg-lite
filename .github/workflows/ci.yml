@@ -14,9 +14,9 @@ env:
 jobs:
   lint:
     name: fmt, clippy, tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -27,10 +27,10 @@ jobs:
 
   audit:
     name: cargo audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit --locked
       - run: cargo audit
@@ -39,7 +39,7 @@ jobs:
     name: Windows exe
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release
@@ -51,7 +51,7 @@ jobs:
           $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
           "tg-lite.exe: $([math]::Round($f.Length / 1KB)) KB" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           "SHA256: $hash" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: tg-lite-windows-x64
           path: target/release/tg-lite.exe

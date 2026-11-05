@@ -12,7 +12,7 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release
@@ -24,7 +24,7 @@ jobs:
           Copy-Item target/release/tg-lite.exe dist/tg-lite.exe
           $hash = (Get-FileHash dist/tg-lite.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  tg-lite.exe" | Out-File -Encoding ascii dist/tg-lite.exe.sha256
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/tg-lite.exe
