@@ -1,0 +1,82 @@
+name: Post release to Telegram
+
+# Когда вы публикуете релиз на GitHub, в Telegram-канал уходят два сообщения:
+# русская часть описания (в стиле канала) и файл tg-lite.exe.
+# Нужны секреты репозитория TG_BOT_TOKEN (токен бота из @BotFather) и TG_CHAT_ID (@имя_канала или -100…);
+# бот должен быть админом канала с правом публиковать посты.
+# Вручную: вкладка Actions → Post release to Telegram → Run workflow (можно «dry run» — ничего не отправлять).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза, например v1.3.0"
+        required: true
+      dry_run:
+        description: "Только показать пост в журнале, ничего не отправлять"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check secrets
+        if: env.DRY_RUN != 'true'
+        run: |
+          [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || { echo "::error::Добавьте секреты TG_BOT_TOKEN и TG_CHAT_ID (Settings → Secrets and variables → Actions)"; exit 1; }
+
+      - name: Read the release
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json name,body,isDraft,isPrerelease > release.json
+          if [ "$(jq -r '.isDraft or .isPrerelease' release.json)" = "true" ]; then
+            echo "Черновики и пререлизы в канал не отправляются"; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0
+          fi
+          jq -r '.name // ""' release.json > name.txt
+          jq -r '.body // ""' release.json > body.md
+
+      - name: Wait for tg-lite.exe in the release
+        if: env.SKIP != '1'
+        run: |
+          # Файл прикрепляет workflow Release; он может закончиться позже, чем вы нажали «Publish».
+          for i in $(seq 1 60); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx 'tg-lite.exe'; then
+              gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern tg-lite.exe --clobber
+              ls -l tg-lite.exe
+              exit 0
+            fi
+            echo "tg-lite.exe ещё не прикреплён, жду ($i/60)"; sleep 20
+          done
+          echo "::error::tg-lite.exe не появился в релизе за 20 минут"; exit 1
+
+      - name: Build the post
+        if: env.SKIP != '1'
+        run: |
+          python3 tools/release_post.py name.txt body.md > post.txt
+          echo "----- пост -----"; cat post.txt; echo "----------------"
+
+      - name: Send to Telegram
+        if: env.SKIP != '1' && env.DRY_RUN != 'true'
+        run: |
+          api="https://api.telegram.org/bot${TG_BOT_TOKEN}"
+          curl -sS --fail-with-body "$api/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text@post.txt" \
+            -d disable_web_page_preview=true -o /dev/null
+          curl -sS --fail-with-body "$api/sendDocument" \
+            -F "chat_id=${TG_CHAT_ID}" \
+            -F "document=@tg-lite.exe" \
+            -F "caption=tg-lite.exe" -o /dev/null
+          echo "Отправлено в канал"
