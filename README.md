@@ -213,7 +213,7 @@ The same list is available in the program as `/faq`.
 | No connection | Telegram may be blocked: use a VPN or `/proxy 127.0.0.1:port`, then restart |
 | Antivirus complains | The exe is unsigned and built from open source; build it yourself or compare SHA256 with the release |
 | Forgot the password | It cannot be recovered: delete `tglite.vault` and sign in again |
-| No sound | `F4` → "Sound on new message": on; the beep goes through the sound card, check the volume |
+| No sound | `F4` → "Sound on new message": on; the click plays through the system sound, check the volume and that Windows audio is working |
 | Anything else | Run `tg-lite --debug` and send `tglite.log` (no message text in it). Author: Telegram **@maks1m_salov** |
 
 ## Limits
@@ -229,7 +229,9 @@ The same list is available in the program as `/faq`.
 
 ## Roadmap
 
-**1.3.0 (this version):** reactions (shown and set with `1`–`6` in `F7`), jump to the original of a reply (`G`, back with `B`), buttons of bot messages (`K`), a growing pause after wrong passwords, “Yesterday” in day separators, color themes (dark, light, high contrast, Solarized).
+**1.3.1 (this version):** one new icon for the exe and the repository, a softer notification sound, and the session in Telegram → Settings → Devices is now named `Tg-Lite v1.3.1 (Windows)`.
+
+**1.3.0:** reactions (shown and set with `1`–`6` in `F7`), jump to the original of a reply (`G`, back with `B`), buttons of bot messages (`K`), a growing pause after wrong passwords, “Yesterday” in day separators, color themes (dark, light, high contrast, Solarized).
 
 **1.2.0:** read marks in private chats, `/pinned`, `/chat @name`, `/join` and `/leave`, cloud drafts (synced with the phone), view counts under channel posts.
 
@@ -466,7 +468,7 @@ workflow релиза их не использует, поэтому exe из р
 | Нет подключения | Telegram может быть заблокирован: VPN или `/proxy 127.0.0.1:порт`, затем перезапуск |
 | Антивирус ругается | exe не подписан и собран из открытого кода; соберите сами или сверьте SHA256 с релизом |
 | Забыл пароль | Восстановить нельзя: удалите `tglite.vault` и войдите заново |
-| Нет звука | `F4` → «Звук при новом сообщении»: включить; сигнал идёт через звуковую карту, проверьте громкость |
+| Нет звука | `F4` → «Звук при новом сообщении»: включить; щелчок играет через системный звук, проверьте громкость и что звук Windows работает |
 | Другое | `tg-lite --debug`, затем пришлите `tglite.log` (без текстов переписки). Автор: Telegram **@maks1m_salov** |
 
 ## Ограничения
@@ -482,7 +484,9 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Планы
 
-**1.3.0 (эта версия):** реакции (показ и постановка клавишами `1`–`6` в `F7`), переход к оригиналу ответа (`G`, назад `B`), кнопки сообщений ботов (`K`), растущая пауза после неверных паролей, «Вчера» в разделителях дней, цветовые темы (тёмная, светлая, высокий контраст, Solarized).
+**1.3.1 (эта версия):** одна новая иконка для exe и репозитория, более мягкий звук уведомления, а сеанс в Telegram → Настройки → Устройства теперь называется `Tg-Lite v1.3.1 (Windows)`.
+
+**1.3.0:** реакции (показ и постановка клавишами `1`–`6` в `F7`), переход к оригиналу ответа (`G`, назад `B`), кнопки сообщений ботов (`K`), растущая пауза после неверных паролей, «Вчера» в разделителях дней, цветовые темы (тёмная, светлая, высокий контраст, Solarized).
 
 **1.2.0:** отметки прочтения в личных чатах, `/pinned`, `/chat @имя`, `/join` и `/leave`, облачные черновики (синхронизация с телефоном), просмотры под постами каналов.
 

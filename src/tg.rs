@@ -490,10 +490,28 @@ pub struct Connection {
     pub updates: mpsc::Receiver<grammers_session::updates::UpdatesLike>,
 }
 
+/// Название устройства для списка сеансов Telegram, например «Tg-Lite v1.3.0 (Windows)».
+pub fn device_name() -> String {
+    let os = match std::env::consts::OS {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    };
+    format!("Tg-Lite v{} ({os})", env!("CARGO_PKG_VERSION"))
+}
+
 /// Подключается к Telegram, используя сессию из хранилища.
 /// `proxy` — необязательный SOCKS5-прокси вида `socks5://127.0.0.1:1080`.
 pub fn connect(session: Arc<VaultSession>, api_id: i32, proxy: Option<String>) -> Connection {
-    let params = grammers_mtsender::ConnectionParams { proxy_url: proxy, retry_policy: Box::new(FloodPolicy), ..Default::default() };
+    // Так клиент называется в Telegram → Настройки → Устройства.
+    let params = grammers_mtsender::ConnectionParams {
+        proxy_url: proxy,
+        retry_policy: Box::new(FloodPolicy),
+        device_model: device_name(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        ..Default::default()
+    };
     let SenderPool { runner, updates, handle } = SenderPool::with_configuration(session, api_id, params);
     let client = Client::new(handle.clone());
     tokio::spawn(runner.run());

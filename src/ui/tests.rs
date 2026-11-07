@@ -1762,8 +1762,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.3.0"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.3.0");
+    assert!(README.contains("1.3.1"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.3.1");
 }
 
 #[test]
@@ -3169,4 +3169,11 @@ fn new_pick_keys_are_in_help_and_hint() {
     app.pick = last;
     term.draw(|f| draw(f, &mut app)).unwrap();
     assert!(dump(&term).contains("G к оригиналу"), "подсказка показывает G только для ответа");
+}
+
+#[test]
+fn device_name_shows_the_app_and_its_version() {
+    let n = crate::tg::device_name();
+    assert!(n.starts_with(&format!("Tg-Lite v{VERSION} (")), "{n}");
+    assert!(n.len() < 64, "короткое название для списка сеансов");
 }

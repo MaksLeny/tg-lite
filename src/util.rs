@@ -11,19 +11,34 @@ pub fn data_dir() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Звуковой сигнал о новом сообщении. На Windows играет тон через звуковую карту (функция Beep),
-/// поэтому работает независимо от схемы системных звуков и от консоли; в отдельном потоке,
-/// чтобы не задерживать интерфейс.
+/// Короткий мягкий щелчок (WAV, около 9 КБ), встроенный в exe.
+#[cfg(any(windows, test))]
+static NOTIFY_WAV: &[u8] = include_bytes!("../assets/notify.wav");
+
+/// Звуковой сигнал о новом сообщении. На Windows проигрывает встроенный щелчок через системный звук
+/// (PlaySound из памяти, асинхронно, интерфейс не задерживается); если не получилось, подаёт два тона
+/// функцией Beep. Не зависит от схемы системных звуков и от консоли.
 pub fn play_alert() {
     #[cfg(windows)]
     {
+        #[link(name = "winmm")]
+        unsafe extern "system" {
+            fn PlaySoundW(sound: *const u16, module: *mut core::ffi::c_void, flags: u32) -> i32;
+        }
         unsafe extern "system" {
             fn Beep(freq: u32, millis: u32) -> i32;
         }
-        std::thread::spawn(|| unsafe {
-            Beep(988, 80);
-            Beep(1319, 120);
-        });
+        const SND_ASYNC: u32 = 0x0001;
+        const SND_NODEFAULT: u32 = 0x0002;
+        const SND_MEMORY: u32 = 0x0004;
+        // Буфер статический, поэтому остаётся доступным, пока звук играет в фоне.
+        let ok = unsafe { PlaySoundW(NOTIFY_WAV.as_ptr().cast(), core::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
+        if ok == 0 {
+            std::thread::spawn(|| unsafe {
+                Beep(988, 80);
+                Beep(1319, 120);
+            });
+        }
     }
     #[cfg(not(windows))]
     {
@@ -489,6 +504,15 @@ pub fn reaction_label(emoji: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notify_sound_is_a_small_valid_wav() {
+        let w = super::NOTIFY_WAV;
+        assert!(w.len() > 1000 && w.len() < 20_000, "{}", w.len());
+        assert_eq!(&w[0..4], b"RIFF");
+        assert_eq!(&w[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes([w[20], w[21]]), 1, "обычный PCM");
+    }
+
     use super::*;
 
     #[test]

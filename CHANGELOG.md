@@ -1,5 +1,9 @@
 # Changelog / История версий
 
+## 1.3.1
+- EN: one new icon (a chat bubble with a command prompt) for the exe, the README and the repository; the notification is now a short soft click played through the system sound (with the old beep as a fallback); in Telegram → Settings → Devices the session is named `Tg-Lite v1.3.1 (Windows)` instead of `Windows 64-bit`, and the app version is the real one instead of the library's.
+- RU: новая иконка (пузырь чата с командной строкой) для exe, README и репозитория; уведомление теперь короткий мягкий щелчок через системный звук (старый писк остаётся запасным вариантом); в Telegram → Настройки → Устройства сеанс называется `Tg-Lite v1.3.1 (Windows)` вместо `Windows 64-bit`, а версия приложения настоящая, а не версия библиотеки.
+
 ## 1.3.0
 - EN: reactions under messages (short words such as `+1 3`, yours in brackets; `1`–`6` in `F7` set one, the same digit or `0` removes it); `G` in `F7` jumps to the original of a reply and `B` goes back; buttons of bot messages are shown and pressed from the `K` list (Enter or a digit; link buttons open in the browser); after three wrong passwords the lock screen asks you to wait 5, 10, 20 … seconds (up to 5 minutes); day separators say "Yesterday"; new setting "Theme" (dark, light, high contrast, Solarized).
 - RU: реакции под сообщениями (короткие слова вроде `+1 3`, ваша в скобках; `1`–`6` в `F7` ставят реакцию, та же цифра или `0` снимает); `G` в `F7` переходит к оригиналу ответа, `B` возвращает; кнопки сообщений ботов показываются и нажимаются из списка `K` (Enter или цифра; кнопки-ссылки открываются в браузере); после трёх неверных паролей экран блокировки просит подождать 5, 10, 20 … секунд (до 5 минут); в разделителях дней есть «Вчера»; новая настройка «Тема» (тёмная, светлая, высокий контраст, Solarized).
