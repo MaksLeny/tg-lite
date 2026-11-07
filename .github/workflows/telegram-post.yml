@@ -71,12 +71,24 @@ jobs:
         if: env.SKIP != '1' && env.DRY_RUN != 'true'
         run: |
           api="https://api.telegram.org/bot${TG_BOT_TOKEN}"
-          curl -sS --fail-with-body "$api/sendMessage" \
+          # Ответ Telegram показываем в журнале (в нём нет токена), чтобы причина ошибки была видна.
+          send() {
+            code=$(curl -sS -o resp.json -w '%{http_code}' "$@") || code=000
+            if [ "$code" != "200" ]; then echo "Telegram ответил $code: $(cat resp.json 2>/dev/null)"; return 1; fi
+          }
+          send "$api/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT_ID}" \
             --data-urlencode "text@post.txt" \
-            -d disable_web_page_preview=true -o /dev/null
-          curl -sS --fail-with-body "$api/sendDocument" \
-            -F "chat_id=${TG_CHAT_ID}" \
-            -F "document=@tg-lite.exe" \
-            -F "caption=tg-lite.exe" -o /dev/null
-          echo "Отправлено в канал"
+            -d disable_web_page_preview=true || exit 1
+          echo "Текст отправлен"
+          for try in 1 2 3; do
+            if send "$api/sendDocument" \
+              -F "chat_id=${TG_CHAT_ID}" \
+              -F "document=@tg-lite.exe;type=application/octet-stream" \
+              -F "caption=tg-lite.exe" \
+              -F "disable_content_type_detection=true"; then
+              echo "Файл отправлен"; exit 0
+            fi
+            echo "Файл не ушёл, попытка $try из 3"; sleep 10
+          done
+          echo "::error::Текст отправлен, а файл tg-lite.exe нет: пришлите его в канал вручную"; exit 1
