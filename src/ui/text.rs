@@ -110,7 +110,7 @@ pub(super) fn truncate(s: &str, max: usize) -> String {
 
 pub(super) fn name_color(name: &str) -> Color {
     let h = name.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(u32::from(b)));
-    NAME_COLORS[(h as usize) % NAME_COLORS.len()]
+    palette().names[(h as usize) % 7]
 }
 
 /// Перенос по словам с учётом символов `\n` и ширины кириллицы.
@@ -192,11 +192,16 @@ pub(super) fn local_date(ts: i64, tz: &jiff::tz::TimeZone) -> Option<(i16, i8, i
     Some((d.year(), d.month(), d.day()))
 }
 
+fn is_yesterday(date: (i16, i8, i8), today: (i16, i8, i8)) -> bool {
+    jiff::civil::Date::new(today.0, today.1, today.2).and_then(|t| t.yesterday()).is_ok_and(|y| (y.year(), y.month(), y.day()) == date)
+}
+
 pub(super) fn day_label(date: (i16, i8, i8), today: Option<(i16, i8, i8)>) -> String {
     let (y, m, d) = date;
     let month = months().get((m as usize).wrapping_sub(1)).copied().unwrap_or("");
     match today {
         Some((ty, tm, td)) if (ty, tm, td) == (y, m, d) => tr!("Сегодня", "Today").to_string(),
+        Some(t) if is_yesterday(date, t) => tr!("Вчера", "Yesterday").to_string(),
         Some((ty, _, _)) if ty == y => trf!("{d} {month}", "{month} {d}"),
         _ => trf!("{d} {month} {y}", "{month} {d}, {y}"),
     }
@@ -258,12 +263,12 @@ pub(super) fn build_message_lines_marks(
             && Some(d) != prev_day
         {
             let label = format!("── {} ──", day_label(d, today));
-            lines.push(Line::from(Span::styled(label, Style::new().fg(MUTED))).centered());
+            lines.push(Line::from(Span::styled(label, Style::new().fg(muted()))).centered());
             prev_day = day;
         }
         let first = lines.len();
         let time = if m.edited { trf!("{} (изм.)", "{} (edited)", m.time) } else { m.time.clone() };
-        let note = |text: String| Span::styled(text, Style::new().fg(MUTED).add_modifier(Modifier::ITALIC));
+        let note = |text: String| Span::styled(text, Style::new().fg(muted()).add_modifier(Modifier::ITALIC));
         let inner = bubble.saturating_sub(2);
 
         // Пометки: «переслано» и «в ответ на …».
@@ -290,33 +295,38 @@ pub(super) fn build_message_lines_marks(
                 Line::from(vec![
                     Span::styled(
                         m.views.map(|v| trf!("{} просм. · ", "{} views · ", short_count(v))).unwrap_or_default(),
-                        Style::new().fg(MUTED),
+                        Style::new().fg(muted()),
                     ),
-                    Span::styled(format!("{time} "), Style::new().fg(MUTED)),
-                    Span::styled(tr!("Я", "Me"), Style::new().fg(OWN).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{time} "), Style::new().fg(muted())),
+                    Span::styled(tr!("Я", "Me"), Style::new().fg(own()).add_modifier(Modifier::BOLD)),
                     Span::styled(
                         read_out.map(|r| read_mark(m.id, r)).unwrap_or(""),
-                        Style::new().fg(if read_out.is_some_and(|r| m.id > 0 && m.id <= r) { OWN } else { MUTED }),
+                        Style::new().fg(if read_out.is_some_and(|r| m.id > 0 && m.id <= r) { own() } else { muted() }),
                     ),
                 ])
                 .right_aligned(),
             );
             for n in &notes {
-                lines.push(Line::from(vec![note(truncate(n, inner)), Span::styled(" │", Style::new().fg(OWN))]).right_aligned());
+                lines.push(Line::from(vec![note(truncate(n, inner)), Span::styled(" │", Style::new().fg(own()))]).right_aligned());
             }
             for l in wrap_lines(&m.text, inner) {
-                lines.push(Line::from(vec![Span::raw(l), Span::styled(" │", Style::new().fg(OWN))]).right_aligned());
+                lines.push(Line::from(vec![Span::raw(l), Span::styled(" │", Style::new().fg(own()))]).right_aligned());
+            }
+            for spans in extra_rows(m, inner) {
+                let mut spans = spans;
+                spans.push(Span::styled(" │", Style::new().fg(own())));
+                lines.push(Line::from(spans).right_aligned());
             }
         } else {
             let color = name_color(&m.sender);
             let mut head = Vec::new();
             if m.mentioned {
-                head.push(Span::styled("@ ", Style::new().fg(MENTION).add_modifier(Modifier::BOLD)));
+                head.push(Span::styled("@ ", Style::new().fg(mention()).add_modifier(Modifier::BOLD)));
             }
             head.push(Span::styled(m.sender.clone(), Style::new().fg(color).add_modifier(Modifier::BOLD)));
-            head.push(Span::styled(format!(" {time}"), Style::new().fg(MUTED)));
+            head.push(Span::styled(format!(" {time}"), Style::new().fg(muted())));
             if let Some(v) = m.views {
-                head.push(Span::styled(trf!(" · {} просм.", " · {} views", short_count(v)), Style::new().fg(MUTED)));
+                head.push(Span::styled(trf!(" · {} просм.", " · {} views", short_count(v)), Style::new().fg(muted())));
             }
             lines.push(Line::from(head));
             for n in &notes {
@@ -324,6 +334,11 @@ pub(super) fn build_message_lines_marks(
             }
             for l in wrap_lines(&m.text, inner) {
                 lines.push(Line::from(vec![Span::styled("│ ", Style::new().fg(color)), Span::raw(l)]));
+            }
+            for spans in extra_rows(m, inner) {
+                let mut row = vec![Span::styled("│ ", Style::new().fg(color))];
+                row.extend(spans);
+                lines.push(Line::from(row));
             }
         }
         if selected == Some(idx) {
@@ -335,6 +350,35 @@ pub(super) fn build_message_lines_marks(
         lines.push(Line::from(""));
     }
     (lines, ranges)
+}
+
+/// Строки под текстом сообщения: реакции и кнопки бота (ряд кнопок — одна строка).
+pub(super) fn extra_rows(m: &ChatMsg, inner: usize) -> Vec<Vec<Span<'static>>> {
+    let mut rows = Vec::new();
+    if !m.reactions.is_empty() {
+        let mut spans = Vec::new();
+        for r in &m.reactions {
+            if !spans.is_empty() {
+                spans.push(Span::raw("  "));
+            }
+            let label = format!("{} {}", crate::util::reaction_label(&r.emoji), r.count);
+            let style = if r.mine { Style::new().fg(own()).add_modifier(Modifier::BOLD) } else { Style::new().fg(muted()) };
+            spans.push(Span::styled(if r.mine { format!("[{label}]") } else { label }, style));
+        }
+        rows.push(spans);
+    }
+    for row in &m.buttons {
+        let text: String = row
+            .iter()
+            .map(|b| match b.action {
+                crate::tg::BtnAction::Url(_) => format!("[{} ↗]", b.text),
+                _ => format!("[{}]", b.text),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        rows.push(vec![Span::styled(truncate(&text, inner), Style::new().fg(palette().fg.unwrap_or(Color::Reset)))]);
+    }
+    rows
 }
 
 /// Текст переписки для сохранения в файл: «дата время имя: текст».

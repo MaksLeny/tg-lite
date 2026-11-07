@@ -5,6 +5,9 @@ use super::*;
 // ------------------------------------------------------------------ рисование
 
 pub(super) fn draw(f: &mut Frame, app: &mut App) {
+    if !matches!(app.mode, Mode::Locked | Mode::NewPassword) && palette().bg.is_some() {
+        f.render_widget(Block::default().style(base_style()), f.area());
+    }
     match app.mode {
         Mode::Locked => draw_lock(
             f,
@@ -89,18 +92,18 @@ pub(super) fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let mut used = 0;
     let mut hits: Vec<(u16, u16, Tab)> = Vec::new();
     if start > 0 {
-        spans.push(Span::styled("‹", Style::new().fg(MUTED)));
+        spans.push(Span::styled("‹", Style::new().fg(muted())));
         used += 1;
     }
     for (i, (title, badge, w)) in items.iter().enumerate().skip(start) {
         if used + w + 2 > avail && i != active {
-            spans.push(Span::styled("›", Style::new().fg(MUTED)));
+            spans.push(Span::styled("›", Style::new().fg(muted())));
             break;
         }
         let style = if i == active {
             Style::new().bg(app.theme.accent).fg(Color::Black).add_modifier(Modifier::BOLD)
         } else {
-            Style::new().fg(Color::Gray)
+            Style::new().fg(palette().fg.unwrap_or(Color::Gray))
         };
         let x0 = area.x + used as u16;
         hits.push((x0, x0 + *w as u16, tabs[i].0.clone()));
@@ -133,9 +136,9 @@ pub(super) fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(c, &pin)| {
             let online = show_status && c.presence.is_some_and(|p| tg::is_online(p, now));
             let (tag, tag_color) = match c.kind {
-                Kind::User if online => ("●", ONLINE),
-                Kind::User => (" ", MUTED),
-                Kind::Group => (tr!("Г", "G"), Color::Rgb(255, 196, 90)),
+                Kind::User if online => ("●", online_color()),
+                Kind::User => (" ", muted()),
+                Kind::Group => (tr!("Г", "G"), mention()),
                 Kind::Channel => (tr!("К", "C"), app.theme.accent),
             };
             let badge = if c.unread > 0 {
@@ -171,10 +174,11 @@ pub(super) fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
     let list = List::new(items)
         .block(
             Block::default()
+                .style(base_style())
                 .borders(Borders::ALL)
-                .border_style(Style::new().fg(MUTED))
+                .border_style(Style::new().fg(muted()))
                 .title(Span::styled(list_title, Style::new().fg(app.theme.accent).add_modifier(Modifier::BOLD)))
-                .title_bottom(Span::styled(format!(" {count} "), Style::new().fg(MUTED))),
+                .title_bottom(Span::styled(format!(" {count} "), Style::new().fg(muted()))),
         )
         .highlight_style(Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD));
     f.render_stateful_widget(list, area, &mut app.list_state);
@@ -193,19 +197,19 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             };
             let mut spans = vec![
                 Span::styled(format!(" {}", c.name), Style::new().add_modifier(Modifier::BOLD)),
-                Span::styled(kind.to_string(), Style::new().fg(MUTED)),
+                Span::styled(kind.to_string(), Style::new().fg(muted())),
             ];
             let typing = app.typing.get(&c.id).filter(|(t, _)| t.elapsed() < TYPING_TTL).map(|(_, l)| l.clone());
             if let Some(t) = typing {
-                spans.push(Span::styled(" · ", Style::new().fg(MUTED)));
+                spans.push(Span::styled(" · ", Style::new().fg(muted())));
                 spans.push(Span::styled(t, Style::new().fg(app.theme.accent).add_modifier(Modifier::ITALIC)));
             } else if app.settings.show_status
                 && let Some(p) = c.presence
             {
                 let label = tg::presence_label(p, now, &tz);
                 if !label.is_empty() {
-                    let color = if tg::is_online(p, now) { ONLINE } else { MUTED };
-                    spans.push(Span::styled(" · ", Style::new().fg(MUTED)));
+                    let color = if tg::is_online(p, now) { online_color() } else { muted() };
+                    spans.push(Span::styled(" · ", Style::new().fg(muted())));
                     spans.push(Span::styled(label, Style::new().fg(color)));
                 }
             }
@@ -214,7 +218,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         }
         None => Line::from(tr!(" Переписка ", " Chat ")),
     };
-    let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(MUTED)).title(title);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(muted())).title(title);
     app.hit_msgs = area;
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
@@ -224,12 +228,12 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     let lines: Vec<Line> = match app.sel {
         None => vec![Line::from(Span::styled(
             tr!("Выберите чат слева (↑ ↓), вкладки папок: Tab", "Pick a chat on the left (↑ ↓), folder tabs: Tab"),
-            Style::new().fg(MUTED),
+            Style::new().fg(muted()),
         ))],
         Some(id) => match app.histories.get(&id) {
-            None => vec![Line::from(Span::styled(tr!("Загрузка…", "Loading…"), Style::new().fg(MUTED)))],
+            None => vec![Line::from(Span::styled(tr!("Загрузка…", "Loading…"), Style::new().fg(muted())))],
             Some(msgs) if msgs.is_empty() => {
-                vec![Line::from(Span::styled(tr!("Сообщений пока нет", "No messages yet"), Style::new().fg(MUTED)))]
+                vec![Line::from(Span::styled(tr!("Сообщений пока нет", "No messages yet"), Style::new().fg(muted())))]
             }
             Some(msgs) => {
                 let focus = app.focus_msg.and_then(|fid| msgs.iter().position(|m| m.id == fid));
@@ -281,7 +285,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(text) = banner {
         let line = Line::from(vec![
             Span::styled(tr!("▌ закреплено: ", "▌ pinned: "), Style::new().fg(app.theme.accent)),
-            Span::styled(truncate(&text, (inner.width as usize).saturating_sub(15)), Style::new().fg(MUTED)),
+            Span::styled(truncate(&text, (inner.width as usize).saturating_sub(15)), Style::new().fg(muted())),
         ]);
         f.render_widget(Paragraph::new(line), Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
     }
@@ -333,17 +337,18 @@ pub(super) fn draw_faq(f: &mut Frame, app: &App, ov: &Overlay) {
     let mut shown: Vec<Line> = lines.into_iter().skip(first).take(height).collect();
     shown.push(Line::from(Span::styled(
         tr!(" ↑ ↓ — читать · Esc — закрыть · автор: @maks1m_salov", " ↑ ↓ — read · Esc — close · author: @maks1m_salov"),
-        Style::new().fg(MUTED),
+        Style::new().fg(muted()),
     )));
     let rect = centered_rect(area, w, shown.len() as u16 + 2);
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(shown).block(
             Block::default()
+                .style(base_style())
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(accent))
                 .title(Span::styled(ov.title.clone(), Style::new().fg(accent).add_modifier(Modifier::BOLD)))
-                .title_bottom(Span::styled(format!(" {}/{} ", ov.sel + 1, ov.items.len()), Style::new().fg(MUTED))),
+                .title_bottom(Span::styled(format!(" {}/{} ", ov.sel + 1, ov.items.len()), Style::new().fg(muted()))),
         ),
         rect,
     );
@@ -382,6 +387,9 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &App) {
         OverlayKind::Search => {
             tr!(" ↑ ↓ выбрать · Enter — открыть в чате · Esc — закрыть", " ↑ ↓ select · Enter — open in chat · Esc — close")
         }
+        OverlayKind::Buttons => {
+            tr!(" ↑ ↓ или цифра — выбрать · Enter — нажать · Esc — закрыть", " ↑ ↓ or a digit — pick · Enter — press · Esc — close")
+        }
         OverlayKind::Faq => tr!(
             " ↑ ↓ — читать · Esc — закрыть · связь с автором: @maks1m_salov",
             " ↑ ↓ — read · Esc — close · contact the author: @maks1m_salov"
@@ -393,15 +401,16 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &App) {
             tr!(" ↑ ↓ выбрать · Enter — отменить отправку · Esc — закрыть", " ↑ ↓ select · Enter — cancel sending · Esc — close")
         }
     };
-    lines.push(Line::from(Span::styled(truncate(hint, (rect.width as usize).saturating_sub(2)), Style::new().fg(MUTED))));
+    lines.push(Line::from(Span::styled(truncate(hint, (rect.width as usize).saturating_sub(2)), Style::new().fg(muted()))));
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
+                .style(base_style())
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(accent))
                 .title(Span::styled(ov.title.clone(), Style::new().fg(accent).add_modifier(Modifier::BOLD)))
-                .title_bottom(Span::styled(format!(" {}/{} ", ov.sel + 1, ov.items.len()), Style::new().fg(MUTED))),
+                .title_bottom(Span::styled(format!(" {}/{} ", ov.sel + 1, ov.items.len()), Style::new().fg(muted()))),
         ),
         rect,
     );
@@ -410,13 +419,13 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &App) {
 pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLayout, rows: usize) {
     let mut title = vec![Span::styled(tr!(" Сообщение ", " Message "), Style::new().fg(app.theme.accent))];
     if app.markdown {
-        title.push(Span::styled("· Markdown ", Style::new().fg(OWN)));
+        title.push(Span::styled("· Markdown ", Style::new().fg(own())));
     }
     if let Some((_, label)) = &app.reply {
-        title.push(Span::styled(trf!("· ответ: {label} ", "· reply: {label} "), Style::new().fg(OWN)));
+        title.push(Span::styled(trf!("· ответ: {label} ", "· reply: {label} "), Style::new().fg(own())));
     }
     if app.edit_target.is_some() {
-        title.push(Span::styled(tr!("· правка сообщения ", "· editing message "), Style::new().fg(OWN)));
+        title.push(Span::styled(tr!("· правка сообщения ", "· editing message "), Style::new().fg(own())));
     }
     let focus = Style::new().fg(app.theme.accent);
     let skip = if layout.cur_row >= rows { layout.cur_row + 1 - rows } else { 0 };
@@ -426,7 +435,7 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLay
                 "Enter — отправить · Shift+Enter — новая строка · F1 — все команды",
                 "Enter — send · Shift+Enter — new line · F1 — all commands"
             ),
-            Style::new().fg(MUTED),
+            Style::new().fg(muted()),
         ))]
     } else {
         layout.lines.iter().skip(skip).take(rows).map(|l| Line::from(l.as_str())).collect()
@@ -440,11 +449,27 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLay
 }
 
 pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let pick_hint;
     let mode_hint = match app.mode {
-        Mode::Pick => Some(tr!(
-            " ↑ ↓ · R ответ · F переслать · E правка · D удалить · C копия · S скачать · O открыть · L ссылки · Esc",
-            " ↑ ↓ · R reply · F forward · E edit · D delete · C copy · S save · O open · L links · Esc"
-        )),
+        Mode::Pick => {
+            // Редкие действия показываем только там, где они применимы, и ставим в начало: хвост подсказки обрезается первым.
+            let m = app.picked();
+            let mut extra = String::new();
+            if m.is_some_and(|m| m.reply_to.is_some()) {
+                extra.push_str(tr!("G к оригиналу · ", "G original · "));
+            }
+            if !app.jump_back.is_empty() {
+                extra.push_str(tr!("B назад · ", "B back · "));
+            }
+            if m.is_some_and(|m| !m.buttons.is_empty()) {
+                extra.push_str(tr!("K кнопки · ", "K buttons · "));
+            }
+            pick_hint = trf!(
+                " {extra}R ответ · F переслать · E правка · D удалить · C копия · S скачать · O открыть · L ссылки · 1-6 реакция · Esc",
+                " {extra}R reply · F forward · E edit · D delete · C copy · S save · O open · L links · 1-6 react · Esc"
+            );
+            Some(pick_hint.as_str())
+        }
         Mode::Forward => Some(tr!(
             " Переслать: выберите чат ↑ ↓ / Tab · Enter — переслать · Esc — отмена",
             " Forward: pick a chat ↑ ↓ / Tab · Enter — forward · Esc — cancel"
@@ -454,7 +479,7 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if let Some(h) = mode_hint {
         // Сообщение о недоступном действии важнее подсказки по клавишам.
         let (text, color) = if app.mode == Mode::Pick && !app.pick_note.is_empty() {
-            (format!(" {}", app.pick_note), Color::Rgb(255, 196, 90))
+            (format!(" {}", app.pick_note), mention())
         } else {
             (h.to_string(), app.theme.accent)
         };
@@ -478,11 +503,11 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
         None => (area, None),
     };
-    let color = if app.status.starts_with("Ошибка") || app.status.starts_with("Error") { ERROR } else { MUTED };
+    let color = if app.status.starts_with("Ошибка") || app.status.starts_with("Error") { error_color() } else { muted() };
     let status = truncate(&format!(" {}", app.status), left.width as usize);
     f.render_widget(Paragraph::new(status).style(Style::new().fg(color)), left);
     if let Some((r, h)) = right {
-        f.render_widget(Paragraph::new(h).style(Style::new().fg(MUTED)), r);
+        f.render_widget(Paragraph::new(h).style(Style::new().fg(muted())), r);
     }
 }
 
@@ -507,6 +532,13 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
         key(
             "F7",
             tr!("выбор сообщения: R ответить, F переслать, E править, D удалить", "pick message: R reply, F forward, E edit, D delete"),
+        ),
+        key(
+            tr!("F7 → 1-6, G, K", "F7 → 1-6, G, K"),
+            tr!(
+                "реакция (0 — снять); G к оригиналу ответа, B назад; K кнопки бота",
+                "reaction (0 removes); G original of a reply, B back; K bot buttons"
+            ),
         ),
         key("Esc", tr!("очистить ввод; отменить ответ, правку, поиск", "clear input; cancel reply, edit, search")),
         key(tr!("F2  или /lock", "F2  or /lock"), tr!("заблокировать (запрос пароля)", "lock (asks for password)")),
@@ -574,7 +606,7 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
                 " Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает",
                 " Ctrl+L/Q/T/R/F work too · Tg-Lite {VERSION} · any key closes"
             ),
-            Style::new().fg(MUTED),
+            Style::new().fg(muted()),
         )),
     ];
     let rect = centered_rect(f.area(), 72, lines.len() as u16 + 2);
@@ -582,6 +614,7 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
+                .style(base_style())
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(accent))
                 .title(Span::styled(tr!(" Справка ", " Help "), Style::new().fg(accent).add_modifier(Modifier::BOLD))),
@@ -617,6 +650,7 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
         (tr!("Язык интерфейса", "Interface language"), if s.lang == 0 { "Русский".to_string() } else { "English".to_string() }),
         (tr!("Мышь", "Mouse"), on_off(s.mouse).to_string()),
         (tr!("Облачные черновики", "Cloud drafts"), on_off(s.cloud_drafts).to_string()),
+        (tr!("Тема", "Theme"), s.palette_name().to_string()),
         (tr!("Пароль приложения", "App password"), tr!("сменить…", "change…").to_string()),
     ];
     let width = 78u16;
@@ -638,14 +672,14 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         tr!(" ↑ ↓ выбрать · ← → изменить · Enter — действие · Esc — закрыть", " ↑ ↓ select · ← → change · Enter — action · Esc — close"),
-        Style::new().fg(MUTED),
+        Style::new().fg(muted()),
     )));
     lines.push(Line::from(Span::styled(
         tr!(
             " Прокси применяется при следующем запуске. Вручную: /proxy адрес:порт",
             " Proxy applies on next start. Manually: /proxy address:port"
         ),
-        Style::new().fg(MUTED),
+        Style::new().fg(muted()),
     )));
     let rect = centered_rect(f.area(), width, lines.len() as u16 + 2);
     // На низком окне список прокручивается так, чтобы выбранная строка была видна.
@@ -656,6 +690,7 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(lines).scroll((scroll as u16, 0)).block(
             Block::default()
+                .style(base_style())
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(accent))
                 .title(Span::styled(tr!(" Настройки ", " Settings "), Style::new().fg(accent).add_modifier(Modifier::BOLD))),
@@ -665,6 +700,11 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
 }
 
 pub(super) fn draw_lock(f: &mut Frame, app: &App, title: &str, prompt: &str, footer: &str) {
+    let wait = match (app.mode, app.pause_left()) {
+        (Mode::Locked, Some(n)) => Some(trf!("Подождите {n} с до следующей попытки", "Wait {n} s before the next attempt")),
+        _ => None,
+    };
+    let error = wait.as_deref().unwrap_or(&app.lock_error);
     crate::lock::draw(
         f,
         &crate::lock::LockView {
@@ -675,7 +715,7 @@ pub(super) fn draw_lock(f: &mut Frame, app: &App, title: &str, prompt: &str, foo
             title,
             prompt,
             dots: app.lock_input.chars().count(),
-            error: &app.lock_error,
+            error,
             footer,
             busy: false,
         },

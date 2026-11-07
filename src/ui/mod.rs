@@ -37,6 +37,11 @@ const LOAD_DELAY: Duration = Duration::from_millis(250);
 const PASTE_GAP: Duration = Duration::from_millis(25);
 /// Максимум сообщений на чат в памяти.
 const KEEP_MESSAGES: usize = 300;
+/// Пауза перед следующей попыткой: первые две попытки без ожидания, дальше 5, 10, 20 … секунд, не больше 5 минут.
+fn pause_secs(wrong: u32) -> u64 {
+    if wrong < 3 { 0 } else { (5u64 << (wrong - 3).min(6)).min(300) }
+}
+
 /// Предел длины сообщения в Telegram.
 const MAX_MESSAGE_CHARS: usize = 4096;
 
@@ -131,19 +136,137 @@ fn faq() -> [(&'static str, &'static str); 7] {
     ]
 }
 
-const MUTED: Color = Color::Rgb(120, 135, 150);
-const OWN: Color = Color::Rgb(110, 214, 130);
-const ONLINE: Color = Color::Rgb(110, 214, 130);
-const ERROR: Color = Color::Rgb(255, 110, 110);
-const NAME_COLORS: [Color; 7] = [
-    Color::Rgb(255, 140, 120),
-    Color::Rgb(255, 196, 90),
-    Color::Rgb(160, 220, 110),
-    Color::Rgb(90, 210, 200),
-    Color::Rgb(120, 170, 255),
-    Color::Rgb(200, 140, 255),
-    Color::Rgb(255, 130, 190),
+/// Цветовая схема: фон и текст задаются только у светлой, контрастной и Solarized, у тёмной остаются цвета консоли.
+#[derive(Clone, Copy)]
+struct Palette {
+    bg: Option<Color>,
+    fg: Option<Color>,
+    muted: Color,
+    own: Color,
+    error: Color,
+    mention: Color,
+    names: [Color; 7],
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+const PALETTES: [Palette; 4] = [
+    // 0: тёмная (как была)
+    Palette {
+        bg: None,
+        fg: None,
+        muted: rgb(120, 135, 150),
+        own: rgb(110, 214, 130),
+        error: rgb(255, 110, 110),
+        mention: rgb(255, 196, 90),
+        names: [
+            rgb(255, 140, 120),
+            rgb(255, 196, 90),
+            rgb(160, 220, 110),
+            rgb(90, 210, 200),
+            rgb(120, 170, 255),
+            rgb(200, 140, 255),
+            rgb(255, 130, 190),
+        ],
+    },
+    // 1: светлая
+    Palette {
+        bg: Some(rgb(250, 250, 246)),
+        fg: Some(rgb(28, 32, 38)),
+        muted: rgb(105, 113, 124),
+        own: rgb(18, 128, 62),
+        error: rgb(196, 36, 36),
+        mention: rgb(168, 98, 0),
+        names: [
+            rgb(196, 62, 40),
+            rgb(160, 100, 0),
+            rgb(60, 130, 20),
+            rgb(0, 128, 120),
+            rgb(40, 90, 200),
+            rgb(120, 60, 190),
+            rgb(190, 40, 120),
+        ],
+    },
+    // 2: высокий контраст
+    Palette {
+        bg: Some(rgb(0, 0, 0)),
+        fg: Some(rgb(255, 255, 255)),
+        muted: rgb(200, 200, 200),
+        own: rgb(0, 255, 100),
+        error: rgb(255, 90, 90),
+        mention: rgb(255, 255, 0),
+        names: [
+            rgb(255, 120, 100),
+            rgb(255, 230, 0),
+            rgb(140, 255, 60),
+            rgb(0, 255, 230),
+            rgb(110, 170, 255),
+            rgb(220, 150, 255),
+            rgb(255, 120, 210),
+        ],
+    },
+    // 3: Solarized (тёмный)
+    Palette {
+        bg: Some(rgb(0, 43, 54)),
+        fg: Some(rgb(147, 161, 161)),
+        muted: rgb(101, 123, 131),
+        own: rgb(133, 153, 0),
+        error: rgb(220, 50, 47),
+        mention: rgb(181, 137, 0),
+        names: [
+            rgb(203, 75, 22),
+            rgb(181, 137, 0),
+            rgb(133, 153, 0),
+            rgb(42, 161, 152),
+            rgb(38, 139, 210),
+            rgb(108, 113, 196),
+            rgb(211, 54, 130),
+        ],
+    },
 ];
+
+pub(crate) const PALETTE_COUNT: u8 = PALETTES.len() as u8;
+
+static PALETTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn set_palette(idx: u8) {
+    PALETTE.store(idx.min(PALETTE_COUNT - 1), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn palette() -> Palette {
+    PALETTES[usize::from(PALETTE.load(std::sync::atomic::Ordering::Relaxed)).min(PALETTES.len() - 1)]
+}
+
+fn muted() -> Color {
+    palette().muted
+}
+fn own() -> Color {
+    palette().own
+}
+fn online_color() -> Color {
+    palette().own
+}
+fn error_color() -> Color {
+    palette().error
+}
+fn mention() -> Color {
+    palette().mention
+}
+
+/// Основной стиль окна: у тёмной темы пустой, чтобы остались цвета консоли.
+fn base_style() -> Style {
+    let p = palette();
+    let mut st = Style::new();
+    if let Some(bg) = p.bg {
+        st = st.bg(bg);
+    }
+    if let Some(fg) = p.fg {
+        st = st.fg(fg);
+    }
+    st
+}
 
 #[derive(Clone, Copy)]
 struct Theme {
@@ -185,6 +308,8 @@ enum OverlayKind {
     Faq,
     /// Результаты поиска сообщений.
     Search,
+    /// Inline-кнопки сообщения бота.
+    Buttons,
 }
 
 #[derive(Default)]
@@ -213,7 +338,6 @@ const MAX_LOADED: usize = 1500;
 
 /// Сколько секунд показывать «печатает…» без новых обновлений.
 const TYPING_TTL: Duration = Duration::from_secs(6);
-const MENTION: Color = Color::Rgb(255, 196, 90);
 
 /// Вкладка списка чатов: встроенные фильтры и папки из аккаунта.
 #[derive(Clone, PartialEq, Debug)]
@@ -226,7 +350,7 @@ enum Tab {
     Folder(i32),
 }
 
-const SETTINGS_ROWS: usize = 14;
+const SETTINGS_ROWS: usize = 15;
 
 pub struct App {
     chats: Vec<ChatInfo>,
@@ -287,6 +411,10 @@ pub struct App {
     pending_delete: Option<(PeerId, i32)>,
     /// Чат, для которого уже набрано первое /leave и ждём повторного.
     pending_leave: Option<PeerId>,
+    /// Откуда прыгали к оригиналу ответа (чат, номер и время сообщения): по B возвращаемся.
+    jump_back: Vec<(PeerId, i32, i64)>,
+    /// После загрузки окружения вернуться в режим выбора сообщения.
+    pick_after_jump: bool,
     /// Что сейчас лежит в Telegram как черновик каждого чата (чтобы не отправлять одно и то же).
     cloud_drafts: HashMap<PeerId, String>,
     /// Черновики, которые пора отправить в Telegram (разбирается на каждом такте).
@@ -303,6 +431,8 @@ pub struct App {
     fwd_src: Option<(ChatInfo, i32)>,
     /// Неверные пароли подряд на экране блокировки.
     wrong_attempts: u32,
+    /// До какого момента пароль не принимается (пауза после серии неверных попыток).
+    lock_until: Option<Instant>,
     /// Момент запуска: от него считается время анимации фона.
     started: Instant,
     /// Подсказка в режиме выбора сообщения (почему действие недоступно, просьба подтвердить).
@@ -342,7 +472,10 @@ impl App {
             mode: Mode::Chat,
             lock_input: String::new(),
             lock_error: String::new(),
-            theme: theme(settings.accent),
+            theme: theme({
+                set_palette(settings.palette);
+                settings.accent
+            }),
             settings,
             settings_row: 0,
             pw_stage: 0,
@@ -359,6 +492,8 @@ impl App {
             drafts: HashMap::new(),
             pending_delete: None,
             pending_leave: None,
+            jump_back: Vec::new(),
+            pick_after_jump: false,
             cloud_drafts: HashMap::new(),
             draft_out: Vec::new(),
             draft_watch: (None, String::new(), Instant::now()),
@@ -367,6 +502,7 @@ impl App {
             edit_target: None,
             fwd_src: None,
             wrong_attempts: 0,
+            lock_until: None,
             started: Instant::now(),
             pick_note: String::new(),
             typing: HashMap::new(),
@@ -542,6 +678,8 @@ impl App {
         self.sel = new;
         self.pending_delete = None;
         self.pending_leave = None;
+        self.jump_back.clear();
+        self.pick_after_jump = false;
     }
 
     /// Ставит черновик в очередь на отправку в Telegram, если он изменился. Команды («/…») не отправляем.
@@ -664,6 +802,12 @@ impl App {
     fn title(&self) -> String {
         let n = self.total_unread();
         if self.mode == Mode::Locked || n == 0 { "Tg-Lite".to_string() } else { format!("Tg-Lite ({n})") }
+    }
+
+    /// Сколько секунд ещё держится пауза после неверных паролей.
+    fn pause_left(&self) -> Option<u64> {
+        let left = self.lock_until?.checked_duration_since(Instant::now())?;
+        Some(left.as_secs() + 1)
     }
 
     fn lock(&mut self) {
@@ -878,6 +1022,13 @@ impl App {
                     "Found message highlighted. PgDn or Esc: back to the latest"
                 )
                 .into();
+                if std::mem::take(&mut self.pick_after_jump)
+                    && let Some(i) = self.histories.get(&chat).and_then(|h| h.iter().position(|m| m.id == focus))
+                {
+                    self.pick = i;
+                    self.mode = Mode::Pick;
+                    self.status = tr!("Оригинал ответа. B — назад", "Original message. B — go back").into();
+                }
             }
             Event::SearchResults { query, scope, hits } => {
                 if self.mode == Mode::Locked {
@@ -901,6 +1052,20 @@ impl App {
                     .collect();
                 let title = trf!(" Найдено: {} · «{query}» ", " Found: {} · “{query}” ", items.len());
                 self.open_overlay(OverlayKind::Search, &title, items);
+            }
+            Event::Reacted { chat, msg } => {
+                if let Some(m) = self.histories.get_mut(&chat).and_then(|h| h.iter_mut().find(|m| m.id == msg.id)) {
+                    m.reactions = msg.reactions;
+                }
+                self.pick_note.clear();
+                self.status = tr!("Реакция обновлена", "Reaction updated").into();
+            }
+            Event::ButtonAnswer(text) => {
+                self.status = if text.is_empty() {
+                    tr!("Кнопка нажата", "Button pressed").into()
+                } else {
+                    trf!("Бот: {text}", "Bot: {text}")
+                };
             }
             Event::ReadOutbox { chat, max_id } => {
                 if let Some(c) = self.chats.iter_mut().find(|c| c.id == chat) {
@@ -1097,6 +1262,8 @@ impl App {
                         }
                     }
                     m.edited = true;
+                    m.buttons = msg.buttons;
+                    m.reactions = msg.reactions;
                 }
             }
             Event::Deleted { chat, ids } => {
@@ -1195,6 +1362,7 @@ impl App {
 
     fn apply_settings(&mut self, saver: &Arc<Saver>) {
         self.theme = theme(self.settings.accent);
+        set_palette(self.settings.palette);
         saver.set_settings(self.settings.clone());
         saver.save_in_background();
     }
@@ -1225,6 +1393,7 @@ impl App {
             }
             11 => s.mouse = !s.mouse,
             12 => s.cloud_drafts = !s.cloud_drafts,
+            13 => s.palette = cycle(&[0u8, 1, 2, 3], s.palette, dir),
             _ => {
                 if activate {
                     self.mode = Mode::NewPassword;
@@ -1358,10 +1527,15 @@ impl App {
             Mode::Locked => {
                 match key.code {
                     KeyCode::F(10) => self.should_quit = true,
+                    KeyCode::Enter if self.pause_left().is_some() => {
+                        // Пауза после серии неверных паролей: ввод не проверяется.
+                        self.lock_input.clear();
+                    }
                     KeyCode::Enter => {
                         if self.lock_input == saver.password() {
                             self.mode = Mode::Chat;
                             self.wrong_attempts = 0;
+                            self.lock_until = None;
                             self.lock_input.clear();
                             // Всё, что пришло за время блокировки в открытый чат, теперь прочитано.
                             if let Some(c) = self.selected().cloned()
@@ -1389,6 +1563,10 @@ impl App {
                                 );
                             } else {
                                 self.lock_error = tr!("Неверный пароль", "Wrong password").into();
+                            }
+                            let pause = pause_secs(self.wrong_attempts);
+                            if pause > 0 {
+                                self.lock_until = Some(Instant::now() + Duration::from_secs(pause));
                             }
                         }
                     }
@@ -1651,6 +1829,59 @@ impl App {
         }
     }
 
+    /// В режиме выбора переходит к сообщению `id`: выбирает его, если оно загружено, иначе грузит окружение.
+    fn pick_goto(&mut self, chat: &ChatInfo, id: i32, ts: i64, cmd: &mpsc::UnboundedSender<Cmd>) {
+        match self.histories.get(&chat.id).and_then(|h| h.iter().position(|m| m.id == id)) {
+            Some(i) => {
+                self.pick = i;
+                self.status = tr!("Оригинал ответа. B — назад", "Original message. B — go back").into();
+            }
+            None => {
+                self.pick_after_jump = true;
+                self.status = tr!("Загружаю оригинал…", "Loading the original…").into();
+                let _ = cmd.send(Cmd::LoadAround { chat: chat.clone(), id, ts });
+            }
+        }
+    }
+
+    /// Нажимает выбранную кнопку в списке кнопок бота.
+    fn activate_button(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) {
+        let Some(ov) = &self.overlay else { return };
+        let Some(item) = ov.items.get(ov.sel) else { return };
+        let Some((chat_id, msg_id, _)) = item.target else { return };
+        let idx = item.id.max(0) as usize;
+        let action = self
+            .histories
+            .get(&chat_id)
+            .and_then(|h| h.iter().find(|m| m.id == msg_id))
+            .and_then(|m| m.buttons.iter().flatten().nth(idx))
+            .map(|b| b.action.clone());
+        let chat = self.chats.iter().find(|c| c.id == chat_id).cloned();
+        match (action, chat) {
+            (Some(tg::BtnAction::Callback(data)), Some(chat)) => {
+                let _ = cmd.send(Cmd::Press { chat, id: msg_id, data });
+                self.status = tr!("Нажимаю кнопку…", "Pressing the button…").into();
+                self.overlay = None;
+                self.mode = Mode::Chat;
+            }
+            (Some(tg::BtnAction::Url(url)), _) => {
+                self.status = if util::open_url(&url) {
+                    trf!("Открываю в браузере: {url}", "Opening in browser: {url}")
+                } else {
+                    tr!("Не удалось открыть ссылку", "Could not open the link").into()
+                };
+            }
+            (Some(tg::BtnAction::Copy(text)), _) => {
+                self.status = if util::clipboard_set(&text) {
+                    tr!("Скопировано", "Copied").into()
+                } else {
+                    tr!("Не удалось скопировать: буфер обмена недоступен", "Could not copy: clipboard is not available").into()
+                };
+            }
+            _ => self.status = tr!("Этот вид кнопок здесь не поддерживается", "This kind of button is not supported here").into(),
+        }
+    }
+
     fn handle_overlay_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>) {
         let Some(ov) = self.overlay.as_mut() else {
             self.mode = Mode::Chat;
@@ -1664,6 +1895,16 @@ impl App {
         }
         if key.code != KeyCode::Enter {
             ov.confirm = None;
+        }
+        if ov.kind == OverlayKind::Buttons
+            && let KeyCode::Char(c) = key.code
+            && let Some(d) = c.to_digit(10)
+            && d >= 1
+            && (d as usize) <= len
+        {
+            ov.sel = d as usize - 1;
+            self.activate_button(cmd);
+            return;
         }
         match key.code {
             KeyCode::Esc | KeyCode::F(10) => {
@@ -1687,6 +1928,7 @@ impl App {
                     };
                 }
                 OverlayKind::Faq => {}
+                OverlayKind::Buttons => self.activate_button(cmd),
                 OverlayKind::Search => {
                     let target = ov.items[ov.sel].target;
                     self.overlay = None;
@@ -1763,6 +2005,9 @@ impl App {
                 'l' | 'д' => Some('l'),
                 'c' | 'с' => Some('c'),
                 'o' | 'щ' => Some('o'),
+                'g' | 'п' => Some('g'),
+                'b' | 'и' => Some('b'),
+                'k' | 'л' => Some('k'),
                 _ => None,
             },
             _ => None,
@@ -1789,6 +2034,65 @@ impl App {
             (KeyCode::PageDown, _) => self.pick = (self.pick + 5).min(len - 1),
             (KeyCode::Home, _) => self.pick = 0,
             (KeyCode::End, _) => self.pick = len - 1,
+            (KeyCode::Char(c @ '0'..='6'), _) => {
+                let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) else { return };
+                const SET: [&str; 6] = ["👍", "❤", "🔥", "😂", "😮", "😢"];
+                let emoji = c.to_digit(10).filter(|d| *d > 0).map(|d| SET[d as usize - 1]);
+                // Та же реакция ещё раз снимает вашу.
+                let emoji = emoji.filter(|e| !m.reactions.iter().any(|r| r.mine && util::reaction_key(&r.emoji) == util::reaction_key(e)));
+                let _ = cmd.send(Cmd::React { chat, id: m.id, emoji: emoji.map(str::to_string) });
+                self.pick_note = tr!("Ставлю реакцию…", "Setting the reaction…").into();
+                self.status = self.pick_note.clone();
+            }
+            (_, Some('g')) => {
+                let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) else { return };
+                match m.reply_to {
+                    None => self.pick_note = tr!("Это сообщение не ответ", "This message is not a reply").into(),
+                    Some(rid) => {
+                        self.jump_back.push((chat.id, m.id, m.ts));
+                        if self.jump_back.len() > 20 {
+                            self.jump_back.remove(0);
+                        }
+                        self.pick_goto(&chat, rid, m.ts, cmd);
+                    }
+                }
+            }
+            (_, Some('b')) => match self.jump_back.pop() {
+                None => self.pick_note = tr!("Возвращаться некуда", "Nowhere to go back to").into(),
+                Some((chat_id, id, ts)) => match self.selected().cloned() {
+                    Some(chat) if chat.id == chat_id => self.pick_goto(&chat, id, ts, cmd),
+                    _ => self.pick_note = tr!("Возвращаться некуда", "Nowhere to go back to").into(),
+                },
+            },
+            (_, Some('k')) => {
+                if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
+                    if m.buttons.is_empty() {
+                        self.pick_note = tr!("Под этим сообщением нет кнопок", "This message has no buttons").into();
+                    } else {
+                        let items: Vec<OverlayItem> = m
+                            .buttons
+                            .iter()
+                            .flatten()
+                            .enumerate()
+                            .map(|(i, b)| {
+                                let note = match &b.action {
+                                    tg::BtnAction::Callback(_) => String::new(),
+                                    tg::BtnAction::Url(u) => format!("  ↗ {u}"),
+                                    tg::BtnAction::Copy(_) => tr!("  (копировать)", "  (copy)").to_string(),
+                                    tg::BtnAction::Other => tr!("  (не поддерживается)", "  (not supported)").to_string(),
+                                };
+                                OverlayItem {
+                                    label: format!("{}. {}{note}", i + 1, b.text),
+                                    id: i as i32,
+                                    target: Some((chat.id, m.id, 0)),
+                                    ..Default::default()
+                                }
+                            })
+                            .collect();
+                        self.open_overlay(OverlayKind::Buttons, tr!(" Кнопки бота ", " Bot buttons "), items);
+                    }
+                }
+            }
             (_, Some('r')) => {
                 if let Some(m) = self.picked().cloned() {
                     let who = if m.outgoing { tr!("Я", "Me").to_string() } else { m.sender.clone() };

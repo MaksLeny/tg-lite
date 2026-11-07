@@ -455,6 +455,38 @@ pub fn clean_or(s: &str, placeholder: &str) -> String {
     if c.trim().is_empty() && !s.trim().is_empty() { placeholder.to_string() } else { c }
 }
 
+/// Смайлик реакции без невидимого селектора вариации: так «❤» и «❤️» считаются одним и тем же.
+pub fn reaction_key(emoji: &str) -> String {
+    emoji.chars().filter(|c| *c != '\u{fe0f}').collect()
+}
+
+/// Как показать реакцию в консоли, где эмодзи не рисуются: короткое слово вместо картинки.
+pub fn reaction_label(emoji: &str) -> &'static str {
+    match reaction_key(emoji).as_str() {
+        "👍" => "+1",
+        "👎" => "-1",
+        "❤" | "💘" | "💕" => "<3",
+        "🔥" => "fire",
+        "😂" | "🤣" => "lol",
+        "😮" | "😲" => "wow",
+        "😢" | "😭" => "sad",
+        "🎉" => "tada",
+        "🤔" => "hmm",
+        "👏" => "clap",
+        "🙏" => "pray",
+        "🤯" => "boom",
+        "😁" | "😀" => "grin",
+        "🥰" | "😍" => "love",
+        "🤬" | "😡" => "angry",
+        "💩" => "poo",
+        "👌" => "ok",
+        "😱" => "omg",
+        "🤮" => "yuck",
+        "🥱" => "yawn",
+        _ => "?",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

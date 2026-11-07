@@ -45,6 +45,8 @@ pub struct Settings {
     pub mouse: bool,
     /// Черновики хранятся в Telegram и видны на других устройствах.
     pub cloud_drafts: bool,
+    /// Цветовая тема: 0 тёмная, 1 светлая, 2 высокий контраст, 3 Solarized.
+    pub palette: u8,
 }
 
 impl Default for Settings {
@@ -65,6 +67,7 @@ impl Default for Settings {
             lang: 0,
             mouse: true,
             cloud_drafts: true,
+            palette: 0,
         }
     }
 }
@@ -74,6 +77,10 @@ pub const WIPE_CHOICES: [u32; 4] = [0, 3, 5, 10];
 pub const HISTORY_CHOICES: [u32; 4] = [30, 60, 100, 150];
 pub fn accent_names() -> [&'static str; 5] {
     [tr!("Голубой", "Blue"), tr!("Зелёный", "Green"), tr!("Янтарный", "Amber"), tr!("Розовый", "Pink"), tr!("Фиолетовый", "Purple")]
+}
+
+pub fn palette_names() -> [&'static str; 4] {
+    [tr!("Тёмная", "Dark"), tr!("Светлая", "Light"), tr!("Высокий контраст", "High contrast"), "Solarized"]
 }
 
 /// Переключает значение по кругу вперёд (`dir > 0`) или назад.
@@ -134,6 +141,10 @@ impl Settings {
 
     pub fn width_name(v: u8, names: [&'static str; 3]) -> &'static str {
         names[(v as usize).min(2)]
+    }
+
+    pub fn palette_name(&self) -> &'static str {
+        palette_names()[(self.palette as usize).min(palette_names().len() - 1)]
     }
 
     pub fn accent_name(&self) -> &'static str {

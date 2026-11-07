@@ -68,7 +68,9 @@ which is the main reason it is so small.
 - A pinned message is shown above the conversation.
 
 **Messages**
-- `F7` picks a message: reply with a quote (R), forward (F), edit (E), delete (D), copy the text (C), save the attachment (S), open it (O), links (L).
+- `F7` picks a message: reply with a quote (R), forward (F), edit (E), delete (D), copy the text (C), save the attachment (S), open it (O), links (L). Also in `F7`: `G` jumps to the original of a reply (and `B` goes back), `1`–`6` set a reaction (👍 ❤ 🔥 😂 😮 😢; the same digit again or `0` removes yours), `K` lists the buttons of a bot message.
+- Reactions are shown under a message as short words, because the console draws no emoji: `+1 3  <3 2` (yours in brackets: `[<3 2]`). They are read when the messages are loaded; a reaction from another person appears after the chat is opened again. Bots' inline buttons are shown as `[Yes] [No]`; press them in the `K` list with Enter or a digit. Link buttons (`↗`) open in the browser; buttons that need a password, games, payments and web apps are not supported.
+- Day separators say `Today` and `Yesterday`; names in groups have a stable color.
 - `/edit` and `/del` act on your last message in the open chat (`/del` asks you to repeat it to confirm), `/note` (quick note to Saved Messages), `/later 30 text` (schedule in 30 minutes), `/scheduled` (list and cancel).
 - Markdown (`F3` or `/md`): `**bold**`, `_italic_`, `` `code` ``, `[link](https://…)`.
 - Reply quotes, forwarded-from notes and "(edited)" marks. Photos, voice and files appear as labels such as `[photo]`, `[file report.pdf, 2 MB]`.
@@ -92,7 +94,7 @@ which is the main reason it is so small.
 - English and Russian interface (setting "Interface language", chosen at first start).
 - Animated sign-in screen (always Aurora) and lock screen (Aurora, Matrix, Stars or none, your choice in settings).
 - Mouse: click a tab or a chat, the wheel scrolls the conversation (over the chat list it moves the selection). Can be turned off in the settings. While the mouse is on, selecting text by dragging and right-click paste may not work in the console (in Windows Terminal hold `Shift` to select); use `/copy` and `Ctrl+V`, or turn the mouse off.
-- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, mouse, cloud drafts, password.
+- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, mouse, cloud drafts, theme (dark, light, high contrast, Solarized), password.
 - `/faq` shows troubleshooting tips inside the program. `tglite.log` records errors and `tg-lite --debug` makes it detailed (never message text).
 - Emoji, invisible characters and scripts other than Latin, Greek and Cyrillic are hidden: the Windows console cannot draw them and the screen would fall apart.
 
@@ -154,7 +156,7 @@ Every action has both a key and a command, in case a key does not work in your c
 | | `/pinned` | all pinned messages of the open chat |
 | | `/chat @name` | find a person or channel by name and open the chat |
 | | `/join link-or-@name` `/leave` | join a group or channel; leave the open one (repeat to confirm) |
-| F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links |
+| F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links, G original of a reply, B back, 1-6 reaction, K bot buttons |
 | F10 | `/quit` | quit |
 | | `/pin` `/readall` `/export` | pin chat, read everything, export |
 | | `/edit` `/del` `/note` `/later` `/scheduled` | edit or delete your last message, note, schedule, scheduled list |
@@ -167,7 +169,7 @@ Every action has both a key and a command, in case a key does not work in your c
 
 - `api_id`, `api_hash` and the Telegram session live in `tglite.vault`, encrypted with your password (Argon2id + ChaCha20-Poly1305). Without the password the file cannot be read and tampering is detected.
 - The conversation is never written to disk. Exceptions are `/export` and `/save`, which you run yourself, and the short-lived files of `/open` (the `tglite-view` folder, emptied on lock, on exit and on start). The input history lives in memory only; drafts also live in memory here, and with cloud drafts on (default) the unsent text is stored by Telegram itself, like in any official app.
-- Auto-lock after 1–60 minutes (or never) and on `F2`; the lock screen shows no messages.
+- Auto-lock after 1–60 minutes (or never) and on `F2`; the lock screen shows no messages. After three wrong passwords the lock screen makes you wait before the next try: 5, 10, 20 seconds and so on, up to 5 minutes. The count lives in memory and starts again after a restart, so this slows down guessing at the screen but is not a substitute for a strong password.
 - Optional self-destruct: overwrite and delete `tglite.vault` after 3, 5 or 10 wrong passwords on the lock screen (off by default). Other files stay, and you should end the session in Telegram → Settings → Devices.
 - The log never contains message text. The chosen language is stored in `tglite.lang` (not secret).
 
@@ -227,7 +229,9 @@ The same list is available in the program as `/faq`.
 
 ## Roadmap
 
-**1.2.0 (this version):** read marks in private chats, `/pinned`, `/chat @name`, `/join` and `/leave`, cloud drafts (synced with the phone), view counts under channel posts.
+**1.3.0 (this version):** reactions (shown and set with `1`–`6` in `F7`), jump to the original of a reply (`G`, back with `B`), buttons of bot messages (`K`), a growing pause after wrong passwords, “Yesterday” in day separators, color themes (dark, light, high contrast, Solarized).
+
+**1.2.0:** read marks in private chats, `/pinned`, `/chat @name`, `/join` and `/leave`, cloud drafts (synced with the phone), view counts under channel posts.
 
 **1.1.0:** mouse (click a tab or a chat, wheel scrolling; can be turned off in the settings), a short demo GIF, measured memory use after long heavy use.
 
@@ -317,7 +321,9 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Закреплённое сообщение показывается над перепиской.
 
 **Сообщения**
-- `F7` — выбрать сообщение: ответить с цитатой (R), переслать (F), править (E), удалить (D), копировать текст (C), скачать вложение (S), открыть его (O), ссылки (L).
+- `F7` — выбрать сообщение: ответить с цитатой (R), переслать (F), править (E), удалить (D), копировать текст (C), скачать вложение (S), открыть его (O), ссылки (L). Ещё в `F7`: `G` — перейти к оригиналу ответа (`B` — назад), `1`–`6` — поставить реакцию (👍 ❤ 🔥 😂 😮 😢; та же цифра ещё раз или `0` снимает вашу), `K` — список кнопок сообщения бота.
+- Реакции показываются под сообщением короткими словами, потому что консоль не рисует эмодзи: `+1 3  <3 2` (ваша — в скобках: `[<3 2]`). Они читаются при загрузке сообщений; реакция другого человека появится, когда вы снова откроете чат. Inline-кнопки ботов выглядят как `[Да] [Нет]`; нажимаются в списке `K` клавишей Enter или цифрой. Кнопки-ссылки (`↗`) открываются в браузере; кнопки с паролем, игры, платежи и веб-приложения не поддерживаются.
+- Разделители дней подписаны «Сегодня» и «Вчера»; имена в группах имеют постоянный цвет.
 - `/edit` и `/del` работают с вашим последним сообщением в открытом чате (`/del` просит повторить для подтверждения), `/note` (быстрая заметка в «Избранное»), `/later 30 текст` (отложить на 30 минут), `/scheduled` (список и отмена).
 - Markdown (`F3` или `/md`): `**жирный**`, `_курсив_`, `` `код` ``, `[ссылка](https://…)`.
 - Цитаты ответов, пометки «переслано» и «(изм.)». Фото, голосовые и файлы показываются подписями: `[фото]`, `[файл отчёт.pdf, 2 МБ]`.
@@ -341,7 +347,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Интерфейс на русском и английском (настройка «Язык интерфейса», выбирается при первом запуске).
 - Анимированный экран входа (всегда «Аврора») и экран блокировки («Аврора», «Матрица», «Звёзды» или без анимации, выбирается в настройках).
 - Мышь: клик по вкладке или чату, колесо прокручивает переписку (над списком чатов двигает выбор). Выключается в настройках. Пока мышь включена, выделение текста протягиванием и вставка правой кнопкой в консоли могут не работать (в Windows Terminal выделять можно с зажатым `Shift`); используйте `/copy` и `Ctrl+V` или выключите мышь.
-- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, мышь, облачные черновики, пароль.
+- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, мышь, облачные черновики, тема (тёмная, светлая, высокий контраст, Solarized), пароль.
 - `/faq` — подсказки «Если не работает» прямо в программе. В `tglite.log` пишутся ошибки, а `tg-lite --debug` делает журнал подробным (тексты переписки не пишутся никогда).
 - Эмодзи, невидимые символы и письменности кроме латиницы, греческого и кириллицы скрываются: консоль Windows не умеет их рисовать, и экран «рассыпался» бы.
 
@@ -403,7 +409,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | | `/pinned` | все закреплённые сообщения открытого чата |
 | | `/chat @имя` | найти человека или канал по имени и открыть чат |
 | | `/join ссылка-или-@имя` `/leave` | вступить в группу или канал; выйти из открытого (повторите для подтверждения) |
-| F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки |
+| F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки, G оригинал ответа, B назад, 1-6 реакция, K кнопки бота |
 | F10 | `/quit` | выход |
 | | `/pin` `/readall` `/export` | закрепить чат, прочитать всё, сохранить переписку |
 | | `/edit` `/del` `/note` `/later` `/scheduled` | править или удалить своё последнее сообщение, заметка, отложить, список отложенных |
@@ -416,7 +422,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 
 - `api_id`, `api_hash` и сессия Telegram лежат в `tglite.vault`, зашифрованном вашим паролем (Argon2id + ChaCha20-Poly1305). Без пароля файл не прочитать, подмена данных обнаруживается.
 - Переписка на диск не пишется. Исключения — `/export` и `/save`, которые вы запускаете сами, и недолгие файлы `/open` (папка `tglite-view`, очищается при блокировке, выходе и запуске). История ввода живёт только в памяти; черновики здесь тоже в памяти, а при включённых облачных черновиках (по умолчанию) неотправленный текст хранит сам Telegram, как в любом официальном приложении.
-- Автоблокировка через 1–60 минут (или никогда) и по `F2`; на экране блокировки переписки нет.
+- Автоблокировка через 1–60 минут (или никогда) и по `F2`; на экране блокировки переписки нет. После трёх неверных паролей экран блокировки заставляет подождать перед следующей попыткой: 5, 10, 20 секунд и так далее, до 5 минут. Счётчик живёт в памяти и после перезапуска начинается заново, поэтому это замедляет подбор у экрана, но не заменяет надёжный пароль.
 - Самоуничтожение по желанию: затереть и удалить `tglite.vault` после 3, 5 или 10 неверных паролей на экране блокировки (по умолчанию выключено). Остальные файлы остаются; завершите сессию в Telegram → Настройки → Устройства.
 - В журнале нет текстов сообщений. Выбранный язык хранится в `tglite.lang` (не секрет).
 
@@ -476,7 +482,9 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Планы
 
-**1.2.0 (эта версия):** отметки прочтения в личных чатах, `/pinned`, `/chat @имя`, `/join` и `/leave`, облачные черновики (синхронизация с телефоном), просмотры под постами каналов.
+**1.3.0 (эта версия):** реакции (показ и постановка клавишами `1`–`6` в `F7`), переход к оригиналу ответа (`G`, назад `B`), кнопки сообщений ботов (`K`), растущая пауза после неверных паролей, «Вчера» в разделителях дней, цветовые темы (тёмная, светлая, высокий контраст, Solarized).
+
+**1.2.0:** отметки прочтения в личных чатах, `/pinned`, `/chat @имя`, `/join` и `/leave`, облачные черновики (синхронизация с телефоном), просмотры под постами каналов.
 
 **1.1.0:** мышь (клик по вкладке или чату, прокрутка колесом; выключается в настройках), короткое GIF-демо, замер памяти после долгой активной работы.
 

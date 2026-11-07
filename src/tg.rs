@@ -211,6 +211,32 @@ pub struct Fwd {
     pub from: Option<PeerId>,
 }
 
+/// Реакция под сообщением: смайлик, сколько раз поставили и ставили ли вы.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Reaction {
+    pub emoji: String,
+    pub count: i32,
+    pub mine: bool,
+}
+
+/// Что делает кнопка под сообщением бота.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BtnAction {
+    /// Нажатие, которое сообщается боту.
+    Callback(Vec<u8>),
+    Url(String),
+    /// Текст, который кнопка предлагает скопировать.
+    Copy(String),
+    /// Остальные виды (игры, платежи, веб-приложения, вход через inline): здесь не поддерживаются.
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Btn {
+    pub text: String,
+    pub action: BtnAction,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ChatMsg {
     pub id: i32,
@@ -233,6 +259,10 @@ pub struct ChatMsg {
     pub mentioned: bool,
     /// Просмотры поста канала (на момент загрузки).
     pub views: Option<i32>,
+    /// Реакции под сообщением (на момент загрузки).
+    pub reactions: Vec<Reaction>,
+    /// Inline-кнопки под сообщением бота, по рядам.
+    pub buttons: Vec<Vec<Btn>>,
 }
 
 /// Найденное сообщение.
@@ -291,6 +321,18 @@ pub enum Cmd {
         id: i32,
     },
     MarkRead(ChatInfo),
+    /// Поставить реакцию на сообщение (`None` снимает вашу реакцию).
+    React {
+        chat: ChatInfo,
+        id: i32,
+        emoji: Option<String>,
+    },
+    /// Нажать inline-кнопку бота.
+    Press {
+        chat: ChatInfo,
+        id: i32,
+        data: Vec<u8>,
+    },
     /// Скачать вложение сообщения `id` в папку `downloads` рядом с программой.
     Save {
         chat: ChatInfo,
@@ -412,6 +454,13 @@ pub enum Event {
     },
     /// Файл для просмотра скачан: интерфейс открывает его.
     Open(PathBuf),
+    /// Обновились реакции сообщения.
+    Reacted {
+        chat: PeerId,
+        msg: ChatMsg,
+    },
+    /// Бот ответил на нажатие кнопки (текст может быть пустым).
+    ButtonAnswer(String),
     /// Собеседник прочитал ваши сообщения в личном чате до номера `max_id`.
     ReadOutbox {
         chat: PeerId,
@@ -665,7 +714,51 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
         fwd,
         mentioned: m.mentioned() && !m.outgoing(),
         views: m.view_count().filter(|v| *v > 0),
+        reactions: reactions_of(m),
+        buttons: buttons_of(m),
     }
+}
+
+/// Реакции сообщения: только обычные смайлики, остальные (свои эмодзи, платные) показываются как «?».
+pub fn reactions_of(m: &Message) -> Vec<Reaction> {
+    let tl::enums::Message::Message(x) = &m.raw else { return Vec::new() };
+    let Some(tl::enums::MessageReactions::Reactions(r)) = &x.reactions else { return Vec::new() };
+    r.results
+        .iter()
+        .map(|c| {
+            let tl::enums::ReactionCount::Count(c) = c;
+            let emoji = match &c.reaction {
+                tl::enums::Reaction::Emoji(e) => e.emoticon.clone(),
+                _ => String::new(),
+            };
+            Reaction { emoji, count: c.count, mine: c.chosen_order.is_some() }
+        })
+        .collect()
+}
+
+/// Inline-кнопки сообщения. Тексты очищаются от эмодзи, как и остальной текст.
+pub fn buttons_of(m: &Message) -> Vec<Vec<Btn>> {
+    let Some(tl::enums::ReplyMarkup::ReplyInlineMarkup(mk)) = m.reply_markup() else { return Vec::new() };
+    mk.rows
+        .iter()
+        .map(|row| {
+            let tl::enums::KeyboardInlineButtonRow::Row(row) = row;
+            row.buttons
+                .iter()
+                .map(|b| {
+                    let tl::enums::KeyboardInlineButton::Button(b) = b;
+                    let text = crate::util::clean_or(&b.text, "•");
+                    let action = match &b.r#type {
+                        tl::enums::InlineButtonType::Callback(c) if !c.requires_password => BtnAction::Callback(c.data.clone()),
+                        tl::enums::InlineButtonType::Url(u) => BtnAction::Url(u.url.clone()),
+                        tl::enums::InlineButtonType::Copy(c) => BtnAction::Copy(c.copy_text.clone()),
+                        _ => BtnAction::Other,
+                    };
+                    Btn { text, action }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn dialog_unread(d: &grammers_client::peer::Dialog) -> i32 {
@@ -1272,6 +1365,39 @@ pub async fn save_draft(client: &Client, chat: &ChatInfo, text: &str) -> Result<
     Ok(())
 }
 
+/// Ставит реакцию (или снимает, если `emoji` = None) и возвращает обновлённое сообщение.
+pub async fn react(client: &Client, chat: &ChatInfo, id: i32, emoji: Option<&str>) -> Result<ChatMsg> {
+    use grammers_client::message::InputReactions;
+    let msg = fetch_message(client, chat, id).await?;
+    let reactions = match emoji {
+        Some(e) => InputReactions::emoticon(e),
+        None => InputReactions::remove(),
+    };
+    msg.react(reactions).await.map_err(|e| anyhow!("{e}"))?;
+    Ok(to_chat_msg(&fetch_message(client, chat, id).await?, &chat.name))
+}
+
+async fn fetch_message(client: &Client, chat: &ChatInfo, id: i32) -> Result<Message> {
+    let msgs = client.get_messages_by_id(chat.peer, &[id]).await.map_err(|e| anyhow!("{e}"))?;
+    msgs.into_iter().next().flatten().ok_or_else(|| anyhow!(tr!("сообщение не найдено", "message not found")))
+}
+
+/// Нажимает inline-кнопку бота; возвращает ответ бота (всплывающий текст), если он есть.
+pub async fn press_button(client: &Client, chat: &ChatInfo, id: i32, data: Vec<u8>) -> Result<String> {
+    let ans = client
+        .invoke(&tl::functions::messages::GetBotCallbackAnswer {
+            game: false,
+            peer: chat.peer.into(),
+            msg_id: id,
+            data: Some(data),
+            password: None,
+        })
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    let tl::enums::messages::BotCallbackAnswer::Answer(a) = ans;
+    Ok(a.message.as_deref().map(|t| crate::util::clean(t).trim().to_string()).unwrap_or_default())
+}
+
 /// Разбирает «сырое» обновление о черновике (набран на другом устройстве); темы форумов не учитываем.
 pub fn draft_from_raw(u: &tl::enums::Update) -> Option<(PeerId, String)> {
     match u {
@@ -1599,6 +1725,44 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                             let _ = events.send(Event::Error(trf!("не исправлено: {}", "not edited: {}", friendly_error(&e.to_string()))));
                         }
                     }
+                }
+                Cmd::React { chat, id, emoji } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match react(&client, &chat, id, emoji.as_deref()).await {
+                            Ok(msg) => {
+                                let _ = events.send(Event::Reacted { chat: chat.id, msg });
+                            }
+                            Err(e) => {
+                                log(&format!("react: {e}"));
+                                let _ = events.send(Event::Error(trf!(
+                                    "реакция не поставлена: {}",
+                                    "reaction not set: {}",
+                                    friendly_error(&e.to_string())
+                                )));
+                            }
+                        }
+                    });
+                }
+                Cmd::Press { chat, id, data } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match press_button(&client, &chat, id, data).await {
+                            Ok(text) => {
+                                let _ = events.send(Event::ButtonAnswer(text));
+                            }
+                            Err(e) => {
+                                log(&format!("button: {e}"));
+                                let _ = events.send(Event::Error(trf!(
+                                    "кнопка не сработала: {}",
+                                    "button failed: {}",
+                                    friendly_error(&e.to_string())
+                                )));
+                            }
+                        }
+                    });
                 }
                 Cmd::Delete { chat, id } => match client.delete_messages(chat.peer, &[id]).await {
                     Ok(_) => {

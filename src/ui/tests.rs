@@ -1173,7 +1173,7 @@ fn altgr_characters_are_not_ctrl_shortcuts() {
 fn settings_scroll_keeps_selected_row_visible_on_short_windows() {
     let mut app = demo_app();
     app.mode = Mode::Settings;
-    for row in [0usize, 5, 10, 11, 12, 13] {
+    for row in [0usize, 5, 10, 11, 12, 13, 14] {
         app.settings_row = row;
         let mut term = Terminal::new(TestBackend::new(100, 10)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -1184,6 +1184,7 @@ fn settings_scroll_keeps_selected_row_visible_on_short_windows() {
             10 => "Язык интерфейса",
             11 => "Мышь",
             12 => "Облачные черновики",
+            13 => "Тема",
             _ => "Пароль приложения",
         };
         assert!(text.contains(label), "строка {row} не видна:\n{text}");
@@ -1238,6 +1239,7 @@ fn right_password_resets_attempts_and_wipe_is_off_by_default() {
         press(&mut app, KeyCode::Enter, &tx, &s);
     }
     assert!(!s.is_wiped(), "по умолчанию данные не стираются");
+    app.lock_until = None; // пауза после неверных паролей проверяется отдельным тестом
     type_text(&mut app, "secret", &tx, &s);
     press(&mut app, KeyCode::Enter, &tx, &s);
     assert_eq!(app.mode, Mode::Chat);
@@ -1760,8 +1762,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.2.0"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.2.0");
+    assert!(README.contains("1.3.0"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.3.0");
 }
 
 #[test]
@@ -2921,4 +2923,250 @@ fn cloud_drafts_setting_toggles() {
     app.settings_row = 12;
     app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
     assert!(!app.settings.cloud_drafts && !s.settings().cloud_drafts);
+}
+
+// ───── пачка 1.3.0: пауза, «Вчера», темы, реакции, кнопки ботов, переход к оригиналу ─────
+
+fn text_of(lines: &[Line]) -> String {
+    lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>() + "\n").collect()
+}
+
+#[test]
+fn password_pause_grows_and_blocks_attempts() {
+    assert_eq!([0, 1, 2].map(pause_secs), [0, 0, 0]);
+    assert_eq!([3, 4, 5, 6].map(pause_secs), [5, 10, 20, 40]);
+    assert_eq!(pause_secs(50), 300, "не больше пяти минут");
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.lock();
+    for _ in 0..3 {
+        type_text(&mut app, "нет", &tx, &s);
+        press(&mut app, KeyCode::Enter, &tx, &s);
+    }
+    assert!(app.pause_left().is_some(), "после третьей ошибки включается пауза");
+    type_text(&mut app, "secret", &tx, &s);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!(app.mode, Mode::Locked, "верный пароль во время паузы не принимается");
+    assert_eq!(app.wrong_attempts, 3, "попытка во время паузы не считается");
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(dump(&term).contains("Подождите"), "{}", dump(&term));
+    app.lock_until = Some(Instant::now() - Duration::from_secs(1));
+    type_text(&mut app, "secret", &tx, &s);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!(app.mode, Mode::Chat, "после паузы пароль принимается");
+    assert!(app.lock_until.is_none());
+}
+
+#[test]
+fn day_separator_says_yesterday() {
+    assert_eq!(day_label((2025, 10, 27), Some((2025, 10, 28))), "Вчера");
+    assert_eq!(day_label((2025, 9, 30), Some((2025, 10, 1))), "Вчера", "через границу месяца");
+    assert_eq!(day_label((2024, 12, 31), Some((2025, 1, 1))), "Вчера", "через границу года");
+    assert_eq!(day_label((2025, 10, 26), Some((2025, 10, 28))), "26 октября");
+    assert_eq!(day_label((2025, 10, 28), Some((2025, 10, 28))), "Сегодня");
+}
+
+#[test]
+fn themes_apply_and_every_palette_renders_every_screen() {
+    use std::sync::Mutex;
+    static GUARD: Mutex<()> = Mutex::new(());
+    let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(Settings::default().palette, 0);
+    let s: Settings = serde_json::from_str(r#"{"lock_minutes":15}"#).unwrap();
+    assert_eq!(s.palette, 0, "старое хранилище без темы остаётся тёмным");
+    let mut app = demo_app();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let sv = saver();
+    app.mode = Mode::Settings;
+    app.settings_row = 13;
+    press(&mut app, KeyCode::Right, &tx, &sv);
+    assert_eq!(app.settings.palette, 1);
+    assert_eq!(app.settings.palette_name(), "Светлая");
+    for p in 0..PALETTE_COUNT {
+        set_palette(p);
+        for mode in [Mode::Chat, Mode::Pick, Mode::Overlay, Mode::Help, Mode::Settings, Mode::Forward] {
+            app.mode = mode;
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| draw(f, &mut app)).unwrap();
+            let buf = term.backend().buffer();
+            if let Some(bg) = palette().bg {
+                assert_eq!(buf[(50, 15)].bg, bg, "тема {p}, режим {mode:?}: и окна поверх тоже");
+            }
+        }
+        let c = name_color("Мама");
+        assert!(palette().names.contains(&c));
+        assert_eq!(c, name_color("Мама"), "цвет имени стабилен");
+    }
+    set_palette(0);
+    assert!(palette().bg.is_none(), "тёмная тема не трогает цвета консоли");
+    // Значение из будущего или повреждённого хранилища не приводит к панике.
+    set_palette(200);
+    assert_eq!(PALETTE.load(std::sync::atomic::Ordering::Relaxed), PALETTE_COUNT - 1);
+    set_palette(0);
+}
+
+#[test]
+fn reaction_labels_work_without_emoji_glyphs() {
+    use crate::util::{reaction_key, reaction_label};
+    assert_eq!(reaction_label("👍"), "+1");
+    assert_eq!(reaction_label("❤"), "<3");
+    assert_eq!(reaction_label("❤\u{fe0f}"), "<3", "с селектором вариации то же самое");
+    assert_eq!(reaction_key("❤\u{fe0f}"), reaction_key("❤"));
+    assert_eq!(reaction_label("\u{1f9ff}"), "?", "незнакомый смайлик не ломает строку");
+    assert_eq!(reaction_label(""), "?", "своё эмодзи приходит без символа");
+}
+
+#[test]
+fn reactions_and_buttons_are_drawn_under_the_message() {
+    use crate::tg::{Btn, BtnAction, Reaction};
+    let mut m = msg(1, false, "Бот", "Выберите");
+    m.reactions = vec![Reaction { emoji: "👍".into(), count: 3, mine: false }, Reaction { emoji: "❤".into(), count: 2, mine: true }];
+    m.buttons = vec![
+        vec![
+            Btn { text: "Да".into(), action: BtnAction::Callback(vec![1]) },
+            Btn { text: "Нет".into(), action: BtnAction::Callback(vec![2]) },
+        ],
+        vec![Btn { text: "Сайт".into(), action: BtnAction::Url("https://example.org".into()) }],
+    ];
+    let (lines, _) = build_message_lines(&[m.clone()], 60, 72, None, Color::Blue);
+    let text = text_of(&lines);
+    assert!(text.contains("+1 3") && text.contains("[<3 2]"), "{text}");
+    assert!(text.contains("[Да] [Нет]") && text.contains("[Сайт ↗]"), "{text}");
+    m.outgoing = true;
+    let (lines, _) = build_message_lines(&[m], 60, 72, None, Color::Blue);
+    assert!(text_of(&lines).contains("[Да] [Нет]"), "и у своих сообщений");
+    let plain = msg(2, false, "Аня", "обычное");
+    let (lines, _) = build_message_lines(&[plain], 60, 72, None, Color::Blue);
+    assert_eq!(lines.len(), 4, "разделитель дня, заголовок, текст и пустая строка: {}", text_of(&lines));
+}
+
+#[test]
+fn pick_mode_digits_set_toggle_and_remove_reactions() {
+    use crate::tg::Reaction;
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('2'), &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::React { id, emoji, .. }) => assert_eq!((id, emoji.as_deref()), (2, Some("❤"))),
+        _ => panic!("ожидалась реакция"),
+    }
+    assert_eq!(app.mode, Mode::Pick, "режим выбора остаётся");
+    // Ваша реакция уже стоит: та же цифра снимает её.
+    let chat_id = app.selected().unwrap().id;
+    app.histories.get_mut(&chat_id).unwrap()[1].reactions = vec![Reaction { emoji: "❤\u{fe0f}".into(), count: 1, mine: true }];
+    press(&mut app, KeyCode::Char('2'), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::React { emoji: None, .. })));
+    press(&mut app, KeyCode::Char('0'), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::React { emoji: None, .. })));
+    // Ответ сервера обновляет реакции в переписке.
+    let mut fresh = msg(2, true, "Я", "Всё хорошо!");
+    fresh.reactions = vec![Reaction { emoji: "🔥".into(), count: 4, mine: false }];
+    app.handle_event(Event::Reacted { chat: chat_id, msg: fresh }, &tx);
+    assert_eq!(app.histories[&chat_id][1].reactions[0].count, 4);
+}
+
+#[test]
+fn bot_buttons_open_list_and_press_by_digit() {
+    use crate::tg::{Btn, BtnAction};
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let chat_id = app.selected().unwrap().id;
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('k'), &tx, &s);
+    assert_eq!(app.mode, Mode::Pick, "у сообщения без кнопок список не открывается");
+    assert!(!app.pick_note.is_empty());
+    app.histories.get_mut(&chat_id).unwrap()[1].buttons = vec![
+        vec![Btn { text: "Да".into(), action: BtnAction::Callback(vec![7, 8]) }],
+        vec![Btn { text: "Игра".into(), action: BtnAction::Other }],
+    ];
+    press(&mut app, KeyCode::Char('л'), &tx, &s); // русская раскладка
+    assert_eq!(app.mode, Mode::Overlay);
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("1. Да") && text.contains("2. Игра") && text.contains("не поддерживается"), "{text}");
+    press(&mut app, KeyCode::Char('2'), &tx, &s);
+    assert!(drain(&mut rx).is_empty(), "кнопка неподдерживаемого вида ничего не отправляет");
+    assert!(app.status.contains("не поддерживается"), "{}", app.status);
+    press(&mut app, KeyCode::Char('1'), &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::Press { id, data, .. }) => assert_eq!((id, data), (2, vec![7, 8])),
+        _ => panic!("ожидалось нажатие кнопки"),
+    }
+    assert_eq!(app.mode, Mode::Chat);
+    app.handle_event(Event::ButtonAnswer("Готово".into()), &tx);
+    assert!(app.status.contains("Готово"));
+    app.handle_event(Event::ButtonAnswer(String::new()), &tx);
+    assert!(app.status.contains("нажата"));
+}
+
+#[test]
+fn edited_bot_message_updates_its_buttons() {
+    use crate::tg::{Btn, BtnAction};
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let chat_id = app.selected().unwrap().id;
+    let mut edited = msg(1, false, "Мама", "новый текст");
+    edited.buttons = vec![vec![Btn { text: "Ещё".into(), action: BtnAction::Callback(vec![1]) }]];
+    app.handle_event(Event::Edited { chat: chat_id, msg: edited }, &tx);
+    assert_eq!(app.histories[&chat_id][0].buttons.len(), 1);
+}
+
+#[test]
+fn jump_to_reply_original_and_back() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let chat_id = app.selected().unwrap().id;
+    app.histories.get_mut(&chat_id).unwrap()[1].reply_to = Some(1);
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    assert_eq!(app.pick, 1);
+    press(&mut app, KeyCode::Char('g'), &tx, &s);
+    assert_eq!(app.pick, 0, "выбран оригинал, он уже загружен");
+    assert!(drain(&mut rx).is_empty());
+    press(&mut app, KeyCode::Char('g'), &tx, &s);
+    assert!(app.pick_note.contains("не ответ"), "у оригинала нет ответа: {}", app.pick_note);
+    press(&mut app, KeyCode::Char('и'), &tx, &s); // B в русской раскладке
+    assert_eq!(app.pick, 1, "вернулись к ответу");
+    press(&mut app, KeyCode::Char('b'), &tx, &s);
+    assert!(app.pick_note.contains("некуда"));
+    // Оригинал не загружен: просим окружение и после загрузки остаёмся в режиме выбора.
+    app.histories.get_mut(&chat_id).unwrap()[1].reply_to = Some(999);
+    press(&mut app, KeyCode::Char('g'), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::LoadAround { id: 999, .. })));
+    let around = vec![msg(998, false, "Мама", "раньше"), msg(999, false, "Мама", "оригинал"), msg(1, true, "Я", "ответ")];
+    app.handle_event(Event::Around { chat: chat_id, msgs: around, focus: 999 }, &tx);
+    assert_eq!(app.mode, Mode::Pick);
+    assert_eq!(app.histories[&chat_id][app.pick].id, 999);
+}
+
+#[test]
+fn jump_history_is_dropped_when_the_chat_changes() {
+    let mut app = app_with_chats();
+    app.jump_back.push((app.selected().unwrap().id, 1, 0));
+    let other = app.chats[1].id;
+    app.set_sel(Some(other));
+    assert!(app.jump_back.is_empty());
+}
+
+#[test]
+fn new_pick_keys_are_in_help_and_hint() {
+    let mut app = demo_app();
+    app.mode = Mode::Help;
+    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("F7 → 1-6, G, K"), "{text}");
+    app.mode = Mode::Pick;
+    let chat_id = app.selected().unwrap().id;
+    let last = app.histories[&chat_id].len() - 1;
+    app.histories.get_mut(&chat_id).unwrap()[last].reply_to = Some(1);
+    app.pick = last;
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(dump(&term).contains("G к оригиналу"), "подсказка показывает G только для ответа");
 }

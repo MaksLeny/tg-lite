@@ -5,15 +5,15 @@
 /* Layout: sticky filter bar over a grouped ledger; one row per idea, columns collapse to a card on phones. */
 :root{
   --bg:#f4f6f9; --surface:#ffffff; --fg:#141a22; --muted:#5a6676; --line:#dde2ea; --accent:#177ac0; --accent-fg:#ffffff;
-  --p1:#d4452a; --p2:#b87a05; --p3:#2f72b0; --p4:#7656c4; --p5:#6f7888;
+  --p1:#d4452a; --p2:#b87a05; --p3:#2f72b0; --p4:#7656c4; --p5:#6f7888; --p6:#3f8a7a;
   --font:"Golos Text",system-ui,"Segoe UI",sans-serif; --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
 }
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
   --bg:#0d1219; --surface:#141b25; --fg:#e7ebf1; --muted:#9aa5b6; --line:#25303f; --accent:#4cb3f0; --accent-fg:#06121c;
-  --p1:#ff7b5e; --p2:#e9b24c; --p3:#6fa9e3; --p4:#a98ff2; --p5:#8f99aa; color-scheme:dark } }
+  --p1:#ff7b5e; --p2:#e9b24c; --p3:#6fa9e3; --p4:#a98ff2; --p5:#8f99aa; --p6:#6cc4b0; color-scheme:dark } }
 :root[data-theme="dark"]{
   --bg:#0d1219; --surface:#141b25; --fg:#e7ebf1; --muted:#9aa5b6; --line:#25303f; --accent:#4cb3f0; --accent-fg:#06121c;
-  --p1:#ff7b5e; --p2:#e9b24c; --p3:#6fa9e3; --p4:#a98ff2; --p5:#8f99aa; color-scheme:dark }
+  --p1:#ff7b5e; --p2:#e9b24c; --p3:#6fa9e3; --p4:#a98ff2; --p5:#8f99aa; --p6:#6cc4b0; color-scheme:dark }
 body{background:var(--bg);color:var(--fg);font-family:var(--font);font-size:15px;line-height:1.5;
   padding-block:28px 56px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
 .wrap{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
@@ -130,7 +130,7 @@ label.sel{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--mut
 </div>
 
 <script>
-const PRIO=[{k:1,n:"Важно",c:"var(--p1)"},{k:2,n:"Желательно",c:"var(--p2)"},{k:3,n:"Не важно",c:"var(--p3)"},{k:4,n:"Далёкое будущее",c:"var(--p4)"},{k:5,n:"Не планируется",c:"var(--p5)"}];
+const PRIO=[{k:1,n:"Важно",c:"var(--p1)"},{k:2,n:"Желательно",c:"var(--p2)"},{k:3,n:"Не важно",c:"var(--p3)"},{k:4,n:"Далёкое будущее",c:"var(--p4)"},{k:5,n:"Не планируется",c:"var(--p5)"},{k:6,n:"Оставили на потом",c:"var(--p6)"}];
 const CATS={msg:"Сообщения",files:"Файлы и медиа",sec:"Безопасность",net:"Сеть и прокси",perf:"Скорость и ОЗУ",ui:"Удобство",vis:"Визуал",auto:"Автоматизация",plat:"Платформы",qa:"Качество и CI",comm:"Сообщество и раздача"};
 const VERS=["1.0.x","1.1","1.2","1.x","2.0","–"];
 const EFF={S:1,M:2,L:3,XL:4};
@@ -150,10 +150,10 @@ const D=[
 ["msg",2,"S",0,"1.1","Список закреплённых","Сейчас показывается одно закреплённое сообщение; добавить /pinned со всеми."],
 ["msg",2,"S",0,"1.1","Вступить по ссылке, выйти из чата","Вставить t.me/… и вступить; команда выхода из чата или канала."],
 ["msg",2,"M",0,"1.2","Открыть чат по @username","Глобальный поиск пользователя или канала, чтобы написать первым."],
-["msg",2,"M",0,"1.2","Автодополнение @упоминаний","Tab подставляет имя участника группы."],
+["msg",6,"M",0,"–","Автодополнение @упоминаний","Tab подставляет имя участника группы. Решили оставить на потом."],
 ["msg",2,"S",0,"1.1","Отметки прочтения","Показывать, прочитано ли своё сообщение."],
 ["msg",2,"M",0,"1.2","Облачные черновики","Синхронизировать черновики с телефоном и другими устройствами."],
-["msg",3,"S",0,"1.x","Шаблоны ответов","/tpl: сохранить фразу и вставлять по короткому имени."],
+["msg",6,"S",0,"–","Шаблоны ответов","/tpl: сохранить фразу и вставлять по короткому имени. Решили оставить на потом."],
 ["msg",3,"M",0,"1.x","Профиль и участники чата","Описание, список участников, ссылка-приглашение."],
 ["msg",3,"M",0,"1.x","Просмотры постов канала","Счётчик просмотров под постами, чтобы не открывать телефон."],
 ["msg",3,"L",0,"2.0","Управление группой","Кик, бан, права админов, создание групп и каналов."],
