@@ -71,6 +71,7 @@ jobs:
         if: env.SKIP != '1' && env.DRY_RUN != 'true'
         run: |
           api="https://api.telegram.org/bot${TG_BOT_TOKEN}"
+          # chat_id вида @канал нельзя передавать через -F: curl принял бы «@…» за имя файла (ошибка 26), поэтому --form-string.
           # Ответ Telegram показываем в журнале (в нём нет токена), чтобы причина ошибки была видна.
           send() {
             code=$(curl -sS -o resp.json -w '%{http_code}' "$@") || code=000
@@ -83,10 +84,10 @@ jobs:
           echo "Текст отправлен"
           for try in 1 2 3; do
             if send "$api/sendDocument" \
-              -F "chat_id=${TG_CHAT_ID}" \
+              --form-string "chat_id=${TG_CHAT_ID}" \
               -F "document=@tg-lite.exe;type=application/octet-stream" \
-              -F "caption=tg-lite.exe" \
-              -F "disable_content_type_detection=true"; then
+              --form-string "caption=tg-lite.exe" \
+              --form-string "disable_content_type_detection=true"; then
               echo "Файл отправлен"; exit 0
             fi
             echo "Файл не ушёл, попытка $try из 3"; sleep 10
