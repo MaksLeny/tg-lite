@@ -4,7 +4,7 @@
 //! Клавиши сделаны так, чтобы работать в обычной консоли Windows:
 //! F-клавиши и /команды не зависят от раскладки, а Ctrl-комбинации — запасной вариант.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,7 @@ const COMMANDS: &[&str] = &[
     "/findall",
     "/latest",
     "/pinned",
+    "/topics",
     "/pin",
     "/chat",
     "/join",
@@ -298,6 +299,8 @@ enum Mode {
     NewPassword,
     /// Список поверх чата: ссылки или отложенные сообщения.
     Overlay,
+    /// Просмотр фото в консоли.
+    Preview,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -310,6 +313,10 @@ enum OverlayKind {
     Search,
     /// Inline-кнопки сообщения бота.
     Buttons,
+    /// Варианты ответа опроса.
+    Poll,
+    /// Темы форума: выбранная становится местом отправки.
+    Topics,
 }
 
 #[derive(Default)]
@@ -361,6 +368,10 @@ pub struct App {
     hit_tabs: Vec<(u16, u16, Tab)>,
     hit_list: Rect,
     hit_msgs: Rect,
+    /// Раскладка сообщений на экране (для мыши): диапазоны строк, первая видимая строка, область.
+    geom: Option<MsgGeom>,
+    /// Идёт выделение мышью (левая кнопка зажата).
+    drag: Option<Drag>,
     tab: Tab,
     folders: Vec<Folder>,
     histories: HashMap<PeerId, Vec<ChatMsg>>,
@@ -409,8 +420,20 @@ pub struct App {
     drafts: HashMap<PeerId, (String, usize)>,
     /// Сообщение, ожидающее подтверждения удаления (второй `/del`).
     pending_delete: Option<(PeerId, i32)>,
+    /// Сообщения, отмеченные для пакетных действий (id в текущем чате).
+    marked: BTreeSet<i32>,
+    /// Тема форума, в которую уходят сообщения: (чат, номер темы, название).
+    topic: Option<(PeerId, i32, String)>,
+    /// Открытое фото: размеры и точки RGB.
+    preview: Option<Preview>,
+    /// Ждём второго D для удаления всех отмеченных.
+    pending_delete_marked: bool,
     /// Чат, для которого уже набрано первое /leave и ждём повторного.
     pending_leave: Option<PeerId>,
+    /// Связь с Telegram: задержка последнего пинга (`Some(None)` — нет связи, `None` — ещё не измеряли).
+    net: Option<Option<u32>>,
+    /// Сообщения, ожидающие связи (чат и текст), в порядке отправки.
+    queued: Vec<(PeerId, String)>,
     /// Откуда прыгали к оригиналу ответа (чат, номер и время сообщения): по B возвращаемся.
     jump_back: Vec<(PeerId, i32, i64)>,
     /// После загрузки окружения вернуться в режим выбора сообщения.
@@ -428,7 +451,7 @@ pub struct App {
     /// Номер сообщения, которое сейчас правится.
     edit_target: Option<i32>,
     /// Пересылаемое сообщение: откуда и номер.
-    fwd_src: Option<(ChatInfo, i32)>,
+    fwd_src: Option<(ChatInfo, Vec<i32>)>,
     /// Неверные пароли подряд на экране блокировки.
     wrong_attempts: u32,
     /// До какого момента пароль не принимается (пауза после серии неверных попыток).
@@ -455,6 +478,8 @@ impl App {
             hit_tabs: Vec::new(),
             hit_list: Rect::default(),
             hit_msgs: Rect::default(),
+            geom: None,
+            drag: None,
             tab: Tab::All,
             folders: Vec::new(),
             histories: HashMap::new(),
@@ -491,7 +516,13 @@ impl App {
             filter: String::new(),
             drafts: HashMap::new(),
             pending_delete: None,
+            marked: BTreeSet::new(),
+            topic: None,
+            preview: None,
+            pending_delete_marked: false,
             pending_leave: None,
+            net: None,
+            queued: Vec::new(),
             jump_back: Vec::new(),
             pick_after_jump: false,
             cloud_drafts: HashMap::new(),
@@ -677,6 +708,8 @@ impl App {
         self.older_busy = false;
         self.sel = new;
         self.pending_delete = None;
+        self.marked.clear();
+        self.pending_delete_marked = false;
         self.pending_leave = None;
         self.jump_back.clear();
         self.pick_after_jump = false;
@@ -817,6 +850,8 @@ impl App {
         self.pw_first.clear();
         self.pw_stage = 0;
         self.fwd_src = None;
+        self.preview = None;
+        self.marked.clear();
         self.overlay = None;
         util::clear_view_dir(); // файлы, открытые через /open, не должны лежать на диске при блокировке
     }
@@ -854,6 +889,30 @@ impl App {
             Mode::Locked | Mode::NewPassword => self.lock_input.push_str(&crate::util::paste_line(&text)),
             _ => {}
         }
+    }
+
+    /// Если в буфере обмена картинка (скриншот) и текста нет, отправляет её фото; текст из поля становится подписью.
+    fn paste_image(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) -> bool {
+        if util::clipboard_text().is_some_and(|t| !t.trim().is_empty()) {
+            return false;
+        }
+        let Some(png) = util::clipboard_image_png() else { return false };
+        let Some(chat) = self.selected().cloned() else {
+            self.status = tr!("Сначала выберите чат", "Select a chat first").into();
+            return true;
+        };
+        let dir = util::view_dir();
+        let path = dir.join(format!("screenshot-{}.png", jiff::Timestamp::now().as_second()));
+        if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, &png).is_err() {
+            self.status =
+                tr!("Не удалось сохранить скриншот во временную папку", "Could not save the screenshot to the temporary folder").into();
+            return true;
+        }
+        let caption = std::mem::take(&mut self.input).trim().to_string();
+        self.cursor = 0;
+        let _ = cmd.send(Cmd::SendFile { chat, path, caption });
+        self.status = tr!("Отправляю скриншот…", "Sending the screenshot…").into();
+        true
     }
 
     fn input_len(&self) -> usize {
@@ -1053,12 +1112,47 @@ impl App {
                 let title = trf!(" Найдено: {} · «{query}» ", " Found: {} · “{query}” ", items.len());
                 self.open_overlay(OverlayKind::Search, &title, items);
             }
+            Event::Latency(ms) => self.net = Some(ms),
+            Event::Queued { chat, text, count } => {
+                self.queued.push((chat, text));
+                self.status = trf!(
+                    "Нет связи: сообщение в очереди ({count}), уйдёт само, когда связь вернётся",
+                    "No connection: message queued ({count}), it will be sent when the connection is back"
+                );
+            }
+            Event::QueueSent { chat, text, left } => {
+                if let Some(i) = self.queued.iter().position(|(c, t)| *c == chat && *t == text) {
+                    self.queued.remove(i);
+                }
+                self.status = if left == 0 {
+                    tr!("Очередь отправлена", "Queued messages were sent").into()
+                } else {
+                    trf!("Из очереди отправлено, осталось {left}", "Sent from the queue, {left} left")
+                };
+            }
+            Event::QueueDropped { chat, text, reason } => {
+                if let Some(i) = self.queued.iter().position(|(c, t)| *c == chat && *t == text) {
+                    self.queued.remove(i);
+                }
+                self.status = trf!("Не отправлено из очереди: {reason}", "Not sent from the queue: {reason}");
+                if self.input.is_empty() {
+                    self.input = text;
+                    self.cursor = self.input_len();
+                }
+            }
             Event::Reacted { chat, msg } => {
                 if let Some(m) = self.histories.get_mut(&chat).and_then(|h| h.iter_mut().find(|m| m.id == msg.id)) {
                     m.reactions = msg.reactions;
+                    if msg.poll.is_some() {
+                        m.poll = msg.poll.clone();
+                    }
                 }
                 self.pick_note.clear();
-                self.status = tr!("Реакция обновлена", "Reaction updated").into();
+                self.status = if msg.poll.is_some() {
+                    tr!("Голос учтён", "Vote counted").into()
+                } else {
+                    tr!("Реакция обновлена", "Reaction updated").into()
+                };
             }
             Event::ButtonAnswer(text) => {
                 self.status = if text.is_empty() {
@@ -1071,6 +1165,38 @@ impl App {
                 if let Some(c) = self.chats.iter_mut().find(|c| c.id == chat) {
                     c.read_out = c.read_out.max(max_id);
                 }
+            }
+            Event::Preview { chat, jpeg, .. } => {
+                if self.mode == Mode::Locked || self.sel != Some(chat) {
+                    return;
+                }
+                match util::decode_jpeg(&jpeg) {
+                    Some((w, h, rgb)) => {
+                        self.preview = Some(Preview { w, h, rgb });
+                        self.mode = Mode::Preview;
+                        self.status.clear();
+                    }
+                    None => self.status = tr!("Не удалось показать превью", "Could not show the preview").into(),
+                }
+            }
+            Event::Topics { chat, items } => {
+                if self.mode == Mode::Locked {
+                    return;
+                }
+                if items.is_empty() {
+                    self.status = tr!("В этом чате нет тем", "This chat has no topics").into();
+                    return;
+                }
+                let items: Vec<OverlayItem> = items
+                    .into_iter()
+                    .map(|(id, title, unread)| OverlayItem {
+                        label: if unread > 0 { format!("{title}  ({unread})") } else { title.clone() },
+                        data: title,
+                        id,
+                        target: Some((chat, id, 0)),
+                    })
+                    .collect();
+                self.open_overlay(OverlayKind::Topics, tr!(" Темы: Enter — писать в тему ", " Topics: Enter to post in one "), items);
             }
             Event::PinnedList { chat, hits } => {
                 if self.mode == Mode::Locked {
@@ -1460,14 +1586,68 @@ impl App {
     /// Мышь: клик по вкладке или чату, колесо прокручивает ленту под указателем или список чатов.
     /// Работает только в обычном режиме и если включено в настройках.
     fn handle_mouse(&mut self, ev: MouseEvent, cmd: &mpsc::UnboundedSender<Cmd>) -> bool {
-        if !self.settings.mouse || self.mode != Mode::Chat {
+        if !self.settings.mouse || !matches!(self.mode, Mode::Chat | Mode::Pick) {
             return false;
         }
         let (x, y) = (ev.column, ev.row);
         let inside = |r: Rect| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
         match ev.kind {
+            MouseEventKind::Down(MouseButton::Left)
+                if self
+                    .geom
+                    .as_ref()
+                    .is_some_and(|g| x >= g.body.x && x < g.body.x + g.body.width && y >= g.body.y && y < g.body.y + g.body.height) =>
+            {
+                self.last_activity = Instant::now();
+                let Some(idx) = self.msg_idx_at(y) else { return true };
+                let Some(id) = self.sel.and_then(|c| self.histories.get(&c)).and_then(|h| h.get(idx)).map(|m| m.id) else {
+                    return true;
+                };
+                if ev.modifiers.contains(KeyModifiers::CONTROL) {
+                    if self.mode != Mode::Pick {
+                        self.start_pick();
+                    }
+                    self.toggle_mark(id);
+                    self.pick = idx;
+                } else if self.mode == Mode::Pick {
+                    self.marked.clear();
+                    self.pick = idx;
+                }
+                // В обычном режиме простой щелчок ничего не меняет: выбор начнётся, только если потянуть мышь.
+                self.pending_delete = None;
+                self.pending_delete_marked = false;
+                self.drag = Some(Drag { anchor: id, edge: 0, held: 0, started: false });
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.last_activity = Instant::now();
+                let Some(g) = self.geom.as_ref() else { return false };
+                let (top, bottom) = (g.body.y, g.body.y + g.body.height.saturating_sub(1));
+                let Some(d) = self.drag.as_mut() else { return false };
+                let edge = if y <= top {
+                    -1
+                } else if y >= bottom {
+                    1
+                } else {
+                    0
+                };
+                if edge != d.edge {
+                    d.held = 0;
+                }
+                d.edge = edge;
+                let yy = y.clamp(top, bottom);
+                if let Some(idx) = self.msg_idx_at(yy) {
+                    self.drag_to(idx);
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_activity = Instant::now();
+                if self.mode == Mode::Pick {
+                    self.mode = Mode::Chat;
+                    self.marked.clear();
+                }
                 if y == 0 {
                     if let Some((_, _, t)) = self.hit_tabs.iter().find(|(a, b, _)| x >= *a && x < *b) {
                         self.tab = t.clone();
@@ -1488,7 +1668,18 @@ impl App {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.last_activity = Instant::now();
                 let up = ev.kind == MouseEventKind::ScrollUp;
-                if inside(self.hit_msgs) {
+                if self.mode == Mode::Pick && inside(self.hit_msgs) {
+                    // В режиме выбора колесо двигает курсор: лента сама следует за ним.
+                    let len = self.sel.and_then(|c| self.histories.get(&c)).map_or(0, Vec::len);
+                    if up {
+                        if self.pick < 3 {
+                            self.request_older(cmd);
+                        }
+                        self.pick = self.pick.saturating_sub(3);
+                    } else if len > 0 {
+                        self.pick = (self.pick + 3).min(len - 1);
+                    }
+                } else if inside(self.hit_msgs) {
                     if up {
                         if self.scroll >= self.max_scroll {
                             self.request_older(cmd);
@@ -1509,6 +1700,58 @@ impl App {
         }
     }
 
+    /// Номер сообщения под строкой экрана `y` (между сообщениями — ближайшее выше).
+    fn msg_idx_at(&self, y: u16) -> Option<usize> {
+        let g = self.geom.as_ref()?;
+        let line = g.start + y.saturating_sub(g.body.y) as usize;
+        let n = self.sel.and_then(|c| self.histories.get(&c)).map_or(0, Vec::len);
+        let idx = g.ranges.iter().rposition(|&(s, _)| s <= line).unwrap_or(0);
+        (idx < n).then_some(idx)
+    }
+
+    /// Протянули мышью до сообщения `idx`: отмечаем всё от якоря до него.
+    fn drag_to(&mut self, idx: usize) {
+        let Some(h) = self.sel.and_then(|c| self.histories.get(&c)) else { return };
+        let Some(d) = self.drag.as_mut() else { return };
+        let Some(a) = h.iter().position(|m| m.id == d.anchor) else { return };
+        if idx == a && !d.started && d.edge == 0 {
+            return;
+        }
+        d.started = true;
+        let (lo, hi) = (a.min(idx), a.max(idx));
+        self.marked = h[lo..=hi.min(h.len() - 1)].iter().map(|m| m.id).collect();
+        self.pick = idx.min(h.len() - 1);
+        self.mode = Mode::Pick;
+    }
+
+    /// Раз в 100 мс: пока курсор мыши прижат к верхнему или нижнему краю, лента листается сама, всё быстрее.
+    fn drag_tick(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) -> bool {
+        let Some(d) = self.drag.as_mut() else { return false };
+        if d.edge == 0 {
+            return false;
+        }
+        d.held += 1;
+        let step = 1 + (d.held / 10).min(3) as usize;
+        let edge = d.edge;
+        let len = self.sel.and_then(|c| self.histories.get(&c)).map_or(0, Vec::len);
+        if len == 0 {
+            return false;
+        }
+        let target = if edge < 0 {
+            if self.pick < step {
+                self.request_older(cmd);
+            }
+            self.pick.saturating_sub(step)
+        } else {
+            (self.pick + step).min(len - 1)
+        };
+        if target == self.pick {
+            return false;
+        }
+        self.drag_to(target);
+        true
+    }
+
     fn handle_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>, saver: &Arc<Saver>) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -1519,6 +1762,9 @@ impl App {
         self.focus_msg = None; // подсветка найденного сообщения живёт до первого нажатия
 
         if is_paste_key(&key) && matches!(self.mode, Mode::Chat | Mode::Locked | Mode::NewPassword) {
+            if self.mode == Mode::Chat && self.paste_image(cmd) {
+                return;
+            }
             self.paste(None);
             return;
         }
@@ -1593,6 +1839,14 @@ impl App {
             }
             Mode::Overlay => {
                 self.handle_overlay_key(key, cmd);
+                return;
+            }
+            Mode::Preview => {
+                if key.code == KeyCode::F(10) {
+                    self.should_quit = true;
+                }
+                self.preview = None;
+                self.mode = Mode::Pick;
                 return;
             }
             Mode::Pick => {
@@ -1774,7 +2028,8 @@ impl App {
             Some(min) => trf!("Планирую на {}…", "Scheduling for {}…", when_label(min)),
             None => tr!("Отправляю…", "Sending…").into(),
         };
-        let reply_to = self.reply.take().map(|(id, _)| id);
+        let in_topic = self.topic.as_ref().filter(|(c, _, _)| *c == chat.id).map(|(_, id, _)| *id);
+        let reply_to = self.reply.take().map(|(id, _)| id).or(in_topic);
         self.cloud_drafts.remove(&chat.id); // после отправки Telegram сам стирает черновик чата
         let _ = cmd.send(Cmd::Send { chat, text: body, markdown: self.markdown, delay_minutes: delay, reply_to });
         self.clear_input();
@@ -1882,6 +2137,27 @@ impl App {
         }
     }
 
+    /// Голосует за выбранный в окне вариант опроса.
+    fn activate_vote(&mut self, cmd: &mpsc::UnboundedSender<Cmd>) {
+        let Some(ov) = &self.overlay else { return };
+        let Some(item) = ov.items.get(ov.sel) else { return };
+        let Some((chat_id, msg_id, _)) = item.target else { return };
+        let option = self
+            .histories
+            .get(&chat_id)
+            .and_then(|h| h.iter().find(|m| m.id == msg_id))
+            .and_then(|m| m.poll.as_ref())
+            .and_then(|p| p.options.get(item.id.max(0) as usize))
+            .map(|o| o.data.clone());
+        let chat = self.chats.iter().find(|c| c.id == chat_id).cloned();
+        if let (Some(option), Some(chat)) = (option, chat) {
+            let _ = cmd.send(Cmd::Vote { chat, id: msg_id, option });
+            self.status = tr!("Голосую…", "Voting…").into();
+            self.overlay = None;
+            self.mode = Mode::Chat;
+        }
+    }
+
     fn handle_overlay_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>) {
         let Some(ov) = self.overlay.as_mut() else {
             self.mode = Mode::Chat;
@@ -1896,14 +2172,18 @@ impl App {
         if key.code != KeyCode::Enter {
             ov.confirm = None;
         }
-        if ov.kind == OverlayKind::Buttons
+        if matches!(ov.kind, OverlayKind::Buttons | OverlayKind::Poll)
             && let KeyCode::Char(c) = key.code
             && let Some(d) = c.to_digit(10)
             && d >= 1
             && (d as usize) <= len
         {
             ov.sel = d as usize - 1;
-            self.activate_button(cmd);
+            if ov.kind == OverlayKind::Poll {
+                self.activate_vote(cmd);
+            } else {
+                self.activate_button(cmd);
+            }
             return;
         }
         match key.code {
@@ -1929,6 +2209,21 @@ impl App {
                 }
                 OverlayKind::Faq => {}
                 OverlayKind::Buttons => self.activate_button(cmd),
+                OverlayKind::Poll => self.activate_vote(cmd),
+                OverlayKind::Topics => {
+                    if let Some(item) = ov.items.get(ov.sel)
+                        && let Some((chat_id, id, _)) = item.target
+                    {
+                        self.status = trf!(
+                            "Сообщения уйдут в тему «{}» (/topics off — в общий поток)",
+                            "Messages go to the topic \"{}\" (/topics off for the general feed)",
+                            item.data
+                        );
+                        self.topic = Some((chat_id, id, item.data.clone()));
+                    }
+                    self.overlay = None;
+                    self.mode = Mode::Chat;
+                }
                 OverlayKind::Search => {
                     let target = ov.items[ov.sel].target;
                     self.overlay = None;
@@ -1976,6 +2271,8 @@ impl App {
                 self.pick_note.clear();
                 self.mode = Mode::Pick;
                 self.pending_delete = None;
+                self.marked.clear();
+                self.pending_delete_marked = false;
                 self.pending_leave = None;
             }
             _ => self.status = tr!("В этом чате пока нет сообщений", "No messages in this chat yet").into(),
@@ -2008,15 +2305,50 @@ impl App {
                 'g' | 'п' => Some('g'),
                 'b' | 'и' => Some('b'),
                 'k' | 'л' => Some('k'),
+                'v' | 'м' => Some('v'),
+                'p' | 'з' => Some('p'),
                 _ => None,
             },
             _ => None,
         };
         if letter != Some('d') {
             self.pending_delete = None;
+            self.pending_delete_marked = false;
         }
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match (key.code, letter) {
+            (KeyCode::Esc, _) if !self.marked.is_empty() => {
+                self.marked.clear();
+                self.status = tr!("Отметки сброшены", "Marks cleared").into();
+            }
             (KeyCode::Esc | KeyCode::F(7) | KeyCode::Enter, _) => self.mode = Mode::Chat,
+            (KeyCode::Char(' '), _) => {
+                if let Some(id) = self.picked().map(|m| m.id) {
+                    self.toggle_mark(id);
+                    self.pick = (self.pick + 1).min(len - 1);
+                }
+            }
+            (KeyCode::Up, _) if shift => {
+                if let Some(id) = self.picked().map(|m| m.id) {
+                    self.marked.insert(id);
+                }
+                if self.pick == 0 {
+                    self.request_older(cmd);
+                }
+                self.pick = self.pick.saturating_sub(1);
+                if let Some(id) = self.picked().map(|m| m.id) {
+                    self.marked.insert(id);
+                }
+            }
+            (KeyCode::Down, _) if shift => {
+                if let Some(id) = self.picked().map(|m| m.id) {
+                    self.marked.insert(id);
+                }
+                self.pick = (self.pick + 1).min(len - 1);
+                if let Some(id) = self.picked().map(|m| m.id) {
+                    self.marked.insert(id);
+                }
+            }
             (KeyCode::F(10), _) => self.should_quit = true,
             (KeyCode::Up, _) => {
                 if self.pick == 0 {
@@ -2064,6 +2396,38 @@ impl App {
                     _ => self.pick_note = tr!("Возвращаться некуда", "Nowhere to go back to").into(),
                 },
             },
+            (_, Some('p')) => {
+                if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
+                    if m.caption.is_none() {
+                        self.pick_note = tr!("В этом сообщении нет фото", "This message has no photo").into();
+                    } else {
+                        let _ = cmd.send(Cmd::Preview { chat, id: m.id });
+                        self.status = tr!("Загружаю превью…", "Loading the preview…").into();
+                    }
+                }
+            }
+            (_, Some('v')) => {
+                if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
+                    match m.poll.as_ref() {
+                        None => self.pick_note = tr!("Это не опрос", "This is not a poll").into(),
+                        Some(p) if p.closed => self.pick_note = tr!("Опрос закрыт", "This poll is closed").into(),
+                        Some(p) => {
+                            let items = p
+                                .options
+                                .iter()
+                                .enumerate()
+                                .map(|(i, o)| OverlayItem {
+                                    label: format!("{}. {}{}", i + 1, o.text, if o.chosen { "  ✓" } else { "" }),
+                                    id: i as i32,
+                                    target: Some((chat.id, m.id, 0)),
+                                    ..Default::default()
+                                })
+                                .collect();
+                            self.open_overlay(OverlayKind::Poll, tr!(" Голосование ", " Vote "), items);
+                        }
+                    }
+                }
+            }
             (_, Some('k')) => {
                 if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
                     if m.buttons.is_empty() {
@@ -2128,6 +2492,30 @@ impl App {
                     }
                 }
             }
+            (_, Some('d')) if !self.marked.is_empty() => {
+                let Some(chat) = self.selected().cloned() else { return };
+                let msgs = self.marked_msgs();
+                if msgs.iter().any(|m| !m.outgoing) {
+                    let note = tr!(
+                        "Среди отмеченных есть чужие: удалять можно только свои",
+                        "Some marked messages are not yours: you can only delete your own"
+                    )
+                    .to_string();
+                    self.status = note.clone();
+                    self.pick_note = note;
+                } else if self.pending_delete_marked {
+                    self.pending_delete_marked = false;
+                    let ids: Vec<i32> = msgs.iter().map(|m| m.id).collect();
+                    let _ = cmd.send(Cmd::DeleteMany { chat, ids });
+                    self.marked.clear();
+                    self.status = tr!("Удаляю…", "Deleting…").into();
+                    self.mode = Mode::Chat;
+                } else {
+                    self.pending_delete_marked = true;
+                    self.status = trf!("Удалить сообщений: {}? Нажмите D ещё раз", "Delete {} messages? Press D again", msgs.len());
+                    self.pick_note = self.status.clone();
+                }
+            }
             (_, Some('d')) => {
                 let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) else { return };
                 if !m.outgoing {
@@ -2156,6 +2544,17 @@ impl App {
                         self.mode = Mode::Chat;
                     }
                 }
+            }
+            (_, Some('c')) if !self.marked.is_empty() => {
+                let msgs = self.marked_msgs();
+                let text = msgs.iter().map(|m| format!("{}: {}", m.sender, m.raw.trim_end())).collect::<Vec<_>>().join("\n");
+                let note = if util::clipboard_set(&text) {
+                    trf!("Скопировано сообщений: {}", "Copied messages: {}", msgs.len())
+                } else {
+                    tr!("Не удалось скопировать: буфер обмена недоступен", "Could not copy: clipboard is not available").to_string()
+                };
+                self.status = note.clone();
+                self.pick_note = note;
             }
             (_, Some('c')) => {
                 if let Some(m) = self.picked().cloned() {
@@ -2187,7 +2586,9 @@ impl App {
             }
             (_, Some('f')) => {
                 if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
-                    self.fwd_src = Some((chat, m.id));
+                    let ids: Vec<i32> = if self.marked.is_empty() { vec![m.id] } else { self.marked_msgs().iter().map(|m| m.id).collect() };
+                    self.marked.clear();
+                    self.fwd_src = Some((chat, ids));
                     self.mode = Mode::Forward;
                     self.status = tr!(
                         "Выберите чат (↑ ↓, Tab) и нажмите Enter, Esc — отмена",
@@ -2198,6 +2599,18 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn toggle_mark(&mut self, id: i32) {
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
+        }
+    }
+
+    /// Отмеченные сообщения текущего чата в порядке истории.
+    fn marked_msgs(&self) -> Vec<ChatMsg> {
+        let Some(h) = self.sel.and_then(|id| self.histories.get(&id)) else { return Vec::new() };
+        h.iter().filter(|m| self.marked.contains(&m.id)).cloned().collect()
     }
 
     /// Кладёт текст сообщения в буфер обмена и возвращает сообщение для строки состояния.
@@ -2215,7 +2628,7 @@ impl App {
     }
 
     fn handle_forward_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>) {
-        let Some((src, id)) = self.fwd_src.clone() else {
+        let Some((src, ids)) = self.fwd_src.clone() else {
             self.mode = Mode::Chat;
             return;
         };
@@ -2227,7 +2640,7 @@ impl App {
             KeyCode::F(10) => self.should_quit = true,
             KeyCode::Enter => {
                 if let Some(dst) = self.selected().cloned() {
-                    let _ = cmd.send(Cmd::Forward { src: src.clone(), dst, id });
+                    let _ = cmd.send(Cmd::Forward { src: src.clone(), dst, ids });
                     self.status = tr!("Пересылаю…", "Forwarding…").into();
                     self.finish_forward(&src);
                 }
@@ -2302,6 +2715,20 @@ impl App {
                     let _ = cmd.send(Cmd::SearchAll { query: arg.to_string() });
                 }
                 self.status = tr!("Ищу…", "Searching…").into();
+            }
+            "/topics" => {
+                self.clear_input();
+                let Some(chat) = self.selected().cloned() else {
+                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
+                    return true;
+                };
+                if arg.trim() == "off" {
+                    self.topic = None;
+                    self.status = tr!("Отправка в общий поток", "Sending to the general feed").into();
+                    return true;
+                }
+                let _ = cmd.send(Cmd::ListTopics(chat));
+                self.status = tr!("Загружаю темы…", "Loading topics…").into();
             }
             "/pinned" => {
                 self.clear_input();
@@ -2555,6 +2982,9 @@ impl App {
             }
             "/paste" => {
                 self.clear_input();
+                if self.paste_image(cmd) {
+                    return true;
+                }
                 self.paste(None);
             }
             "/faq" => {
@@ -2606,6 +3036,29 @@ impl App {
 
 mod draw;
 mod text;
+/// Фото для просмотра в консоли.
+struct Preview {
+    w: usize,
+    h: usize,
+    rgb: Vec<u8>,
+}
+
+/// Раскладка сообщений на экране для мыши.
+struct MsgGeom {
+    ranges: Vec<(usize, usize)>,
+    start: usize,
+    body: Rect,
+}
+
+/// Состояние выделения мышью.
+struct Drag {
+    anchor: i32,
+    /// -1: курсор у верхнего края, 1: у нижнего, 0: внутри ленты.
+    edge: i8,
+    held: u32,
+    started: bool,
+}
+
 use draw::*;
 use text::*;
 pub(crate) use text::{ctrl_letter, is_paste_key};
@@ -2699,6 +3152,9 @@ pub async fn run(
                     dirty = true;
                 }
                 if app.expire_typing() {
+                    dirty = true;
+                }
+                if app.drag_tick(&cmd) {
                     dirty = true;
                 }
                 app.flush_drafts(&cmd);

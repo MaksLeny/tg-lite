@@ -227,7 +227,7 @@ pub(super) fn build_message_lines(
     selected: Option<usize>,
     sel_bg: Color,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
-    build_message_lines_marks(msgs, width, bubble_pct, selected, sel_bg, None)
+    build_message_lines_marks(msgs, width, bubble_pct, selected, sel_bg, None, &std::collections::BTreeSet::new())
 }
 
 /// Отметка у своего сообщения: «√» отправлено, «√√» прочитано собеседником.
@@ -249,6 +249,7 @@ pub(super) fn build_message_lines_marks(
     selected: Option<usize>,
     sel_bg: Color,
     read_out: Option<i32>,
+    marked: &std::collections::BTreeSet<i32>,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let tz = jiff::tz::TimeZone::system();
     let today = local_date(jiff::Timestamp::now().as_second(), &tz);
@@ -341,10 +342,22 @@ pub(super) fn build_message_lines_marks(
                 lines.push(Line::from(row));
             }
         }
-        if selected == Some(idx) {
+        let is_marked = marked.contains(&m.id);
+        if selected == Some(idx) || is_marked {
             for l in &mut lines[first..] {
                 l.style = l.style.bg(sel_bg);
             }
+        }
+        // При пакетном выборе: «✓» у отмеченных, «▸» у сообщения под курсором.
+        let flag = if is_marked {
+            Some("✓ ")
+        } else if selected == Some(idx) && !marked.is_empty() {
+            Some("▸ ")
+        } else {
+            None
+        };
+        if let Some(f) = flag {
+            lines[first].spans.insert(0, Span::styled(f, Style::new().fg(own()).add_modifier(Modifier::BOLD)));
         }
         ranges.push((first, lines.len()));
         lines.push(Line::from(""));
@@ -366,6 +379,30 @@ pub(super) fn extra_rows(m: &ChatMsg, inner: usize) -> Vec<Vec<Span<'static>>> {
             spans.push(Span::styled(if r.mine { format!("[{label}]") } else { label }, style));
         }
         rows.push(spans);
+    }
+    if let Some(p) = &m.poll {
+        let kind = if p.quiz { tr!("викторина", "quiz") } else { tr!("опрос", "poll") };
+        let state = if p.closed { tr!(" · закрыт", " · closed") } else { "" };
+        rows.push(vec![Span::styled(
+            truncate(&format!("▤ {kind}: {}{state}", p.question), inner),
+            Style::new().add_modifier(Modifier::BOLD),
+        )]);
+        for o in &p.options {
+            let pct = if p.total > 0 { (o.voters * 100 / p.total) as usize } else { 0 };
+            let filled = pct / 10;
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+            let mark = if o.chosen { "●" } else { "○" };
+            let right = if p.total > 0 || p.closed { format!(" {bar} {pct}%") } else { String::new() };
+            let right_w = display_width(&right);
+            let text = truncate(&o.text, inner.saturating_sub(right_w + 4));
+            let style = if o.chosen { Style::new().fg(own()).add_modifier(Modifier::BOLD) } else { Style::new() };
+            let mut spans = vec![Span::styled(format!("{mark} {text}"), style), Span::styled(right, Style::new().fg(muted()))];
+            if o.correct {
+                spans.push(Span::styled(" ✓", Style::new().fg(online_color())));
+            }
+            rows.push(spans);
+        }
+        rows.push(vec![Span::styled(trf!("  голосов: {} · V — голосовать", "  votes: {} · V to vote", p.total), Style::new().fg(muted()))]);
     }
     for row in &m.buttons {
         let text: String = row

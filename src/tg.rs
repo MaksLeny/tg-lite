@@ -237,6 +237,27 @@ pub struct Btn {
     pub action: BtnAction,
 }
 
+/// Вариант ответа в опросе.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PollOpt {
+    pub text: String,
+    pub data: Vec<u8>,
+    pub voters: i32,
+    pub chosen: bool,
+    pub correct: bool,
+}
+
+/// Опрос или викторина под сообщением.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PollView {
+    pub question: String,
+    pub quiz: bool,
+    pub closed: bool,
+    pub multiple: bool,
+    pub total: i32,
+    pub options: Vec<PollOpt>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ChatMsg {
     pub id: i32,
@@ -263,6 +284,8 @@ pub struct ChatMsg {
     pub reactions: Vec<Reaction>,
     /// Inline-кнопки под сообщением бота, по рядам.
     pub buttons: Vec<Vec<Btn>>,
+    /// Опрос (если сообщение — опрос).
+    pub poll: Option<PollView>,
 }
 
 /// Найденное сообщение.
@@ -314,11 +337,11 @@ pub enum Cmd {
         /// Ответ на сообщение с этим номером.
         reply_to: Option<i32>,
     },
-    /// Переслать сообщение `id` из `src` в `dst`.
+    /// Переслать сообщения `ids` из `src` в `dst` (одно или несколько, по порядку).
     Forward {
         src: ChatInfo,
         dst: ChatInfo,
-        id: i32,
+        ids: Vec<i32>,
     },
     MarkRead(ChatInfo),
     /// Поставить реакцию на сообщение (`None` снимает вашу реакцию).
@@ -368,8 +391,26 @@ pub enum Cmd {
         chat: ChatInfo,
         id: i32,
     },
+    /// Проголосовать в опросе: вариант `option` сообщения `id`.
+    Vote {
+        chat: ChatInfo,
+        id: i32,
+        option: Vec<u8>,
+    },
+    /// Удалить несколько своих сообщений (у всех).
+    DeleteMany {
+        chat: ChatInfo,
+        ids: Vec<i32>,
+    },
     /// Показать все закреплённые сообщения чата.
     ListPinned(ChatInfo),
+    /// Список тем форума (супергруппы с темами).
+    ListTopics(ChatInfo),
+    /// Скачать уменьшенную копию фото для просмотра в консоли.
+    Preview {
+        chat: ChatInfo,
+        id: i32,
+    },
     /// Найти человека или канал по @имени и открыть чат с ним (в том числе без переписки).
     OpenTarget(Target),
     /// Вступить в группу или канал по ссылке-приглашению или публичному имени.
@@ -454,6 +495,31 @@ pub enum Event {
     },
     /// Файл для просмотра скачан: интерфейс открывает его.
     Open(PathBuf),
+    /// Уменьшенная копия фото (JPEG) для показа в консоли.
+    Preview {
+        chat: PeerId,
+        jpeg: Vec<u8>,
+    },
+    /// Задержка до Telegram в миллисекундах; `None` — связи нет.
+    Latency(Option<u32>),
+    /// Сообщение не ушло из-за отсутствия связи и ждёт в очереди.
+    Queued {
+        chat: PeerId,
+        text: String,
+        count: usize,
+    },
+    /// Сообщение из очереди отправлено.
+    QueueSent {
+        chat: PeerId,
+        text: String,
+        left: usize,
+    },
+    /// Сообщение из очереди отклонено Telegram (не из-за связи).
+    QueueDropped {
+        chat: PeerId,
+        text: String,
+        reason: String,
+    },
     /// Обновились реакции сообщения.
     Reacted {
         chat: PeerId,
@@ -465,6 +531,11 @@ pub enum Event {
     ReadOutbox {
         chat: PeerId,
         max_id: i32,
+    },
+    /// Темы форума: (номер, название, непрочитанных).
+    Topics {
+        chat: PeerId,
+        items: Vec<(i32, String, i32)>,
     },
     /// Закреплённые сообщения чата (новые сверху).
     PinnedList {
@@ -558,6 +629,85 @@ impl RetryPolicy for FloodPolicy {
             }
             InvocationError::Io(_) if ctx.fail_count.get() <= 1 => ControlFlow::Continue(Duration::from_secs(1)),
             _ => ControlFlow::Break(()),
+        }
+    }
+}
+
+/// Ошибка «нет связи» (а не отказ Telegram): такое сообщение можно отправить позже, когда связь вернётся.
+/// Отказы Telegram (`rpc error …`, в том числе ожидание FloodWait) сюда не относятся.
+pub fn is_network_error(e: &str) -> bool {
+    let e = e.to_lowercase();
+    !e.contains("rpc error")
+        && (e.contains("request error") || e.contains("dropped") || e.contains("connection") || e.contains("timed out"))
+}
+
+/// Сообщение, которое ждёт появления связи.
+#[derive(Clone, Debug)]
+pub struct Queued {
+    pub chat: ChatInfo,
+    pub text: String,
+    pub markdown: bool,
+    pub reply_to: Option<i32>,
+}
+
+/// Сколько сообщений держим в очереди без связи (только текст, в памяти).
+pub const MAX_QUEUED: usize = 30;
+
+/// Пытается отправить очередь по порядку. На первой же сетевой ошибке останавливается и оставляет остаток.
+async fn flush_queue(client: &Client, events: &mpsc::UnboundedSender<Event>, queue: &mut std::collections::VecDeque<Queued>) {
+    flush_with(queue, events, |q: Queued| {
+        let client = client.clone();
+        async move {
+            match tokio::time::timeout(Duration::from_secs(15), send(&client, &q.chat, &q.text, q.markdown, None, q.reply_to)).await {
+                Ok(r) => r,
+                Err(_) => Err(anyhow!("request error: timed out")),
+            }
+        }
+    })
+    .await;
+}
+
+/// Основа `flush_queue`: отдельно от сети, чтобы её можно было проверить тестом.
+pub(crate) async fn flush_with<Fut>(
+    queue: &mut std::collections::VecDeque<Queued>,
+    events: &mpsc::UnboundedSender<Event>,
+    mut send_one: impl FnMut(Queued) -> Fut,
+) where
+    Fut: std::future::Future<Output = Result<ChatMsg>>,
+{
+    while let Some(q) = queue.front().cloned() {
+        match send_one(q.clone()).await {
+            Ok(msg) => {
+                queue.pop_front();
+                let _ = events.send(Event::Sent { chat: q.chat.id, msg, scheduled: false });
+                let _ = events.send(Event::QueueSent { chat: q.chat.id, text: q.text, left: queue.len() });
+            }
+            Err(e) if !is_network_error(&e.to_string()) => {
+                queue.pop_front();
+                log(&format!("queued send: {e}"));
+                let reason = friendly_error(&e.to_string());
+                let _ = events.send(Event::QueueDropped { chat: q.chat.id, text: q.text, reason });
+            }
+            Err(_) => break, // связи всё ещё нет: попробуем позже
+        }
+    }
+}
+
+/// Раз в несколько секунд измеряет задержку до Telegram и сообщает интерфейсу (`None` — нет связи).
+async fn ping_loop(client: Client, events: mpsc::UnboundedSender<Event>) {
+    let mut first = true;
+    loop {
+        tokio::time::sleep(Duration::from_secs(if first { 2 } else { 20 })).await;
+        first = false;
+        let id = jiff::Timestamp::now().as_nanosecond() as i64;
+        let started = std::time::Instant::now();
+        let res = tokio::time::timeout(Duration::from_secs(8), client.invoke(&tl::functions::Ping { ping_id: id })).await;
+        let ms = match res {
+            Ok(Ok(_)) => Some(started.elapsed().as_millis().min(99_999) as u32),
+            _ => None,
+        };
+        if events.send(Event::Latency(ms)).is_err() {
+            break;
         }
     }
 }
@@ -734,7 +884,38 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
         views: m.view_count().filter(|v| *v > 0),
         reactions: reactions_of(m),
         buttons: buttons_of(m),
+        poll: poll_of(m),
     }
+}
+
+/// Опрос сообщения: вопрос, варианты и текущие результаты.
+pub fn poll_of(m: &Message) -> Option<PollView> {
+    let Some(grammers_client::media::Media::Poll(p)) = m.media() else { return None };
+    let tl::enums::TextWithEntities::Entities(q) = p.question();
+    let results: Vec<&tl::types::PollAnswerVoters> = p.iter_voters_summary().map(|i| i.collect()).unwrap_or_default();
+    let options = p
+        .iter_answers()
+        .filter_map(|a| {
+            let tl::enums::PollAnswer::Answer(a) = a else { return None };
+            let tl::enums::TextWithEntities::Entities(t) = &a.text;
+            let r = results.iter().find(|r| r.option == a.option);
+            Some(PollOpt {
+                text: crate::util::clean(&t.text).trim().to_string(),
+                data: a.option.clone(),
+                voters: r.and_then(|r| r.voters).unwrap_or(0),
+                chosen: r.is_some_and(|r| r.chosen),
+                correct: r.is_some_and(|r| r.correct),
+            })
+        })
+        .collect();
+    Some(PollView {
+        question: crate::util::clean(&q.text).trim().to_string(),
+        quiz: p.is_quiz(),
+        closed: p.closed(),
+        multiple: p.raw.multiple_choice,
+        total: p.total_voters().unwrap_or(0),
+        options,
+    })
 }
 
 /// Реакции сообщения: только обычные смайлики, остальные (свои эмодзи, платные) показываются как «?».
@@ -1395,6 +1576,67 @@ pub async fn react(client: &Client, chat: &ChatInfo, id: i32, emoji: Option<&str
     Ok(to_chat_msg(&fetch_message(client, chat, id).await?, &chat.name))
 }
 
+/// Скачивает самую крупную копию фото до 800 точек (она уже сжата Telegram, это быстро и недорого).
+pub async fn fetch_preview(client: &Client, chat: &ChatInfo, id: i32) -> Result<Vec<u8>> {
+    use grammers_client::media::{Media, PhotoSize};
+    let msg = fetch_message(client, chat, id).await?;
+    let thumbs = match msg.media() {
+        Some(Media::Photo(p)) => p.thumbs(),
+        Some(Media::Document(d)) => d.thumbs(),
+        _ => return Err(anyhow!(tr!("в сообщении нет фото", "this message has no photo"))),
+    };
+    let best = thumbs
+        .into_iter()
+        .filter_map(|t| match &t {
+            PhotoSize::Size(s) if s.width > 0 && s.width <= 800 && s.height <= 800 => Some((s.width * s.height, t)),
+            _ => None,
+        })
+        .max_by_key(|(area, _)| *area)
+        .map(|(_, t)| t)
+        .ok_or_else(|| anyhow!(tr!("у этого вложения нет превью", "this attachment has no preview")))?;
+    let mut it = client.iter_download(&best);
+    let mut out = Vec::new();
+    while let Some(chunk) = it.next().await.map_err(|e| anyhow!("{e}"))? {
+        out.extend_from_slice(&chunk);
+        if out.len() > 4 * 1024 * 1024 {
+            return Err(anyhow!(tr!("превью слишком большое", "the preview is too large")));
+        }
+    }
+    Ok(out)
+}
+
+/// Темы форума: от новых к старым, не больше 100.
+pub async fn list_topics(client: &Client, chat: &ChatInfo) -> Result<Vec<(i32, String, i32)>> {
+    let res = client
+        .invoke(&tl::functions::messages::GetForumTopics {
+            peer: chat.peer.into(),
+            q: None,
+            offset_date: 0,
+            offset_id: 0,
+            offset_topic: 0,
+            limit: 100,
+        })
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    let tl::enums::messages::ForumTopics::Topics(t) = res;
+    Ok(t.topics
+        .into_iter()
+        .filter_map(|x| match x {
+            tl::enums::ForumTopic::Topic(t) => Some((t.id, crate::util::clean(&t.title).trim().to_string(), t.unread_count)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Голосует в опросе и возвращает обновлённое сообщение с результатами.
+pub async fn vote(client: &Client, chat: &ChatInfo, id: i32, option: Vec<u8>) -> Result<ChatMsg> {
+    client
+        .invoke(&tl::functions::messages::SendVote { peer: chat.peer.into(), msg_id: id, options: vec![option] })
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(to_chat_msg(&fetch_message(client, chat, id).await?, &chat.name))
+}
+
 async fn fetch_message(client: &Client, chat: &ChatInfo, id: i32) -> Result<Message> {
     let msgs = client.get_messages_by_id(chat.peer, &[id]).await.map_err(|e| anyhow!("{e}"))?;
     msgs.into_iter().next().flatten().ok_or_else(|| anyhow!(tr!("сообщение не найдено", "message not found")))
@@ -1507,9 +1749,26 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
         });
     }
 
+    // 1б) задержка до Telegram для строки статуса
+    tokio::spawn(ping_loop(client.clone(), events.clone()));
+
     // 2) команды интерфейса. Отправка идёт строго по порядку, остальное параллельно.
     tokio::spawn(async move {
-        while let Some(cmd) = cmd_rx.recv().await {
+        let mut queue: std::collections::VecDeque<Queued> = std::collections::VecDeque::new();
+        loop {
+            // Пока есть очередь, раз в 5 секунд пробуем её отправить.
+            let next = if queue.is_empty() {
+                cmd_rx.recv().await
+            } else {
+                match tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv()).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        flush_queue(&client, &events, &mut queue).await;
+                        continue;
+                    }
+                }
+            };
+            let Some(cmd) = next else { break };
             match cmd {
                 Cmd::LoadDialogs | Cmd::LoadAllDialogs => {
                     let all = matches!(cmd, Cmd::LoadAllDialogs);
@@ -1702,9 +1961,13 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                     }
                 }
-                Cmd::Forward { src, dst, id } => match client.forward_messages(dst.peer, &[id], src.peer).await {
+                Cmd::Forward { src, dst, ids } => match client.forward_messages(dst.peer, &ids, src.peer).await {
                     Ok(_) => {
-                        let _ = events.send(Event::Status(trf!("Переслано в «{}»", "Forwarded to «{}»", dst.name)));
+                        let _ = events.send(Event::Status(if ids.len() > 1 {
+                            trf!("Переслано сообщений: {} в «{}»", "Forwarded {} messages to «{}»", ids.len(), dst.name)
+                        } else {
+                            trf!("Переслано в «{}»", "Forwarded to «{}»", dst.name)
+                        }));
                     }
                     Err(e) => {
                         log(&format!("forward: {e}"));
@@ -1712,9 +1975,27 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                     }
                 },
                 Cmd::Send { chat, text, markdown, delay_minutes, reply_to } => {
+                    // Пока в очереди есть сообщения, новые встают за ними: порядок не нарушается.
+                    if !queue.is_empty() && delay_minutes.is_none() {
+                        if queue.len() < MAX_QUEUED {
+                            queue.push_back(Queued { chat: chat.clone(), text: text.clone(), markdown, reply_to });
+                            let _ = events.send(Event::Queued { chat: chat.id, text, count: queue.len() });
+                        } else {
+                            let _ = events.send(Event::Error(
+                                tr!("очередь переполнена, сообщение не принято", "queue is full, message rejected").into(),
+                            ));
+                            let _ = events.send(Event::SendFailed { text });
+                        }
+                        continue;
+                    }
                     match send(&client, &chat, &text, markdown, delay_minutes, reply_to).await {
                         Ok(msg) => {
                             let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: delay_minutes.is_some() });
+                        }
+                        Err(e) if delay_minutes.is_none() && is_network_error(&e.to_string()) => {
+                            log(&format!("send (queued): {e}"));
+                            queue.push_back(Queued { chat: chat.clone(), text: text.clone(), markdown, reply_to });
+                            let _ = events.send(Event::Queued { chat: chat.id, text, count: queue.len() });
                         }
                         Err(e) => {
                             log(&format!("send: {e}"));
@@ -1763,6 +2044,25 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                     });
                 }
+                Cmd::Vote { chat, id, option } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match vote(&client, &chat, id, option).await {
+                            Ok(msg) => {
+                                let _ = events.send(Event::Reacted { chat: chat.id, msg });
+                            }
+                            Err(e) => {
+                                log(&format!("vote: {e}"));
+                                let _ = events.send(Event::Error(trf!(
+                                    "голос не принят: {}",
+                                    "vote not counted: {}",
+                                    friendly_error(&e.to_string())
+                                )));
+                            }
+                        }
+                    });
+                }
                 Cmd::Press { chat, id, data } => {
                     let client = client.clone();
                     let events = events.clone();
@@ -1792,6 +2092,52 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         let _ = events.send(Event::Error(trf!("не удалено: {}", "not deleted: {}", friendly_error(&e.to_string()))));
                     }
                 },
+                Cmd::DeleteMany { chat, ids } => match client.delete_messages(chat.peer, &ids).await {
+                    Ok(_) => {
+                        let n = ids.len();
+                        let _ = events.send(Event::Deleted { chat: Some(chat.id), ids });
+                        let _ = events.send(Event::Status(trf!("Удалено сообщений: {n}", "Messages deleted: {n}")));
+                    }
+                    Err(e) => {
+                        log(&format!("delete many: {e}"));
+                        let _ = events.send(Event::Error(trf!("не удалено: {}", "not deleted: {}", friendly_error(&e.to_string()))));
+                    }
+                },
+                Cmd::Preview { chat, id } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match fetch_preview(&client, &chat, id).await {
+                            Ok(jpeg) => {
+                                let _ = events.send(Event::Preview { chat: chat.id, jpeg });
+                            }
+                            Err(e) => {
+                                log(&format!("preview: {e}"));
+                                let _ = events.send(Event::Error(trf!("превью: {}", "preview: {}", friendly_error(&e.to_string()))));
+                            }
+                        }
+                    });
+                }
+                Cmd::ListTopics(chat) => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match list_topics(&client, &chat).await {
+                            Ok(items) => {
+                                let _ = events.send(Event::Topics { chat: chat.id, items });
+                            }
+                            Err(e) => {
+                                log(&format!("topics: {e}"));
+                                let text = e.to_string();
+                                let _ = events.send(Event::Error(if text.contains("FORUM") || text.contains("PEER_ID_INVALID") {
+                                    tr!("в этом чате нет тем (это не форум)", "this chat has no topics (it is not a forum)").into()
+                                } else {
+                                    trf!("темы: {}", "topics: {}", friendly_error(&text))
+                                }));
+                            }
+                        }
+                    });
+                }
                 Cmd::ListPinned(chat) => {
                     let client = client.clone();
                     let events = events.clone();

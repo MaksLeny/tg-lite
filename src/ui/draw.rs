@@ -37,7 +37,47 @@ pub(super) fn draw(f: &mut Frame, app: &mut App) {
             draw_main(f, app);
             draw_overlay(f, app);
         }
+        Mode::Preview => {
+            draw_main(f, app);
+            draw_preview(f, app);
+        }
     }
+}
+
+/// Фото из точек RGB: каждая ячейка консоли — две точки («▀»: верх цветом текста, низ цветом фона).
+fn draw_preview(f: &mut Frame, app: &App) {
+    let Some(p) = &app.preview else { return };
+    let area = f.area();
+    let (cols, rows) = (area.width.saturating_sub(4) as usize, area.height.saturating_sub(4) as usize);
+    let (pw, ph) = util::fit_cells(p.w, p.h, cols, rows);
+    if pw == 0 {
+        return;
+    }
+    let px = util::shrink_rgb(p.w, p.h, &p.rgb, pw, ph);
+    let lines: Vec<Line> = (0..ph / 2)
+        .map(|r| {
+            Line::from(
+                (0..pw)
+                    .map(|c| {
+                        let (t, b) = (px[(r * 2) * pw + c], px[(r * 2 + 1) * pw + c]);
+                        Span::styled("▀", Style::new().fg(Color::Rgb(t[0], t[1], t[2])).bg(Color::Rgb(b[0], b[1], b[2])))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let rect = centered_rect(area, pw as u16 + 2, (ph / 2) as u16 + 2);
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .style(base_style())
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(app.theme.accent))
+                .title(tr!(" Фото · любая клавиша — закрыть ", " Photo · any key closes ")),
+        ),
+        rect,
+    );
 }
 
 pub(super) fn draw_main(f: &mut Frame, app: &mut App) {
@@ -225,7 +265,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
 
     let picking = app.mode == Mode::Pick;
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let lines: Vec<Line> = match app.sel {
+    let mut lines: Vec<Line> = match app.sel {
         None => vec![Line::from(Span::styled(
             tr!("Выберите чат слева (↑ ↓), вкладки папок: Tab", "Pick a chat on the left (↑ ↓), folder tabs: Tab"),
             Style::new().fg(muted()),
@@ -239,13 +279,23 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
                 let focus = app.focus_msg.and_then(|fid| msgs.iter().position(|m| m.id == fid));
                 let sel = if picking { Some(app.pick.min(msgs.len() - 1)) } else { focus };
                 let read_out = app.selected().filter(|c| c.kind == Kind::User && !c.is_self).map(|c| c.read_out);
-                let (l, r) = build_message_lines_marks(msgs, width, app.settings.bubble_pct(), sel, app.theme.select_bg, read_out);
+                let (l, r) =
+                    build_message_lines_marks(msgs, width, app.settings.bubble_pct(), sel, app.theme.select_bg, read_out, &app.marked);
                 ranges = r;
                 l
             }
         },
     };
 
+    // Сообщения, которые ждут связи, показываются внизу серым.
+    if let Some(id) = app.sel {
+        for (_, text) in app.queued.iter().filter(|(c, _)| *c == id) {
+            let one_line = text.replace('\n', " ");
+            let note = tr!(" (в очереди)", " (queued)");
+            let room = width.saturating_sub(display_width(note) + 2);
+            lines.push(Line::from(Span::styled(format!("⏳ {}{note}", truncate(&one_line, room)), Style::new().fg(muted()))));
+        }
+    }
     // Закреплённое сообщение занимает верхнюю строку, если места достаточно.
     let banner = app.sel.and_then(|id| app.pinned_msg.get(&id)).filter(|_| inner.height > 6).cloned();
     let body = match banner {
@@ -290,6 +340,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(Paragraph::new(line), Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
     }
     f.render_widget(Paragraph::new(visible), body);
+    app.geom = Some(MsgGeom { ranges, start, body });
 
     if app.scroll > 0 && area.width > 12 {
         let tag = tr!(" ↑ выше · PgDn вниз ", " ↑ older · PgDn down ").to_string();
@@ -390,6 +441,12 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &App) {
         OverlayKind::Buttons => {
             tr!(" ↑ ↓ или цифра — выбрать · Enter — нажать · Esc — закрыть", " ↑ ↓ or a digit — pick · Enter — press · Esc — close")
         }
+        OverlayKind::Poll => {
+            tr!(" ↑ ↓ или цифра — выбрать · Enter — проголосовать · Esc — закрыть", " ↑ ↓ or a digit — pick · Enter — vote · Esc — close")
+        }
+        OverlayKind::Topics => {
+            tr!(" ↑ ↓ выбрать · Enter — писать в эту тему · Esc — закрыть", " ↑ ↓ select · Enter — post to this topic · Esc — close")
+        }
         OverlayKind::Faq => tr!(
             " ↑ ↓ — читать · Esc — закрыть · связь с автором: @maks1m_salov",
             " ↑ ↓ — read · Esc — close · contact the author: @maks1m_salov"
@@ -420,6 +477,9 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLay
     let mut title = vec![Span::styled(tr!(" Сообщение ", " Message "), Style::new().fg(app.theme.accent))];
     if app.markdown {
         title.push(Span::styled("· Markdown ", Style::new().fg(own())));
+    }
+    if let Some((_, _, name)) = app.topic.as_ref().filter(|(c, _, _)| Some(*c) == app.sel) {
+        title.push(Span::styled(trf!("· тема: {name} ", "· topic: {name} "), Style::new().fg(own())));
     }
     if let Some((_, label)) = &app.reply {
         title.push(Span::styled(trf!("· ответ: {label} ", "· reply: {label} "), Style::new().fg(own())));
@@ -461,13 +521,24 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             if !app.jump_back.is_empty() {
                 extra.push_str(tr!("B назад · ", "B back · "));
             }
+            if m.is_some_and(|m| m.poll.is_some()) {
+                extra.push_str(tr!("V голос · ", "V vote · "));
+            }
             if m.is_some_and(|m| !m.buttons.is_empty()) {
                 extra.push_str(tr!("K кнопки · ", "K buttons · "));
             }
-            pick_hint = trf!(
-                " {extra}R ответ · F переслать · E правка · D удалить · C копия · S скачать · O открыть · L ссылки · 1-6 реакция · Esc",
-                " {extra}R reply · F forward · E edit · D delete · C copy · S save · O open · L links · 1-6 react · Esc"
-            );
+            pick_hint = if !app.marked.is_empty() {
+                trf!(
+                    " Выбрано {} · F переслать · D удалить · C копия · Пробел — отметка · Esc сбросить",
+                    " Marked {} · F forward · D delete · C copy · Space toggles · Esc clears",
+                    app.marked.len()
+                )
+            } else {
+                trf!(
+                    " {extra}R ответ · F переслать · E правка · D удалить · C копия · S скачать · O открыть · L ссылки · 1-6 реакция · Esc",
+                    " {extra}R reply · F forward · E edit · D delete · C copy · S save · O open · L links · 1-6 react · Esc"
+                )
+            };
             Some(pick_hint.as_str())
         }
         Mode::Forward => Some(tr!(
@@ -504,6 +575,23 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         None => (area, None),
     };
     let color = if app.status.starts_with("Ошибка") || app.status.starts_with("Error") { error_color() } else { muted() };
+    // Индикатор связи у правого края статуса, если хватает места.
+    let (net_text, net_color) = match app.net {
+        None => (String::new(), muted()),
+        Some(Some(ms)) => (format!("● {ms} {} ", tr!("мс", "ms")), if ms > 1500 { mention() } else { own() }),
+        Some(None) => (format!("{} ", tr!("○ нет связи", "○ offline")), error_color()),
+    };
+    let queued = if app.queued.is_empty() { String::new() } else { trf!("⏳{} ", "⏳{} ", app.queued.len()) };
+    let net_text = format!("{queued}{net_text}");
+    let net_w = display_width(&net_text) as u16;
+    let left = if net_w > 0 && left.width > net_w + 24 {
+        let parts =
+            Layout::default().direction(Direction::Horizontal).constraints([Constraint::Min(10), Constraint::Length(net_w)]).split(left);
+        f.render_widget(Paragraph::new(net_text.clone()).style(Style::new().fg(net_color)), parts[1]);
+        parts[0]
+    } else {
+        left
+    };
     let status = truncate(&format!(" {}", app.status), left.width as usize);
     f.render_widget(Paragraph::new(status).style(Style::new().fg(color)), left);
     if let Some((r, h)) = right {
@@ -534,10 +622,17 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
             tr!("выбор сообщения: R ответить, F переслать, E править, D удалить", "pick message: R reply, F forward, E edit, D delete"),
         ),
         key(
-            tr!("F7 → 1-6, G, K", "F7 → 1-6, G, K"),
+            tr!("F7 → 1-6, G, K, V", "F7 → 1-6, G, K, V"),
             tr!(
-                "реакция (0 — снять); G к оригиналу ответа, B назад; K кнопки бота",
-                "reaction (0 removes); G original of a reply, B back; K bot buttons"
+                "реакция (0 — снять); G к оригиналу, B назад; K кнопки; V голос в опросе",
+                "reaction (0 removes); G original, B back; K buttons; V vote in a poll"
+            ),
+        ),
+        key(
+            tr!("F7 → Пробел", "F7 → Space"),
+            tr!(
+                "отметить сообщения (Shift+↑↓, мышью с зажатой кнопкой); F, D, C — все сразу",
+                "mark messages (Shift+↑↓, or drag the mouse); F, D, C act on all"
             ),
         ),
         key("Esc", tr!("очистить ввод; отменить ответ, правку, поиск", "clear input; cancel reply, edit, search")),
@@ -600,7 +695,10 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
             tr!("ссылки чата (L для сообщения); отложенные, отмена", "chat links (L for a message); scheduled, cancel"),
         ),
         key("/pinned, /chat", tr!("закреплённые чата; открыть чат: /chat @имя", "pinned messages; open a chat: /chat @name")),
-        key("/join, /leave", tr!("вступить по ссылке или @имени; выйти из чата", "join by link or @name; leave a chat")),
+        key(
+            "/join, /leave, /topics",
+            tr!("вступить по ссылке; выйти из чата; темы форума (писать в тему)", "join by link; leave a chat; forum topics (post to one)"),
+        ),
         Line::from(Span::styled(
             trf!(
                 " Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает",

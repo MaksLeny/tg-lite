@@ -980,10 +980,10 @@ fn forward_goes_to_chosen_chat_and_returns() {
     press(&mut app, KeyCode::Down, &tx, &s); // «Мой канал»
     press(&mut app, KeyCode::Enter, &tx, &s);
     match drain(&mut rx).into_iter().find(|c| matches!(c, Cmd::Forward { .. })) {
-        Some(Cmd::Forward { src, dst, id }) => {
+        Some(Cmd::Forward { src, dst, ids }) => {
             assert_eq!(src.id, mama);
             assert_eq!(dst.name, "Мой канал");
-            assert_eq!(id, 2);
+            assert_eq!(ids, vec![2]);
         }
         _ => panic!("ожидалась пересылка"),
     }
@@ -1762,8 +1762,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.3.1"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.3.1");
+    assert!(README.contains("1.4.0"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.4.0");
 }
 
 #[test]
@@ -2470,7 +2470,7 @@ fn mouse_is_ignored_when_off_locked_or_in_dialogs() {
     assert!(!app.handle_mouse(click, &tx));
     assert_eq!(app.sel, Some(app.chats[0].id));
     app.settings.mouse = true;
-    for mode in [Mode::Locked, Mode::Settings, Mode::Help, Mode::Overlay, Mode::Pick] {
+    for mode in [Mode::Locked, Mode::Settings, Mode::Help, Mode::Overlay] {
         app.mode = mode;
         assert!(!app.handle_mouse(click, &tx));
         assert_eq!(app.sel, Some(app.chats[0].id));
@@ -3176,4 +3176,366 @@ fn device_name_shows_the_app_and_its_version() {
     let n = crate::tg::device_name();
     assert!(n.starts_with(&format!("Tg-Lite v{VERSION} (")), "{n}");
     assert!(n.len() < 64, "короткое название для списка сеансов");
+}
+
+// ───── 1.4.0: индикатор связи и очередь исходящих ─────
+
+#[test]
+fn network_errors_are_told_apart_from_telegram_refusals() {
+    use crate::tg::is_network_error;
+    assert!(is_network_error("request error: connection reset by peer"));
+    assert!(is_network_error("request error: dropped: sender closed"));
+    assert!(is_network_error("request error: timed out"));
+    assert!(!is_network_error("request error: rpc error 400: CHAT_WRITE_FORBIDDEN"));
+    assert!(!is_network_error("request error: rpc error 420: FLOOD_WAIT (value: 30)"), "ожидание FloodWait не очередь");
+    assert!(!is_network_error("сообщение слишком длинное"));
+}
+
+#[test]
+fn status_bar_shows_connection_and_queue() {
+    let mut app = demo_app();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(!dump(&term).contains('●') || app.net.is_none(), "пока не измеряли, индикатора нет");
+    app.handle_event(Event::Latency(Some(84)), &tx);
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(dump(&term).contains("● 84 мс"), "{}", dump(&term));
+    app.handle_event(Event::Latency(None), &tx);
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(dump(&term).contains("нет связи"), "{}", dump(&term));
+    let chat_id = app.selected().unwrap().id;
+    app.handle_event(Event::Queued { chat: chat_id, text: "привет из метро".into(), count: 1 }, &tx);
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("привет из метро") && text.contains("в очереди"), "{text}");
+    assert!(text.contains("1 ○ нет связи"), "счётчик очереди рядом с индикатором: {text}");
+}
+
+#[test]
+fn queue_events_update_the_screen_and_return_rejected_text() {
+    let mut app = demo_app();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let chat_id = app.selected().unwrap().id;
+    for t in ["раз", "два"] {
+        app.handle_event(Event::Queued { chat: chat_id, text: t.into(), count: app.queued.len() + 1 }, &tx);
+    }
+    assert_eq!(app.queued.len(), 2);
+    app.handle_event(Event::QueueSent { chat: chat_id, text: "раз".into(), left: 1 }, &tx);
+    assert_eq!(app.queued, vec![(chat_id, "два".to_string())]);
+    app.input.clear();
+    app.handle_event(Event::QueueDropped { chat: chat_id, text: "два".into(), reason: "в этот чат писать нельзя".into() }, &tx);
+    assert!(app.queued.is_empty());
+    assert_eq!(app.input, "два", "отклонённый текст возвращается в поле ввода");
+    assert!(app.status.contains("писать нельзя"));
+}
+
+#[tokio::test]
+async fn queue_flush_keeps_order_stops_without_network_and_drops_refused() {
+    use crate::tg::{Queued, flush_with};
+    use std::collections::VecDeque;
+    let chat = chat(1, "Аня", Kind::User, 0);
+    let q = |t: &str| Queued { chat: chat.clone(), text: t.into(), markdown: false, reply_to: None };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut queue: VecDeque<Queued> = [q("a"), q("b"), q("c")].into();
+    let calls = std::sync::Mutex::new(Vec::<String>::new());
+    // Связи нет: первая же попытка останавливает отправку, очередь цела.
+    flush_with(&mut queue, &tx, |q| {
+        calls.lock().unwrap().push(q.text.clone());
+        async { Err(anyhow::anyhow!("request error: connection reset")) }
+    })
+    .await;
+    assert_eq!(queue.len(), 3);
+    assert_eq!(*calls.lock().unwrap(), ["a"], "после сетевой ошибки остальные не пробуются");
+    assert!(rx.try_recv().is_err());
+    // Связь вернулась, но Telegram отклоняет второе сообщение: оно удаляется, третье уходит.
+    flush_with(&mut queue, &tx, |q| {
+        let text = q.text.clone();
+        async move {
+            if text == "b" {
+                Err(anyhow::anyhow!("request error: rpc error 403: CHAT_WRITE_FORBIDDEN"))
+            } else {
+                Ok(msg(1, true, "Я", &text))
+            }
+        }
+    })
+    .await;
+    assert!(queue.is_empty());
+    let mut kinds = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        kinds.push(match ev {
+            Event::Sent { msg, .. } => format!("sent {}", msg.text),
+            Event::QueueSent { text, left, .. } => format!("qsent {text} {left}"),
+            Event::QueueDropped { text, .. } => format!("dropped {text}"),
+            _ => "other".into(),
+        });
+    }
+    assert_eq!(kinds, ["sent a", "qsent a 2", "dropped b", "sent c", "qsent c 0"]);
+}
+
+fn picking_app(n: i32) -> (App, mpsc::UnboundedSender<Cmd>, mpsc::UnboundedReceiver<Cmd>) {
+    let mut app = app_with_chats();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let id = app.sel.unwrap();
+    app.histories.insert(id, long_history(n));
+    (app, tx, rx)
+}
+
+#[test]
+fn space_and_shift_arrows_mark_messages_and_esc_clears_them() {
+    let (mut app, tx, _rx) = picking_app(10);
+    let s = saver();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    assert_eq!(app.pick, 9);
+    app.handle_key(key(KeyCode::Up, KeyModifiers::SHIFT), &tx, &s);
+    app.handle_key(key(KeyCode::Up, KeyModifiers::SHIFT), &tx, &s);
+    assert_eq!(app.marked.iter().copied().collect::<Vec<_>>(), vec![8, 9, 10]);
+    press(&mut app, KeyCode::Char(' '), &tx, &s); // снимает отметку с сообщения под курсором (8) и идёт дальше
+    assert_eq!(app.marked.iter().copied().collect::<Vec<_>>(), vec![9, 10]);
+    drawn(&mut app);
+    press(&mut app, KeyCode::Esc, &tx, &s);
+    assert!(app.marked.is_empty());
+    assert_eq!(app.mode, Mode::Pick, "первый Esc только сбрасывает отметки");
+    press(&mut app, KeyCode::Esc, &tx, &s);
+    assert_eq!(app.mode, Mode::Chat);
+}
+
+#[test]
+fn marked_messages_forward_delete_and_copy_in_a_batch() {
+    let (mut app, tx, mut rx) = picking_app(10);
+    let s = saver();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    app.marked = [3, 5, 4].into_iter().collect();
+    // удаление: чужие сообщения среди отмеченных блокируют
+    press(&mut app, KeyCode::Char('d'), &tx, &s);
+    assert!(drain(&mut rx).is_empty());
+    assert!(app.pick_note.contains("чужие"));
+    app.marked = [2, 6, 4].into_iter().collect(); // все чётные: свои
+    press(&mut app, KeyCode::Char('d'), &tx, &s);
+    assert!(drain(&mut rx).is_empty(), "первое D только спрашивает");
+    press(&mut app, KeyCode::Char('d'), &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::DeleteMany { ids, .. }) => assert_eq!(ids, vec![2, 4, 6]),
+        _ => panic!("ожидалось удаление нескольких"),
+    }
+    assert!(app.marked.is_empty());
+    // пересылка по порядку истории
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    app.marked = [7, 3].into_iter().collect();
+    press(&mut app, KeyCode::Char('f'), &tx, &s);
+    press(&mut app, KeyCode::Down, &tx, &s);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    match drain(&mut rx).into_iter().find(|c| matches!(c, Cmd::Forward { .. })) {
+        Some(Cmd::Forward { ids, .. }) => assert_eq!(ids, vec![3, 7]),
+        _ => panic!("ожидалась пересылка"),
+    }
+}
+
+#[test]
+fn marked_messages_are_shown_with_a_check_mark_and_status_hint() {
+    let (mut app, tx, _rx) = picking_app(6);
+    let s = saver();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    app.marked = [5, 6].into_iter().collect();
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("✓"));
+    assert!(text.contains("Выбрано 2"));
+}
+
+#[test]
+fn mouse_drag_marks_a_range_and_edge_autoscrolls() {
+    let (mut app, tx, mut rx) = picking_app(60);
+    drawn(&mut app);
+    let g = app.geom.as_ref().unwrap();
+    let body = g.body;
+    // потянули от нижнего сообщения немного вверх
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), body.x + 5, body.y + body.height - 2), &tx);
+    assert_eq!(app.mode, Mode::Chat, "простой щелчок режим не меняет");
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), body.x + 5, body.y + body.height - 8), &tx);
+    assert_eq!(app.mode, Mode::Pick);
+    assert!(app.marked.len() >= 2, "{:?}", app.marked);
+    let anchor = app.drag.as_ref().unwrap().anchor;
+    assert!(app.marked.contains(&anchor));
+    // удержание у верхнего края листает вверх, отметка растёт
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), body.x + 5, body.y), &tx);
+    let before = app.marked.len();
+    for _ in 0..15 {
+        assert!(app.drag_tick(&tx));
+        drawn(&mut app);
+    }
+    assert!(app.marked.len() > before + 15, "{} -> {}", before, app.marked.len());
+    assert!(app.scroll > 0, "лента ушла вверх");
+    // у самого начала подгружается старая история
+    app.pick = 1;
+    app.drag_tick(&tx);
+    assert!(drain(&mut rx).iter().any(|c| matches!(c, Cmd::LoadOlder { .. })));
+    // вниз: двигаемся к последнему сообщению и останавливаемся
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), body.x + 5, body.y + body.height - 1), &tx);
+    for _ in 0..80 {
+        app.drag_tick(&tx);
+        drawn(&mut app);
+    }
+    assert_eq!(app.pick, 59);
+    assert!(app.marked.contains(&60));
+    assert!(!app.drag_tick(&tx), "дальше листать некуда");
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), body.x + 5, body.y + 2), &tx);
+    assert!(app.drag.is_none());
+    assert!(!app.marked.is_empty(), "после отпускания выделение остаётся");
+}
+
+#[test]
+fn ctrl_click_toggles_a_mark_and_plain_click_in_pick_moves_cursor() {
+    let (mut app, tx, _rx) = picking_app(10);
+    drawn(&mut app);
+    let body = app.geom.as_ref().unwrap().body;
+    let y = body.y + body.height - 2;
+    let ev = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: body.x + 5, row: y, modifiers: KeyModifiers::CONTROL };
+    app.handle_mouse(ev, &tx);
+    assert_eq!(app.mode, Mode::Pick);
+    assert_eq!(app.marked.len(), 1);
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), body.x + 5, y), &tx);
+    app.handle_mouse(ev, &tx);
+    assert!(app.marked.is_empty(), "повторный Ctrl+щелчок снимает отметку");
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), body.x + 5, y), &tx);
+    // колесо в режиме выбора двигает курсор
+    let before = app.pick;
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, body.x + 5, body.y + 3), &tx);
+    assert_eq!(app.pick, before.saturating_sub(3));
+}
+
+fn poll_msg() -> ChatMsg {
+    use crate::tg::{PollOpt, PollView};
+    let mut m = msg(7, false, "Опросник", "[опрос: Чай или кофе?]");
+    m.poll = Some(PollView {
+        question: "Чай или кофе?".into(),
+        total: 4,
+        options: vec![
+            PollOpt { text: "Чай".into(), data: vec![1], voters: 1, chosen: false, correct: false },
+            PollOpt { text: "Кофе".into(), data: vec![2], voters: 3, chosen: true, correct: false },
+        ],
+        ..Default::default()
+    });
+    m
+}
+
+#[test]
+fn poll_is_drawn_with_percentages_and_can_be_voted() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    app.histories.get_mut(&id).unwrap().push(poll_msg());
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("опрос: Чай или кофе?"), "{text}");
+    assert!(text.contains("25%") && text.contains("75%"), "{text}");
+    assert!(text.contains("● Кофе"), "свой вариант отмечен");
+    // голосование через V
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('v'), &tx, &s);
+    assert_eq!(app.mode, Mode::Overlay);
+    press(&mut app, KeyCode::Char('1'), &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::Vote { id, option, .. }) => assert_eq!((id, option), (7, vec![1])),
+        _ => panic!("ожидалась команда Vote"),
+    }
+    // ответ сервера обновляет результаты
+    let mut upd = poll_msg();
+    upd.poll.as_mut().unwrap().total = 5;
+    app.handle_event(Event::Reacted { chat: id, msg: upd }, &tx);
+    assert_eq!(app.histories[&id].last().unwrap().poll.as_ref().unwrap().total, 5);
+    assert_eq!(app.status, "Голос учтён");
+}
+
+#[test]
+fn voting_needs_an_open_poll() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('v'), &tx, &s);
+    assert!(app.pick_note.contains("не опрос"));
+    assert!(drain(&mut rx).is_empty());
+    let id = app.sel.unwrap();
+    let mut closed = poll_msg();
+    closed.poll.as_mut().unwrap().closed = true;
+    app.histories.get_mut(&id).unwrap().push(closed);
+    press(&mut app, KeyCode::End, &tx, &s);
+    press(&mut app, KeyCode::Char('v'), &tx, &s);
+    assert!(app.pick_note.contains("закрыт"));
+}
+
+#[test]
+fn topics_list_picks_a_topic_and_sends_into_it() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let chat = app.sel.unwrap();
+    submit_text(&mut app, "/topics", &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::ListTopics(_))));
+    app.handle_event(Event::Topics { chat, items: vec![(10, "Общее".into(), 0), (11, "Релизы".into(), 3)] }, &tx);
+    assert_eq!(app.mode, Mode::Overlay);
+    press(&mut app, KeyCode::Down, &tx, &s);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!(app.mode, Mode::Chat);
+    assert_eq!(app.topic.as_ref().map(|t| t.1), Some(11));
+    submit_text(&mut app, "привет", &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::Send { reply_to, .. }) => assert_eq!(reply_to, Some(11)),
+        _ => panic!("ожидалась отправка"),
+    }
+    submit_text(&mut app, "/topics off", &tx, &s);
+    assert!(app.topic.is_none());
+    submit_text(&mut app, "ещё", &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::Send { reply_to, .. }) => assert_eq!(reply_to, None),
+        _ => panic!("ожидалась отправка"),
+    }
+}
+
+#[test]
+fn photo_preview_is_requested_drawn_and_closed() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('p'), &tx, &s);
+    assert!(app.pick_note.contains("нет фото"));
+    assert!(drain(&mut rx).is_empty());
+    let mut photo = msg(9, false, "Мама", "[фото]");
+    photo.caption = Some(String::new());
+    app.histories.get_mut(&id).unwrap().push(photo);
+    press(&mut app, KeyCode::End, &tx, &s);
+    press(&mut app, KeyCode::Char('p'), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::Preview { id: 9, .. })));
+    // испорченные данные не ломают экран
+    app.handle_event(Event::Preview { chat: id, jpeg: b"junk".to_vec() }, &tx);
+    assert_eq!(app.mode, Mode::Pick);
+    assert!(app.status.contains("превью"));
+    // готовая картинка: градиент 40×20 рисуется полублоками и закрывается любой клавишей
+    let (w, h) = (40usize, 20usize);
+    let rgb: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 6) as u8, (i / w * 12) as u8, 128]).collect();
+    app.preview = Some(Preview { w, h, rgb });
+    app.mode = Mode::Preview;
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("▀"), "{text}");
+    assert!(text.contains("Фото"));
+    press(&mut app, KeyCode::Char('x'), &tx, &s);
+    assert_eq!(app.mode, Mode::Pick);
+    assert!(app.preview.is_none());
+}
+
+#[test]
+fn locking_drops_the_photo_and_marks() {
+    let mut app = app_with_chats();
+    app.preview = Some(Preview { w: 1, h: 2, rgb: vec![0; 6] });
+    app.marked.insert(1);
+    app.lock();
+    assert!(app.preview.is_none() && app.marked.is_empty());
 }

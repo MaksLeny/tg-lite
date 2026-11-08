@@ -314,6 +314,159 @@ pub fn clipboard_text() -> Option<String> {
     }
 }
 
+/// Картинка из буфера обмена (скриншот) в виде PNG. На Windows читается формат CF_DIB,
+/// на других системах пробуем wl-paste / xclip.
+pub fn clipboard_image_png() -> Option<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        unsafe extern "system" {
+            fn OpenClipboard(owner: *mut c_void) -> i32;
+            fn CloseClipboard() -> i32;
+            fn IsClipboardFormatAvailable(format: u32) -> i32;
+            fn GetClipboardData(format: u32) -> *mut c_void;
+            fn GlobalLock(mem: *mut c_void) -> *mut c_void;
+            fn GlobalUnlock(mem: *mut c_void) -> i32;
+            fn GlobalSize(mem: *mut c_void) -> usize;
+        }
+        const CF_DIB: u32 = 8;
+        let mut opened = false;
+        for _ in 0..10 {
+            if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        if !opened {
+            return None;
+        }
+        let mut data: Option<Vec<u8>> = None;
+        unsafe {
+            if IsClipboardFormatAvailable(CF_DIB) != 0 {
+                let h = GetClipboardData(CF_DIB);
+                if !h.is_null() {
+                    let size = GlobalSize(h);
+                    let p = GlobalLock(h) as *const u8;
+                    if !p.is_null() {
+                        data = Some(std::slice::from_raw_parts(p, size).to_vec());
+                        GlobalUnlock(h);
+                    }
+                }
+            }
+            CloseClipboard();
+        }
+        dib_to_png(&data?)
+    }
+    #[cfg(not(windows))]
+    {
+        let tools: [(&str, &[&str]); 2] =
+            [("wl-paste", &["--type", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"])];
+        for (prog, args) in tools {
+            if let Ok(out) = std::process::Command::new(prog).args(args).output()
+                && out.status.success()
+                && out.stdout.starts_with(&[0x89, b'P', b'N', b'G'])
+            {
+                return Some(out.stdout);
+            }
+        }
+        None
+    }
+}
+
+/// Превращает «DIB» из буфера обмена Windows (24 или 32 бита на точку) в PNG.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn dib_to_png(dib: &[u8]) -> Option<Vec<u8>> {
+    let u32_at = |o: usize| dib.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let header = u32_at(0)? as usize;
+    let width = u32_at(4)? as i32;
+    let height = u32_at(8)? as i32;
+    let bits = dib.get(14..16).map(|b| u16::from_le_bytes([b[0], b[1]]))? as usize;
+    let compression = u32_at(16)?;
+    if header < 40 || width <= 0 || height == 0 || !(bits == 24 || bits == 32) || !(compression == 0 || compression == 3) {
+        return None;
+    }
+    let (w, h) = (width as usize, height.unsigned_abs() as usize);
+    if w > 16_384 || h > 16_384 {
+        return None;
+    }
+    let top_down = height < 0;
+    let offset = header + if compression == 3 && header == 40 { 12 } else { 0 };
+    let stride = (w * bits).div_ceil(32) * 4;
+    let bytes = bits / 8;
+    if dib.len() < offset + stride * h {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        let row = if top_down { y } else { h - 1 - y };
+        let line = &dib[offset + row * stride..offset + row * stride + w * bytes];
+        for px in line.chunks_exact(bytes) {
+            rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+        }
+    }
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, w as u32, h as u32);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.set_compression(png::Compression::Fast);
+    let mut writer = enc.write_header().ok()?;
+    writer.write_image_data(&rgb).ok()?;
+    writer.finish().ok()?;
+    Some(out)
+}
+
+/// Декодирует JPEG в RGB: (ширина, высота, точки подряд).
+pub fn decode_jpeg(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let mut dec = jpeg_decoder::Decoder::new(bytes);
+    let data = dec.decode().ok()?;
+    let info = dec.info()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let rgb = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => data,
+        jpeg_decoder::PixelFormat::L8 => data.iter().flat_map(|&g| [g, g, g]).collect(),
+        _ => return None,
+    };
+    (rgb.len() == w * h * 3 && w > 0 && h > 0).then_some((w, h, rgb))
+}
+
+/// Размер картинки `w`×`h` точек, вписанной в `cols` столбцов и `rows` строк консоли.
+/// Каждая ячейка — две точки по вертикали («▀»), поэтому по высоте точек вдвое больше, чем строк.
+pub fn fit_cells(w: usize, h: usize, cols: usize, rows: usize) -> (usize, usize) {
+    if w == 0 || h == 0 || cols == 0 || rows == 0 {
+        return (0, 0);
+    }
+    let (maxw, maxh) = (cols, rows * 2);
+    // Масштаб в точках; увеличивать маленькие картинки в разы не нужно, но на пару раз можно.
+    let scale = (maxw as f64 / w as f64).min(maxh as f64 / h as f64).min(3.0);
+    let pw = ((w as f64 * scale).round() as usize).clamp(1, maxw);
+    let ph = ((h as f64 * scale).round() as usize).clamp(2, maxh);
+    (pw, ph.div_ceil(2) * 2)
+}
+
+/// Уменьшает RGB-картинку до `pw`×`ph` точек усреднением (чётче, чем выбор ближайшей).
+pub fn shrink_rgb(w: usize, h: usize, rgb: &[u8], pw: usize, ph: usize) -> Vec<[u8; 3]> {
+    let mut out = Vec::with_capacity(pw * ph);
+    for y in 0..ph {
+        let (y0, y1) = (y * h / ph, ((y + 1) * h / ph).max(y * h / ph + 1).min(h));
+        for x in 0..pw {
+            let (x0, x1) = (x * w / pw, ((x + 1) * w / pw).max(x * w / pw + 1).min(w));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    let i = (yy * w + xx) * 3;
+                    r += u32::from(rgb[i]);
+                    g += u32::from(rgb[i + 1]);
+                    b += u32::from(rgb[i + 2]);
+                    n += 1;
+                }
+            }
+            out.push([(r / n) as u8, (g / n) as u8, (b / n) as u8]);
+        }
+    }
+    out
+}
+
 /// Кладёт текст в буфер обмена. На Windows через встроенную программу `clip` (кодировка UTF-16 с меткой порядка
 /// байтов, поэтому русский текст и эмодзи не портятся), на других системах через wl-copy / xclip / xsel / pbcopy.
 pub fn clipboard_set(text: &str) -> bool {
@@ -718,5 +871,66 @@ mod tests {
     fn keeps_normal_text() {
         let s = "Код для входа: 12345. «Не давайте» код — никому, ёЁ ї ґ";
         assert_eq!(clean(s), s);
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+
+    #[test]
+    fn dib_from_the_windows_clipboard_becomes_a_png() {
+        // 2×2, 24 бита, строки снизу вверх: нижний ряд красный/зелёный, верхний синий/белый
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes());
+        dib.extend_from_slice(&2i32.to_le_bytes());
+        dib.extend_from_slice(&2i32.to_le_bytes());
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&24u16.to_le_bytes());
+        dib.extend_from_slice(&[0u8; 24]);
+        for row in [[[0u8, 0, 255], [0, 255, 0]], [[255, 0, 0], [255, 255, 255]]] {
+            for px in row {
+                dib.extend_from_slice(&px); // BGR
+            }
+            dib.extend_from_slice(&[0, 0]); // строка выравнивается до 4 байт
+        }
+        let png = dib_to_png(&dib).expect("png");
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+        let mut reader = png::Decoder::new(png.as_slice()).read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        reader.next_frame(&mut buf).unwrap();
+        assert_eq!(&buf[..6], &[0, 0, 255, 255, 255, 255][..], "верхний ряд: синий и белый");
+        assert_eq!(&buf[6..12], &[255, 0, 0, 0, 255, 0][..], "нижний ряд: красный и зелёный");
+    }
+
+    #[test]
+    fn broken_or_unsupported_dib_is_refused() {
+        assert!(dib_to_png(&[]).is_none());
+        assert!(dib_to_png(&[0; 40]).is_none());
+        let mut dib = vec![0u8; 44];
+        dib[..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&100i32.to_le_bytes());
+        dib[8..12].copy_from_slice(&100i32.to_le_bytes());
+        dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+        assert!(dib_to_png(&dib).is_none(), "данных меньше, чем заявлено");
+        dib[14..16].copy_from_slice(&8u16.to_le_bytes());
+        assert!(dib_to_png(&dib).is_none(), "палитровые картинки не поддерживаются");
+    }
+
+    #[test]
+    fn preview_scaling_keeps_aspect_and_fits_the_window() {
+        assert_eq!(fit_cells(800, 400, 100, 40), (100, 50));
+        let (w, h) = fit_cells(300, 600, 100, 20);
+        assert!(w <= 100 && h <= 40 && h % 2 == 0);
+        assert!(w * 2 <= h + 2, "портретная картинка осталась портретной");
+        assert_eq!(fit_cells(0, 10, 10, 10), (0, 0));
+        let px = shrink_rgb(2, 2, &[10, 10, 10, 30, 30, 30, 50, 50, 50, 70, 70, 70], 1, 1);
+        assert_eq!(px, vec![[40, 40, 40]], "усреднение");
+    }
+
+    #[test]
+    fn jpeg_decoding_rejects_garbage() {
+        assert!(decode_jpeg(b"not a jpeg").is_none());
+        assert!(decode_jpeg(&[]).is_none());
     }
 }
