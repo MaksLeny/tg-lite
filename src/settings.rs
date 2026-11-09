@@ -47,6 +47,10 @@ pub struct Settings {
     pub cloud_drafts: bool,
     /// Цветовая тема: 0 тёмная, 1 светлая, 2 высокий контраст, 3 Solarized.
     pub palette: u8,
+    /// Эмодзи в тексте: 0 авто (только в Windows Terminal), 1 всегда, 2 никогда.
+    pub emoji: u8,
+    /// Всплывающее уведомление Windows о новом сообщении, пока вы не за клавиатурой.
+    pub notify: bool,
 }
 
 impl Default for Settings {
@@ -68,6 +72,8 @@ impl Default for Settings {
             mouse: true,
             cloud_drafts: true,
             palette: 0,
+            emoji: 0,
+            notify: false,
         }
     }
 }
@@ -141,6 +147,10 @@ impl Settings {
 
     pub fn width_name(v: u8, names: [&'static str; 3]) -> &'static str {
         names[(v as usize).min(2)]
+    }
+
+    pub fn emoji_name(&self) -> &'static str {
+        [tr!("авто", "auto"), tr!("всегда", "always"), tr!("никогда", "never")][(self.emoji as usize).min(2)]
     }
 
     pub fn palette_name(&self) -> &'static str {

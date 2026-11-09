@@ -90,6 +90,31 @@ pub(super) fn parse_send(arg: &str) -> Option<(String, String)> {
     }
 }
 
+/// `/album`: пути (в кавычках, если есть пробелы) и необязательная подпись после `--`.
+pub(super) fn parse_album(arg: &str) -> (Vec<String>, String) {
+    let mut paths = Vec::new();
+    let mut rest = arg.trim();
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return (paths, String::new());
+        }
+        if let Some(cap) = rest.strip_prefix("--") {
+            return (paths, cap.trim().to_string());
+        }
+        let quote = ['"', '\''].into_iter().find(|q| rest.starts_with(*q));
+        let (token, tail) = match quote {
+            Some(q) => match rest[1..].find(q) {
+                Some(end) => (&rest[1..1 + end], &rest[end + 2..]),
+                None => (&rest[1..], ""),
+            },
+            None => rest.split_once(char::is_whitespace).unwrap_or((rest, "")),
+        };
+        paths.push(token.to_string());
+        rest = tail;
+    }
+}
+
 pub(super) fn truncate(s: &str, max: usize) -> String {
     if display_width(s) <= max {
         return s.to_string();

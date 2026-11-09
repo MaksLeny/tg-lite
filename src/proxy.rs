@@ -262,6 +262,96 @@ pub fn candidates(settings: &Settings) -> Vec<Route> {
     }
 }
 
+// ------------------------------------------------------------------ /netcheck
+
+/// Дата-центры Telegram: имя и адрес.
+const DCS: [(&str, &str); 5] = [
+    ("DC1", "149.154.175.53:443"),
+    ("DC2", "149.154.167.51:443"),
+    ("DC3", "149.154.175.100:443"),
+    ("DC4", "149.154.167.91:443"),
+    ("DC5", "91.108.56.130:443"),
+];
+
+/// За сколько миллисекунд удалось соединиться с адресом (не дольше `limit_ms`).
+pub async fn tcp_time(addr: &str, limit_ms: u64) -> Option<u32> {
+    let t = std::time::Instant::now();
+    match timeout(Duration::from_millis(limit_ms), TcpStream::connect(addr)).await {
+        Ok(Ok(_)) => Some(t.elapsed().as_millis() as u32),
+        _ => None,
+    }
+}
+
+/// Проверка связи по шагам: имя в DNS, каждый маршрут из настроек и дата-центры Telegram.
+/// Возвращает готовые строки для показа. Адреса прокси выводятся без логина и пароля.
+pub async fn netcheck(settings: &Settings) -> Vec<String> {
+    let mut out = Vec::new();
+    let t = std::time::Instant::now();
+    match timeout(Duration::from_millis(4000), tokio::net::lookup_host("telegram.org:443")).await {
+        Ok(Ok(mut it)) => match it.next() {
+            Some(a) => out.push(trf!(
+                "Имя telegram.org: найдено за {} мс ({})",
+                "Name telegram.org: resolved in {} ms ({})",
+                t.elapsed().as_millis(),
+                a.ip()
+            )),
+            None => out.push(tr!("Имя telegram.org: пустой ответ DNS", "Name telegram.org: empty DNS answer").to_string()),
+        },
+        _ => out.push(
+            tr!(
+                "Имя telegram.org: не найдено (DNS не отвечает; при прямом соединении это обычно блокировка или нет сети)",
+                "Name telegram.org: not found (DNS does not answer; with a direct connection this is usually a block or no network)"
+            )
+            .to_string(),
+        ),
+    }
+    let mut reachable = false;
+    for route in candidates(settings) {
+        match &route {
+            Route::Direct => {
+                let mut ok = 0;
+                let mut parts = Vec::new();
+                for (name, addr) in DCS {
+                    match tcp_time(addr, 3000).await {
+                        Some(ms) => {
+                            ok += 1;
+                            parts.push(format!("{name} {ms} мс"));
+                        }
+                        None => parts.push(format!("{name} {}", tr!("нет", "no"))),
+                    }
+                }
+                reachable |= ok > 0;
+                out.push(trf!("Напрямую: {}", "Directly: {}", parts.join(", ")));
+            }
+            Route::Socks5(a) | Route::HttpBridge(a) => {
+                let p = probe(a).await;
+                reachable |= p != Probe::Dead;
+                let state = match p {
+                    Probe::Dead => tr!("не отвечает", "does not answer"),
+                    Probe::Socks5 => tr!("отвечает как SOCKS5", "answers as SOCKS5"),
+                    Probe::Other => tr!("отвечает (не SOCKS5, похоже на HTTP)", "answers (not SOCKS5, looks like HTTP)"),
+                };
+                out.push(format!("{}: {state}", route.label()));
+            }
+        }
+    }
+    out.push(
+        if reachable {
+            tr!(
+                "Итог: хотя бы один путь к Telegram открыт. Если вход не идёт, проверьте прокси в настройках.",
+                "Result: at least one path to Telegram is open. If login still fails, check the proxy in the settings."
+            )
+        } else {
+            tr!(
+                "Итог: ни один путь к Telegram не отвечает. Проверьте интернет и прокси (F4) или включите VPN.",
+                "Result: no path to Telegram answers. Check the internet and the proxy (F4) or turn on a VPN."
+            )
+        }
+        .to_string(),
+    );
+    out
+}
+
 // ------------------------------------------------------------------ быстрая проверка прокси
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -448,6 +538,27 @@ async fn serve_socks5(mut client: TcpStream, http_proxy: &str) -> io::Result<()>
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn netcheck_reports_each_route_and_a_verdict() {
+        let ok = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ok_addr = ok.local_addr().unwrap().to_string();
+        assert!(tcp_time(&ok_addr, 1000).await.is_some());
+        let dead = {
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().to_string()
+        };
+        assert!(tcp_time(&dead, 500).await.is_none());
+        let mut s = Settings::default();
+        s.proxy_mode = ProxyMode::Manual;
+        s.proxy_manual = format!("socks5://user:pw@{dead}");
+        let lines = netcheck(&s).await;
+        let text = lines.join("\n");
+        assert!(text.contains("telegram.org"), "{text}");
+        assert!(text.contains("не отвечает"), "{text}");
+        assert!(!text.contains("pw@"), "пароль не показывается: {text}");
+        assert!(text.contains("Итог: ни один путь"), "{text}");
+    }
+
     use super::*;
 
     #[test]

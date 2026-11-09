@@ -41,7 +41,62 @@ pub(super) fn draw(f: &mut Frame, app: &mut App) {
             draw_main(f, app);
             draw_preview(f, app);
         }
+        Mode::Viewer => {
+            draw_main(f, app);
+            draw_viewer(f, app);
+        }
     }
+}
+
+/// Текстовый файл: окно почти на весь экран, длинные строки переносятся, листается построчно.
+fn draw_viewer(f: &mut Frame, app: &App) {
+    let Some(v) = &app.viewer else { return };
+    let area = f.area();
+    let rect = Rect::new(
+        2.min(area.width / 4),
+        1.min(area.height / 4),
+        area.width.saturating_sub(4).max(10),
+        area.height.saturating_sub(2).max(5),
+    );
+    let inner_w = rect.width.saturating_sub(4) as usize;
+    let inner_h = rect.height.saturating_sub(2) as usize;
+    let mut rows: Vec<Line> = Vec::new();
+    for l in v.lines.iter().skip(v.top) {
+        if rows.len() >= inner_h {
+            break;
+        }
+        if l.is_empty() {
+            rows.push(Line::from(""));
+            continue;
+        }
+        for part in textwrap::wrap(l, inner_w.max(8)) {
+            rows.push(Line::from(format!(" {part}")));
+        }
+    }
+    rows.truncate(inner_h);
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(rows).block(
+            Block::default()
+                .style(base_style())
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(app.theme.accent))
+                .title(Span::styled(
+                    format!(" {} ", truncate(&v.name, inner_w.saturating_sub(4))),
+                    Style::new().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+                ))
+                .title_bottom(Span::styled(
+                    format!(
+                        "{} {}/{} ",
+                        tr!(" ↑ ↓ PgUp PgDn — листать · Esc — закрыть ·", " ↑ ↓ PgUp PgDn — scroll · Esc — close ·"),
+                        v.top + 1,
+                        v.lines.len()
+                    ),
+                    Style::new().fg(muted()),
+                )),
+        ),
+        rect,
+    );
 }
 
 /// Фото из точек RGB: каждая ячейка консоли — две точки («▀»: верх цветом текста, низ цветом фона).
@@ -524,6 +579,25 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             if m.is_some_and(|m| m.poll.is_some()) {
                 extra.push_str(tr!("V голос · ", "V vote · "));
             }
+            if m.is_some_and(|m| {
+                m.caption.is_some()
+                    && (m.text.contains("[голосов")
+                        || m.text.contains("[voice")
+                        || m.text.contains("[аудио")
+                        || m.text.contains("[audio")
+                        || m.text.contains("[видео")
+                        || m.text.contains("[video"))
+            }) {
+                extra.push_str(tr!("O слушать/смотреть · ", "O play · "));
+            }
+            if m.is_some_and(|m| {
+                m.caption.is_some()
+                    && [".txt", ".md", ".log", ".json", ".csv", ".xml", ".yml", ".yaml", ".toml", ".ini", ".cfg"]
+                        .iter()
+                        .any(|e| m.text.to_lowercase().contains(e))
+            }) {
+                extra.push_str(tr!("T читать · ", "T read · "));
+            }
             if m.is_some_and(|m| !m.buttons.is_empty()) {
                 extra.push_str(tr!("K кнопки · ", "K buttons · "));
             }
@@ -622,10 +696,10 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
             tr!("выбор сообщения: R ответить, F переслать, E править, D удалить", "pick message: R reply, F forward, E edit, D delete"),
         ),
         key(
-            tr!("F7 → 1-6, G, K, V", "F7 → 1-6, G, K, V"),
+            tr!("F7 → 1-6, G, K, V, P, T", "F7 → 1-6, G, K, V, P, T"),
             tr!(
-                "реакция (0 — снять); G к оригиналу, B назад; K кнопки; V голос в опросе",
-                "reaction (0 removes); G original, B back; K buttons; V vote in a poll"
+                "реакция (0 — снять); G оригинал, B назад; K кнопки; V голос; P фото; T текст",
+                "reaction (0 removes); G original, B back; K buttons; V vote; P photo; T text file"
             ),
         ),
         key(
@@ -635,7 +709,13 @@ pub(super) fn draw_help(f: &mut Frame, app: &App) {
                 "mark messages (Shift+↑↓, or drag the mouse); F, D, C act on all"
             ),
         ),
-        key("Esc", tr!("очистить ввод; отменить ответ, правку, поиск", "clear input; cancel reply, edit, search")),
+        key(
+            "Esc, Ctrl+Z/Y",
+            tr!(
+                "очистить ввод; отмена ответа, правки; Ctrl+Z/Y — отмена и повтор набора",
+                "clear input; cancel reply, edit; Ctrl+Z/Y undo and redo typing"
+            ),
+        ),
         key(tr!("F2  или /lock", "F2  or /lock"), tr!("заблокировать (запрос пароля)", "lock (asks for password)")),
         key(tr!("F3  или /md", "F3  or /md"), tr!("Markdown вкл/выкл", "Markdown on/off")),
         key(
@@ -750,22 +830,32 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
         (tr!("Облачные черновики", "Cloud drafts"), on_off(s.cloud_drafts).to_string()),
         (tr!("Тема", "Theme"), s.palette_name().to_string()),
         (tr!("Пароль приложения", "App password"), tr!("сменить…", "change…").to_string()),
+        (tr!("Эмодзи в тексте", "Emoji in text"), s.emoji_name().to_string()),
+        (tr!("Уведомления Windows", "Windows notifications"), on_off(s.notify).to_string()),
     ];
     let width = 78u16;
     let label_w = 28usize;
-    let mut lines = vec![Line::from("")];
-    for (i, (label, value)) in rows.iter().enumerate() {
-        let selected = i == app.settings_row;
-        let shown = if i == SETTINGS_ROWS - 1 { value.clone() } else { format!("‹ {value} ›") };
-        let shown = truncate(&shown, (width as usize).saturating_sub(label_w + 6));
-        let row_style = if selected { Style::new().bg(app.theme.select_bg).fg(Color::White) } else { Style::new() };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {label:<label_w$}"), row_style),
-            Span::styled(
-                format!("{shown:<w$} ", w = (width as usize).saturating_sub(label_w + 4)),
-                if selected { row_style.add_modifier(Modifier::BOLD) } else { Style::new().fg(accent) },
-            ),
-        ]));
+    let mut lines = vec![];
+    let mut sel_line = 0;
+    for (title, group) in settings_sections() {
+        lines.push(Line::from(Span::styled(format!(" {title}"), Style::new().fg(muted()).add_modifier(Modifier::BOLD))));
+        for &i in group {
+            let (label, value) = &rows[i];
+            let selected = i == app.settings_row;
+            if selected {
+                sel_line = lines.len();
+            }
+            let shown = if i == 14 { value.clone() } else { format!("‹ {value} ›") };
+            let shown = truncate(&shown, (width as usize).saturating_sub(label_w + 6));
+            let row_style = if selected { Style::new().bg(app.theme.select_bg).fg(Color::White) } else { Style::new() };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {label:<label_w$}"), row_style),
+                Span::styled(
+                    format!("{shown:<w$} ", w = (width as usize).saturating_sub(label_w + 4)),
+                    if selected { row_style.add_modifier(Modifier::BOLD) } else { Style::new().fg(accent) },
+                ),
+            ]));
+        }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -782,7 +872,6 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
     let rect = centered_rect(f.area(), width, lines.len() as u16 + 2);
     // На низком окне список прокручивается так, чтобы выбранная строка была видна.
     let inner_h = rect.height.saturating_sub(2) as usize;
-    let sel_line = 1 + app.settings_row.min(SETTINGS_ROWS - 1);
     let scroll = if lines.len() > inner_h { sel_line.saturating_sub(inner_h.saturating_sub(1)).min(lines.len() - inner_h) } else { 0 };
     f.render_widget(Clear, rect);
     f.render_widget(

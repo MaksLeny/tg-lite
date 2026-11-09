@@ -206,6 +206,68 @@ pub fn debug(msg: &str) {
     }
 }
 
+/// Отчёт для поддержки: версия, система, настройки (без адреса прокси, пароля и номера)
+/// и последние строки журнала. Текстов переписки в нём нет: их нет и в журнале.
+pub fn build_report(settings: &crate::settings::Settings, chats: usize, log_tail: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Tg-Lite {}\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!("OS: {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
+    out.push_str(&format!("terminal: {}\n", if in_windows_terminal() { "Windows Terminal" } else { "other console" }));
+    out.push_str(&format!(
+        "settings: lock={}min proxy={:?} sound={} notify={} emoji={} theme={} lang={} mouse={} cloud_drafts={}\n",
+        settings.lock_minutes,
+        settings.proxy_mode,
+        settings.sound,
+        settings.notify,
+        settings.emoji,
+        settings.palette,
+        settings.lang,
+        settings.mouse,
+        settings.cloud_drafts
+    ));
+    out.push_str(&format!("chats loaded: {chats}\n"));
+    out.push_str("\n--- log (last lines; no message texts, passwords or phone numbers) ---\n");
+    for line in log_tail.lines() {
+        out.push_str(&hide_numbers(&crate::proxy::redact_text(line)));
+        out.push('\n');
+    }
+    out
+}
+
+/// Длинные числа (телефоны, идентификаторы) заменяются на `<число>`.
+fn hide_numbers(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.len() >= 9 {
+            out.push_str("<number>");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in line.chars() {
+        if c.is_ascii_digit() {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// Сохраняет отчёт в `tglite-report.txt` рядом с программой.
+pub fn write_report(settings: &crate::settings::Settings, chats: usize) -> std::io::Result<PathBuf> {
+    let tail = std::fs::read_to_string(data_dir().join("tglite.log")).unwrap_or_default();
+    let lines: Vec<&str> = tail.lines().collect();
+    let tail = lines[lines.len().saturating_sub(60)..].join("\n");
+    let path = data_dir().join("tglite-report.txt");
+    std::fs::write(&path, build_report(settings, chats, &tail))?;
+    Ok(path)
+}
+
 /// Сохраняет текст в `export/<имя>.txt` рядом с программой. Возвращает путь к файлу.
 pub fn write_export(chat_name: &str, text: &str) -> std::io::Result<PathBuf> {
     let dir = data_dir().join("export");
@@ -215,10 +277,43 @@ pub fn write_export(chat_name: &str, text: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+static EMOJI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Включает показ простых эмодзи (по одному знаку: без склеек, флагов и оттенков кожи).
+pub fn set_emoji(on: bool) {
+    EMOJI.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Запущено ли приложение в Windows Terminal: он рисует цветные эмодзи, старая консоль нет.
+pub fn in_windows_terminal() -> bool {
+    std::env::var_os("WT_SESSION").is_some()
+}
+
+/// Решает, показывать ли эмодзи, по настройке: 0 авто, 1 всегда, 2 никогда.
+pub fn emoji_enabled(mode: u8) -> bool {
+    match mode {
+        1 => true,
+        2 => false,
+        _ => in_windows_terminal(),
+    }
+}
+
+/// Простой эмодзи одним знаком. Склейки (ZWJ), вариационные селекторы, флаги и оттенки кожи
+/// остаются вне: они ломают ширину ячеек, а без них картинка всё равно читается.
+fn is_plain_emoji(c: char) -> bool {
+    matches!(c as u32,
+        0x1F300..=0x1F3FA | 0x1F400..=0x1F64F | 0x1F680..=0x1F6FF | 0x1F900..=0x1F9FF | 0x1FA70..=0x1FAFF
+        | 0x2600..=0x26FF | 0x2700..=0x27BF | 0x2B50 | 0x2B55 | 0x231A | 0x231B | 0x23E9..=0x23F3)
+}
+
 /// Можно ли безопасно вывести символ в консоль Windows. Эмодзи, флаги, невидимые символы
 /// (склейки, вариационные селекторы) в её шрифте не рисуются: вместо них появляются
 /// квадратики, а разная трактовка ширины сдвигает и стирает соседний текст.
 pub fn is_safe_char(c: char) -> bool {
+    is_safe_char_with(c, EMOJI.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn is_safe_char_with(c: char, emoji: bool) -> bool {
     matches!(c as u32,
         0x20..=0x7E            // ASCII
         | 0xA1..=0x24F         // латиница (без неразрывного пробела и мягкого переноса: ниже)
@@ -229,17 +324,22 @@ pub fn is_safe_char(c: char) -> bool {
         | 0x2190..=0x2193
         | 0x2500..=0x259F      // рамки и блоки
     ) && c as u32 != 0xAD
+        || (emoji && is_plain_emoji(c))
 }
 
 /// Очищает текст от символов, которые консоль не умеет рисовать. Переводы строк сохраняются,
 /// неразрывные пробелы и табуляция становятся обычными пробелами.
 pub fn clean(s: &str) -> String {
+    clean_with(s, EMOJI.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn clean_with(s: &str, emoji: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\n' => out.push('\n'),
             '\t' | '\u{a0}' | '\u{2002}'..='\u{200a}' | '\u{3000}' => out.push(' '),
-            c if is_safe_char(c) => out.push(c),
+            c if is_safe_char_with(c, emoji) => out.push(c),
             _ => {}
         }
     }
@@ -311,6 +411,31 @@ pub fn clipboard_text() -> Option<String> {
             }
         }
         None
+    }
+}
+
+/// Всплывающее уведомление Windows. Текст передаётся через переменные окружения, а не в команде,
+/// чтобы ничего из сообщения не могло стать частью скрипта. Нет Windows или PowerShell: ничего не происходит.
+pub fn notify(title: &str, body: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const SCRIPT: &str = "$null=[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
+            $x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('ToastText02');\
+            $t=$x.GetElementsByTagName('text');\
+            $t.Item(0).AppendChild($x.CreateTextNode($env:TGL_TITLE))|Out-Null;\
+            $t.Item(1).AppendChild($x.CreateTextNode($env:TGL_BODY))|Out-Null;\
+            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", SCRIPT])
+            .env("TGL_TITLE", clean(title))
+            .env("TGL_BODY", clean(body))
+            .creation_flags(0x0800_0000) // без окна консоли
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (title, body);
     }
 }
 
@@ -538,6 +663,27 @@ const OPENABLE: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "bmp", "pdf", "txt", "md", "log", "json", "mp3", "ogg", "oga", "opus", "m4a", "wav", "flac",
     "mp4", "mkv", "webm", "avi", "mov",
 ];
+
+/// Расширения файлов, которые можно читать прямо в окне (`T` в режиме выбора).
+const TEXT_EXTS: &[&str] =
+    &["txt", "md", "log", "json", "csv", "xml", "yml", "yaml", "toml", "ini", "cfg", "conf", "rs", "py", "js", "html", "css"];
+
+/// Максимальный размер текстового файла для чтения в окне.
+pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+
+/// Читается ли файл с таким именем как текст.
+pub fn is_text_file(file_name: &str) -> bool {
+    match file_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
+        _ => false,
+    }
+}
+
+/// Текст файла для показа: без непечатаемого, строки не длиннее 5000 (остальное отбрасывается).
+pub fn text_for_view(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    clean(&text).lines().take(5000).map(|l| l.trim_end().to_string()).collect()
+}
 
 /// Максимальный размер файла для `/open` (байт): больше качайте через `/save`.
 pub const MAX_OPEN_BYTES: u64 = 50 * 1024 * 1024;
@@ -926,6 +1072,28 @@ mod media_tests {
         assert_eq!(fit_cells(0, 10, 10, 10), (0, 0));
         let px = shrink_rgb(2, 2, &[10, 10, 10, 30, 30, 30, 50, 50, 50, 70, 70, 70], 1, 1);
         assert_eq!(px, vec![[40, 40, 40]], "усреднение");
+    }
+
+    #[test]
+    fn plain_emoji_pass_only_when_enabled_and_complex_ones_never() {
+        assert_eq!(clean_with("привет 😀 мир", false), "привет  мир");
+        assert_eq!(clean_with("привет 😀 мир", true), "привет 😀 мир");
+        // склейка, оттенок кожи, флаг и селектор вариации остаются вне, как и раньше
+        assert_eq!(clean_with("👍\u{1F3FD}", true), "👍");
+        assert_eq!(clean_with("a\u{200d}b\u{fe0f}\u{1F1F7}\u{1F1FA}", true), "ab");
+        assert!(emoji_enabled(1) && !emoji_enabled(2));
+    }
+
+    #[test]
+    fn report_has_no_secrets_and_hides_long_numbers() {
+        let mut s = crate::settings::Settings::default();
+        s.proxy_manual = "socks5://bob:hunter2@10.0.0.1:1080".into();
+        let log = "2026-11-09 10:00:00 connect via socks5://bob:hunter2@10.0.0.1:1080 failed\n2026-11-09 10:01:00 login +79001234567 error";
+        let r = build_report(&s, 12, log);
+        assert!(r.contains("Tg-Lite ") && r.contains("chats loaded: 12"));
+        assert!(!r.contains("hunter2") && !r.contains("bob"), "{r}");
+        assert!(!r.contains("79001234567") && r.contains("<number>"), "{r}");
+        assert!(r.contains("2026-11-09 10:00:00"), "даты остаются: {r}");
     }
 
     #[test]

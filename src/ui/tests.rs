@@ -474,19 +474,19 @@ fn settings_screen_changes_and_saves() {
     app.handle_key(key(KeyCode::Left, none), &tx, &s);
     assert_eq!(app.settings.lock_minutes, 2);
 
-    app.handle_key(key(KeyCode::Down, none), &tx, &s); // прокси
+    app.settings_row = 1; // прокси
     app.handle_key(key(KeyCode::Right, none), &tx, &s);
     assert_eq!(app.settings.proxy_mode, ProxyMode::Off);
-    app.handle_key(key(KeyCode::Down, none), &tx, &s); // звук
+    app.settings_row = 2; // звук
     app.handle_key(key(KeyCode::Enter, none), &tx, &s);
     assert!(app.settings.sound);
-    app.handle_key(key(KeyCode::Down, none), &tx, &s); // статус
+    app.settings_row = 3; // статус
     app.handle_key(key(KeyCode::Char(' '), none), &tx, &s);
     assert!(!app.settings.show_status);
-    app.handle_key(key(KeyCode::Down, none), &tx, &s); // история
+    app.settings_row = 4; // история
     app.handle_key(key(KeyCode::Right, none), &tx, &s);
     assert_eq!(app.settings.history_limit, 100);
-    app.handle_key(key(KeyCode::Down, none), &tx, &s); // цвет
+    app.settings_row = 5; // цвет
     app.handle_key(key(KeyCode::Right, none), &tx, &s);
     assert_eq!(app.settings.accent, 1);
     assert_eq!(s.settings(), app.settings);
@@ -1762,8 +1762,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.4.0"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.4.0");
+    assert!(README.contains("1.5.0"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.5.0");
 }
 
 #[test]
@@ -2988,6 +2988,7 @@ fn themes_apply_and_every_palette_renders_every_screen() {
         set_palette(p);
         for mode in [Mode::Chat, Mode::Pick, Mode::Overlay, Mode::Help, Mode::Settings, Mode::Forward] {
             app.mode = mode;
+            app.settings_row = 2; // выбранная строка подсвечена и не должна попадать на пробную ячейку
             let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
             term.draw(|f| draw(f, &mut app)).unwrap();
             let buf = term.backend().buffer();
@@ -3538,4 +3539,199 @@ fn locking_drops_the_photo_and_marks() {
     app.marked.insert(1);
     app.lock();
     assert!(app.preview.is_none() && app.marked.is_empty());
+}
+
+#[test]
+fn settings_are_grouped_into_sections_and_navigation_follows_the_screen_order() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.mode = Mode::Settings;
+    app.settings_row = 0;
+    let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let out = dump(&term);
+    for title in ["Защита", "Подключение", "Сообщения и звук", "Внешний вид", "Общие"] {
+        assert!(out.contains(title), "нет раздела {title}");
+    }
+    // каждая строка входит ровно в один раздел
+    let mut all: Vec<usize> = settings_sections().iter().flat_map(|(_, r)| r.iter().copied()).collect();
+    all.sort_unstable();
+    assert_eq!(all, (0..SETTINGS_ROWS).collect::<Vec<_>>());
+    // ↓ идёт по порядку на экране и замыкается по кругу
+    let mut seen = vec![app.settings_row];
+    for _ in 1..SETTINGS_ROWS {
+        press(&mut app, KeyCode::Down, &tx, &s);
+        seen.push(app.settings_row);
+    }
+    let expected: Vec<usize> = settings_sections().iter().flat_map(|(_, r)| r.iter().copied()).collect();
+    assert_eq!(seen, expected);
+    press(&mut app, KeyCode::Down, &tx, &s);
+    assert_eq!(app.settings_row, 0);
+    press(&mut app, KeyCode::Up, &tx, &s);
+    assert_eq!(app.settings_row, *expected.last().unwrap());
+}
+
+#[test]
+fn ctrl_z_and_ctrl_y_step_through_input_changes() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let c = KeyModifiers::CONTROL;
+    for ch in "привет".chars() {
+        app.handle_key(key(KeyCode::Char(ch), KeyModifiers::NONE), &tx, &s);
+    }
+    assert_eq!(app.input, "привет");
+    app.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE), &tx, &s);
+    app.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.input, "прив");
+    app.handle_key(key(KeyCode::Char('z'), c), &tx, &s);
+    assert_eq!(app.input, "приве", "каждое удаление отменяется отдельно");
+    app.handle_key(key(KeyCode::Char('я'), c), &tx, &s); // русская раскладка
+    assert_eq!(app.input, "привет");
+    app.handle_key(key(KeyCode::Char('z'), c), &tx, &s);
+    assert_eq!(app.input, "", "быстрый набор откатывается одним шагом");
+    app.handle_key(key(KeyCode::Char('y'), c), &tx, &s);
+    assert_eq!(app.input, "привет");
+    for _ in 0..2 {
+        app.handle_key(key(KeyCode::Char('н'), c), &tx, &s);
+    }
+    assert_eq!(app.input, "прив", "повтор доходит до последней правки");
+    app.handle_key(key(KeyCode::Char('y'), c), &tx, &s);
+    assert!(app.status.contains("Нечего повторять"));
+    // новая правка обнуляет «вперёд»
+    app.handle_key(key(KeyCode::Char('z'), c), &tx, &s);
+    app.handle_key(key(KeyCode::Char('z'), c), &tx, &s);
+    app.handle_key(key(KeyCode::Char('z'), c), &tx, &s);
+    app.undo_stamp = Instant::now() - Duration::from_secs(5);
+    app.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE), &tx, &s);
+    app.handle_key(key(KeyCode::Char('y'), c), &tx, &s);
+    assert_eq!(app.input, "x");
+    // очищенное отправкой поле тоже можно вернуть
+    app.input = "черновик".into();
+    app.cursor = 8;
+    app.clear_input();
+    app.handle_key(key(KeyCode::Char('z'), c), &tx, &s);
+    assert_eq!(app.input, "черновик");
+}
+
+#[test]
+fn notification_only_when_away_and_not_too_often() {
+    let mut app = app_with_chats();
+    app.settings.notify = false;
+    app.last_activity = Instant::now() - Duration::from_secs(60);
+    app.maybe_notify("Мама");
+    assert!(app.last_notify.is_none(), "выключено в настройках");
+    app.settings.notify = true;
+    app.last_activity = Instant::now();
+    app.maybe_notify("Мама");
+    assert!(app.last_notify.is_none(), "вы за клавиатурой");
+    app.last_activity = Instant::now() - Duration::from_secs(60);
+    app.maybe_notify("Мама");
+    let first = app.last_notify.expect("ушло уведомление");
+    app.maybe_notify("Мама");
+    assert_eq!(app.last_notify, Some(first), "не чаще раза в 5 секунд");
+}
+
+#[test]
+fn emoji_and_notification_settings_cycle() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.mode = Mode::Settings;
+    // строку «Эмодзи» не нажимаем: она включает общий для всех тестов переключатель
+    assert_eq!(cycle(&[0u8, 1, 2], 2, 1), 0);
+    assert_eq!(app.settings.emoji_name(), "авто");
+    app.settings_row = 16;
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert!(app.settings.notify);
+    assert!(s.settings().notify);
+}
+
+#[test]
+fn netcheck_command_and_result_window() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, "/netcheck", &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::NetCheck(_))));
+    app.handle_event(Event::NetCheck(vec!["Имя telegram.org: найдено".into(), "Итог: путь открыт".into()]), &tx);
+    assert_eq!(app.mode, Mode::Overlay);
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let out = dump(&term);
+    assert!(out.contains("Проверка связи") && out.contains("Итог: путь открыт"), "{out}");
+}
+
+#[test]
+fn album_command_parses_paths_checks_files_and_sends() {
+    assert_eq!(parse_album("a.jpg b.png"), (vec!["a.jpg".to_string(), "b.png".to_string()], String::new()));
+    assert_eq!(
+        parse_album(r#""мой снимок.jpg" 'b c.png' d.jpg -- на даче"#),
+        (vec!["мой снимок.jpg".to_string(), "b c.png".to_string(), "d.jpg".to_string()], "на даче".to_string())
+    );
+    assert_eq!(parse_album("").0.len(), 0);
+    let dir = std::env::temp_dir().join(format!("tglite-album-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let files: Vec<String> = (0..3)
+        .map(|i| {
+            let p = dir.join(format!("f{i}.png"));
+            std::fs::write(&p, b"x").unwrap();
+            p.to_string_lossy().into_owned()
+        })
+        .collect();
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    submit_text(&mut app, &format!("/album {}", files[0]), &tx, &s);
+    assert!(app.status.contains("Использование"), "один файл — не альбом");
+    assert!(drain(&mut rx).is_empty());
+    submit_text(&mut app, &format!("/album {} {} nope.png", files[0], files[1]), &tx, &s);
+    assert!(app.status.contains("не найден"));
+    assert!(drain(&mut rx).is_empty());
+    app.clear_input();
+    submit_text(&mut app, &format!("/album {} {} {} -- три фото", files[0], files[1], files[2]), &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::SendAlbum { paths, caption, .. }) => assert_eq!((paths.len(), caption.as_str()), (3, "три фото")),
+        _ => panic!("ожидался альбом"),
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn text_file_viewer_requests_scrolls_and_closes() {
+    assert!(crate::util::is_text_file("Notes.TXT") && crate::util::is_text_file("a.yaml"));
+    assert!(!crate::util::is_text_file("a.exe") && !crate::util::is_text_file(".txt") && !crate::util::is_text_file("txt"));
+    assert_eq!(crate::util::text_for_view("a\r\nb\n\nc".as_bytes()), vec!["a", "b", "", "c"]);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('t'), &tx, &s);
+    assert!(app.pick_note.contains("нет файла"));
+    assert!(drain(&mut rx).is_empty());
+    let mut f = msg(9, false, "Мама", "[файл заметки.txt, 1 КБ]");
+    f.caption = Some(String::new());
+    app.histories.get_mut(&id).unwrap().push(f);
+    press(&mut app, KeyCode::End, &tx, &s);
+    press(&mut app, KeyCode::Char('t'), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::ViewText { id: 9, .. })));
+    let lines: Vec<String> = (0..100).map(|i| format!("строка {i}")).collect();
+    app.handle_event(Event::TextFile { chat: id, name: "заметки.txt".into(), lines }, &tx);
+    assert_eq!(app.mode, Mode::Viewer);
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(text.contains("заметки.txt") && text.contains("строка 0") && !text.contains("строка 90"), "{text}");
+    press(&mut app, KeyCode::End, &tx, &s);
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    assert!(dump(&term).contains("строка 99"));
+    press(&mut app, KeyCode::Esc, &tx, &s);
+    assert_eq!(app.mode, Mode::Pick);
+    assert!(app.viewer.is_none());
+    // блокировка стирает прочитанное
+    app.viewer = Some(Viewer { name: "x".into(), lines: vec!["секрет".into()], top: 0 });
+    app.lock();
+    assert!(app.viewer.is_none());
 }

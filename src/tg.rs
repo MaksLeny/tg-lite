@@ -406,6 +406,19 @@ pub enum Cmd {
     ListPinned(ChatInfo),
     /// Список тем форума (супергруппы с темами).
     ListTopics(ChatInfo),
+    /// Прочитать небольшой текстовый файл из сообщения прямо в окне.
+    ViewText {
+        chat: ChatInfo,
+        id: i32,
+    },
+    /// Несколько фото или файлов одним сообщением (альбом, 2–10 штук).
+    SendAlbum {
+        chat: ChatInfo,
+        paths: Vec<PathBuf>,
+        caption: String,
+    },
+    /// Проверка связи: DNS, прокси и дата-центры Telegram.
+    NetCheck(Box<crate::settings::Settings>),
     /// Скачать уменьшенную копию фото для просмотра в консоли.
     Preview {
         chat: ChatInfo,
@@ -533,6 +546,14 @@ pub enum Event {
         max_id: i32,
     },
     /// Темы форума: (номер, название, непрочитанных).
+    /// Содержимое текстового файла для окна чтения.
+    TextFile {
+        chat: PeerId,
+        name: String,
+        lines: Vec<String>,
+    },
+    /// Результат проверки связи, строками.
+    NetCheck(Vec<String>),
     Topics {
         chat: PeerId,
         items: Vec<(i32, String, i32)>,
@@ -1318,6 +1339,18 @@ pub async fn save_attachment(
 pub const MAX_UPLOAD: u64 = 2000 * 1024 * 1024;
 
 pub async fn send_file(client: &Client, chat: &ChatInfo, path: &Path, caption: &str) -> Result<ChatMsg> {
+    let meta = check_upload(path)?;
+    let up = client.upload_file(path).await.map_err(|e| anyhow!("{e}"))?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let msg = InputMessage::new().text(caption);
+    // Обычные картинки уходят как фото, всё остальное как файл без пережатия.
+    let msg = if matches!(ext.as_str(), "jpg" | "jpeg" | "png") && meta.len() < 10 * 1024 * 1024 { msg.photo(up) } else { msg.file(up) };
+    let sent = client.send_message(chat.peer, msg).await.map_err(|e| anyhow!("{e}"))?;
+    Ok(to_chat_msg(&sent, &chat.name))
+}
+
+/// Проверяет файл перед отправкой: существует, не пустой, не больше 2 ГБ.
+fn check_upload(path: &Path) -> Result<std::fs::Metadata> {
     let meta = std::fs::metadata(path).map_err(|e| anyhow!(trf!("не удалось открыть файл: {e}", "could not open file: {e}")))?;
     if !meta.is_file() {
         return Err(anyhow!(tr!("это не файл", "this is not a file")));
@@ -1328,13 +1361,30 @@ pub async fn send_file(client: &Client, chat: &ChatInfo, path: &Path, caption: &
     if meta.len() > MAX_UPLOAD {
         return Err(anyhow!(tr!("файл больше 2 ГБ, Telegram его не примет", "file is larger than 2 GB, Telegram will not accept it")));
     }
-    let up = client.upload_file(path).await.map_err(|e| anyhow!("{e}"))?;
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let msg = InputMessage::new().text(caption);
-    // Обычные картинки уходят как фото, всё остальное как файл без пережатия.
-    let msg = if matches!(ext.as_str(), "jpg" | "jpeg" | "png") && meta.len() < 10 * 1024 * 1024 { msg.photo(up) } else { msg.file(up) };
-    let sent = client.send_message(chat.peer, msg).await.map_err(|e| anyhow!("{e}"))?;
-    Ok(to_chat_msg(&sent, &chat.name))
+    Ok(meta)
+}
+
+/// Отправляет несколько файлов одним альбомом: картинки как фото, остальное как файлы.
+/// Подпись ставится на первый элемент.
+pub async fn send_album(client: &Client, chat: &ChatInfo, paths: &[PathBuf], caption: &str) -> Result<Vec<ChatMsg>> {
+    use grammers_client::media::InputMedia;
+    if !(2..=10).contains(&paths.len()) {
+        return Err(anyhow!(tr!("в альбоме должно быть от 2 до 10 файлов", "an album needs 2 to 10 files")));
+    }
+    let mut medias = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        let meta = check_upload(path)?;
+        let up = client.upload_file(path).await.map_err(|e| anyhow!("{e}"))?;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let media = InputMedia::new().caption(if i == 0 { caption } else { "" });
+        medias.push(if matches!(ext.as_str(), "jpg" | "jpeg" | "png") && meta.len() < 10 * 1024 * 1024 {
+            media.photo(up)
+        } else {
+            media.document(up)
+        });
+    }
+    let sent = client.send_album(chat.peer, medias).await.map_err(|e| anyhow!("{e}"))?;
+    Ok(sent.into_iter().flatten().map(|m| to_chat_msg(&m, &chat.name)).collect())
 }
 
 pub async fn list_scheduled(client: &Client, chat: &ChatInfo) -> Result<Vec<ScheduledMsg>> {
@@ -1574,6 +1624,34 @@ pub async fn react(client: &Client, chat: &ChatInfo, id: i32, emoji: Option<&str
     };
     msg.react(reactions).await.map_err(|e| anyhow!("{e}"))?;
     Ok(to_chat_msg(&fetch_message(client, chat, id).await?, &chat.name))
+}
+
+/// Скачивает небольшой текстовый файл из сообщения в память (не на диск) и возвращает имя и строки.
+pub async fn fetch_text_file(client: &Client, chat: &ChatInfo, id: i32) -> Result<(String, Vec<String>)> {
+    let msg = fetch_message(client, chat, id).await?;
+    let Some(Media::Document(d)) = msg.media() else {
+        return Err(anyhow!(tr!("в сообщении нет файла", "this message has no file")));
+    };
+    let name = d.name().map(str::to_string).unwrap_or_default();
+    if !crate::util::is_text_file(&name) {
+        return Err(anyhow!(tr!("это не текстовый файл", "this is not a text file")));
+    }
+    let media = Media::Document(d);
+    if Downloadable::size(&media).is_some_and(|n| n > crate::util::MAX_TEXT_BYTES) {
+        return Err(anyhow!(tr!(
+            "файл больше 1 МБ: откройте его через O или сохраните через S",
+            "the file is larger than 1 MB: open it with O or save it with S"
+        )));
+    }
+    let mut it = client.iter_download(&media);
+    let mut out = Vec::new();
+    while let Some(chunk) = it.next().await.map_err(|e| anyhow!("{e}"))? {
+        out.extend_from_slice(&chunk);
+        if out.len() > crate::util::MAX_TEXT_BYTES {
+            return Err(anyhow!(tr!("файл больше 1 МБ", "the file is larger than 1 MB")));
+        }
+    }
+    Ok((crate::util::clean(&name), crate::util::text_for_view(&out)))
 }
 
 /// Скачивает самую крупную копию фото до 800 точек (она уже сжата Telegram, это быстро и недорого).
@@ -1929,6 +2007,40 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                     });
                 }
+                Cmd::ViewText { chat, id } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        match fetch_text_file(&client, &chat, id).await {
+                            Ok((name, lines)) => {
+                                let _ = events.send(Event::TextFile { chat: chat.id, name, lines });
+                            }
+                            Err(e) => {
+                                log(&format!("view text: {e}"));
+                                let _ = events.send(Event::Error(trf!("не прочитано: {}", "not read: {}", friendly_error(&e.to_string()))));
+                            }
+                        }
+                    });
+                }
+                Cmd::SendAlbum { chat, paths, caption } => {
+                    let client = client.clone();
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        let _ = events.send(Event::Status(tr!("Загружаю альбом…", "Uploading the album…").into()));
+                        match send_album(&client, &chat, &paths, &caption).await {
+                            Ok(msgs) => {
+                                for msg in msgs {
+                                    let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: false });
+                                }
+                            }
+                            Err(e) => {
+                                log(&format!("send_album: {e}"));
+                                let _ =
+                                    events.send(Event::Error(trf!("не отправлено: {}", "not sent: {}", friendly_error(&e.to_string()))));
+                            }
+                        }
+                    });
+                }
                 Cmd::ListScheduled(chat) => {
                     let client = client.clone();
                     let events = events.clone();
@@ -2116,6 +2228,13 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                                 let _ = events.send(Event::Error(trf!("превью: {}", "preview: {}", friendly_error(&e.to_string()))));
                             }
                         }
+                    });
+                }
+                Cmd::NetCheck(settings) => {
+                    let events = events.clone();
+                    tokio::spawn(async move {
+                        let lines = crate::proxy::netcheck(&settings).await;
+                        let _ = events.send(Event::NetCheck(lines));
                     });
                 }
                 Cmd::ListTopics(chat) => {

@@ -69,7 +69,7 @@ which is the main reason it is so small.
 - A pinned message is shown above the conversation.
 
 **Messages**
-- `F7` picks a message: reply with a quote (R), forward (F), edit (E), delete (D), copy the text (C), save the attachment (S), open it (O), links (L). Also in `F7`: `G` jumps to the original of a reply (and `B` goes back), `1`–`6` set a reaction (👍 ❤ 🔥 😂 😮 😢; the same digit again or `0` removes yours), `K` lists the buttons of a bot message, `V` votes in a poll, `P` shows a photo right in the console. `Space` marks a message (also `Shift+↑`/`Shift+↓`); then `F` forwards, `D` deletes (your own only, press twice) and `C` copies all marked ones at once, `Esc` clears the marks.
+- `F7` picks a message: reply with a quote (R), forward (F), edit (E), delete (D), copy the text (C), save the attachment (S), open it (O), links (L). Also in `F7`: `G` jumps to the original of a reply (and `B` goes back), `1`–`6` set a reaction (👍 ❤ 🔥 😂 😮 😢; the same digit again or `0` removes yours), `K` lists the buttons of a bot message, `V` votes in a poll, `P` shows a photo right in the console, `T` reads a text file (txt, md, log, json, csv, xml, yml, toml, ini… up to 1 MB) in a window (`↑ ↓ PgUp PgDn`, `Esc` closes); for voice, music and video the hint shows `O`, which plays it in your system player. `Space` marks a message (also `Shift+↑`/`Shift+↓`); then `F` forwards, `D` deletes (your own only, press twice) and `C` copies all marked ones at once, `Esc` clears the marks.
 - Reactions are shown under a message as short words, because the console draws no emoji: `+1 3  <3 2` (yours in brackets: `[<3 2]`). They are read when the messages are loaded; a reaction from another person appears after the chat is opened again. Bots' inline buttons are shown as `[Yes] [No]`; press them in the `K` list with Enter or a digit. Link buttons (`↗`) open in the browser; buttons that need a password, games, payments and web apps are not supported.
 - Day separators say `Today` and `Yesterday`; names in groups have a stable color.
 - `/edit` and `/del` act on your last message in the open chat (`/del` asks you to repeat it to confirm), `/note` (quick note to Saved Messages), `/later 30 text` (schedule in 30 minutes), `/scheduled` (list and cancel).
@@ -82,6 +82,7 @@ which is the main reason it is so small.
 - `/open` (or `O` in `F7`) downloads an attachment to the temporary `tglite-view` folder and opens it with the default Windows program. Only pictures, PDF, plain text, JSON, audio and video up to 50 MB are opened this way (never programs, scripts or spreadsheets); the `tglite-view` folder is emptied on lock, on exit and on the next start.
 - `/copy` (or `C` in `F7`) puts the text of a message on the clipboard.
 - `P` in `F7` shows a small copy of a photo made of colored half-blocks (needs a terminal with true color, such as Windows Terminal; any key closes it). `Ctrl+V` (or `/paste`) with a screenshot on the clipboard and no text sends it as a photo, the text typed in the input becomes its caption.
+- `/album path1 path2 … [-- caption]` sends 2–10 photos as one album message (paths with spaces in quotes; every file is checked before sending).
 - Polls are drawn with the options, percentages and your choice; `V` in `F7` votes (one option; closed polls cannot be voted).
 - `/links` lists links of the chat, Enter opens one in the browser.
 
@@ -91,16 +92,18 @@ which is the main reason it is so small.
 - `/pinned` lists all pinned messages of the open chat (`Enter` opens one in its surroundings).
 - `/topics` lists the topics of a forum group; `Enter` on one makes your messages go into that topic (shown in the input title; `/topics off` returns to the general feed). The conversation itself is still shown as one feed, topics are not opened separately.
 - `/chat @name` finds a person or a channel by its public name and opens the chat, even if you have never written to them. `/join t.me/+code` or `/join @name` joins a group or channel by an invite link or a public name; `/leave` leaves the open group or channel (repeat it to confirm; not available in private chats).
+- `/netcheck` tests each route to Telegram (direct, proxy) and every data center and says which one works; `/report` saves `tglite-report.txt` next to the exe with the version, system and recent errors, with phone numbers and message text removed, ready to attach to a bug report.
 - `/find text` (`F6`, `Ctrl+F`) filters chats by name, `/pin` pins a chat, `/readall` marks everything read, `/export` saves a conversation to `export/<chat>.txt`.
 
 **Comfort**
+- `Ctrl+Z` / `Ctrl+Y` undo and redo typing in the input (also on the Russian layout).
 - Paste works: `Ctrl+V`, `Shift+Insert`, the terminal's own paste, or `/paste`.
 - English and Russian interface (setting "Interface language", chosen at first start).
 - Animated sign-in screen (always Aurora) and lock screen (Aurora, Matrix, Stars or none, your choice in settings).
 - Mouse: click a tab or a chat, the wheel scrolls the conversation (over the chat list it moves the selection). Press the left button on a message and drag to mark several; hold the pointer at the top or bottom edge and the conversation scrolls by itself, faster the longer you hold. `Ctrl`+click marks one message. Can be turned off in the settings. While the mouse is on, selecting text by dragging and right-click paste may not work in the console (in Windows Terminal hold `Shift` to select); use `/copy` and `Ctrl+V`, or turn the mouse off.
-- Settings: auto-lock, proxy, sound, status, number of messages, accent color, self-destruct, lock screen background, widths, language, mouse, cloud drafts, theme (dark, light, high contrast, Solarized), password.
+- Settings are grouped into sections (Security, Connection, Messages and sound, Appearance, General): auto-lock, password, proxy, sound, Windows notifications (off by default; only "new message in <chat>" while you are away, never the text), status, number of messages, cloud drafts, accent color, theme (dark, light, high contrast, Solarized), widths, lock screen background, emoji in text (auto = only in Windows Terminal, always, never), self-destruct, language, mouse.
 - `/faq` shows troubleshooting tips inside the program. `tglite.log` records errors and `tg-lite --debug` makes it detailed (never message text).
-- Emoji, invisible characters and scripts other than Latin, Greek and Cyrillic are hidden: the Windows console cannot draw them and the screen would fall apart.
+- Emoji, invisible characters and scripts other than Latin, Greek and Cyrillic are hidden: the old Windows console cannot draw them and the screen would fall apart. In Windows Terminal simple emoji are shown (setting "Emoji in text"); joined emoji, flags and skin tones stay hidden.
 
 <table>
 <tr>
@@ -158,14 +161,16 @@ Every action has both a key and a command, in case a key does not work in your c
 | F6 | `/find text` | search chats |
 | | `/findmsg text` `/findall text` `/latest` | search messages in this chat or everywhere, back to the latest messages |
 | | `/pinned` | all pinned messages of the open chat |
+| | `/netcheck` `/report` | which route to Telegram works; a safe text for bug reports |
 | | `/topics` `/topics off` | topics of a forum group: pick one to write into; back to the general feed |
 | | `/chat @name` | find a person or channel by name and open the chat |
 | | `/join link-or-@name` `/leave` | join a group or channel; leave the open one (repeat to confirm) |
-| F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links, G original of a reply, B back, 1-6 reaction, K bot buttons, V vote, P photo, Space mark several |
+| F7 | | pick a message: R reply, F forward, E edit, D delete, C copy, S save, O open, L links, G original of a reply, B back, 1-6 reaction, K bot buttons, V vote, P photo, T read a text file, Space mark several |
 | F10 | `/quit` | quit |
 | | `/pin` `/readall` `/export` | pin chat, read everything, export |
 | | `/edit` `/del` `/note` `/later` `/scheduled` | edit or delete your last message, note, schedule, scheduled list |
-| | `/send` `/save` `/open` `/copy` `/links` | upload file, download attachment, open attachment, copy message, links |
+| Ctrl+Z / Ctrl+Y | | undo and redo in the input |
+| | `/send` `/album` `/save` `/open` `/copy` `/links` | upload file, several photos as one album, download attachment, open attachment, copy message, links |
 | | `/passwd` `/proxy` `/faq` | change password, proxy, troubleshooting |
 
 `Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` also work, in the Latin and Russian keyboard layouts. `Alt+Enter` and `Ctrl+J` also insert a new line (Windows may take Alt+Enter for full screen).
@@ -234,7 +239,9 @@ The same list is available in the program as `/faq`.
 
 ## Roadmap
 
-**1.4.0 (this version):** connection indicator and an outgoing queue that waits for the network, marking several messages (keys or mouse drag with edge scrolling) to forward, delete or copy at once, polls with voting, forum topics to write into, photo preview in the console, a screenshot from the clipboard sent as a photo.
+**1.5.0 (this version):** settings split into sections, several photos in one message (`/album`), reading text files inside the window (`T`), undo and redo in the input (`Ctrl+Z` / `Ctrl+Y`), Windows notifications, emoji in Windows Terminal, `/netcheck` (which route to Telegram works) and `/report` (a safe text for bug reports).
+
+**1.4.0:** connection indicator and an outgoing queue that waits for the network, marking several messages (keys or mouse drag with edge scrolling) to forward, delete or copy at once, polls with voting, forum topics to write into, photo preview in the console, a screenshot from the clipboard sent as a photo.
 
 **1.3.1:** one new icon for the exe and the repository, a softer notification sound, and the session in Telegram → Settings → Devices is now named `Tg-Lite v1.3.1 (Windows)`.
 
@@ -331,7 +338,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - Закреплённое сообщение показывается над перепиской.
 
 **Сообщения**
-- `F7` — выбрать сообщение: ответить с цитатой (R), переслать (F), править (E), удалить (D), копировать текст (C), скачать вложение (S), открыть его (O), ссылки (L). Ещё в `F7`: `G` — перейти к оригиналу ответа (`B` — назад), `1`–`6` — поставить реакцию (👍 ❤ 🔥 😂 😮 😢; та же цифра ещё раз или `0` снимает вашу), `K` — список кнопок сообщения бота, `V` — голосовать в опросе, `P` — показать фото прямо в консоли. `Пробел` отмечает сообщение (также `Shift+↑`/`Shift+↓`); затем `F` пересылает, `D` удаляет (только свои, нажать дважды) и `C` копирует все отмеченные сразу, `Esc` сбрасывает отметки.
+- `F7` — выбрать сообщение: ответить с цитатой (R), переслать (F), править (E), удалить (D), копировать текст (C), скачать вложение (S), открыть его (O), ссылки (L). Ещё в `F7`: `G` — перейти к оригиналу ответа (`B` — назад), `1`–`6` — поставить реакцию (👍 ❤ 🔥 😂 😮 😢; та же цифра ещё раз или `0` снимает вашу), `K` — список кнопок сообщения бота, `V` — голосовать в опросе, `P` — показать фото прямо в консоли, `T` — прочитать текстовый файл (txt, md, log, json, csv, xml, yml, toml, ini… до 1 МБ) в окне (`↑ ↓ PgUp PgDn`, закрыть — `Esc`); для голосовых, музыки и видео в подсказке есть `O` — проиграть системным плеером. `Пробел` отмечает сообщение (также `Shift+↑`/`Shift+↓`); затем `F` пересылает, `D` удаляет (только свои, нажать дважды) и `C` копирует все отмеченные сразу, `Esc` сбрасывает отметки.
 - Реакции показываются под сообщением короткими словами, потому что консоль не рисует эмодзи: `+1 3  <3 2` (ваша — в скобках: `[<3 2]`). Они читаются при загрузке сообщений; реакция другого человека появится, когда вы снова откроете чат. Inline-кнопки ботов выглядят как `[Да] [Нет]`; нажимаются в списке `K` клавишей Enter или цифрой. Кнопки-ссылки (`↗`) открываются в браузере; кнопки с паролем, игры, платежи и веб-приложения не поддерживаются.
 - Разделители дней подписаны «Сегодня» и «Вчера»; имена в группах имеют постоянный цвет.
 - `/edit` и `/del` работают с вашим последним сообщением в открытом чате (`/del` просит повторить для подтверждения), `/note` (быстрая заметка в «Избранное»), `/later 30 текст` (отложить на 30 минут), `/scheduled` (список и отмена).
@@ -344,6 +351,7 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - `/open` (или `O` в `F7`) скачивает вложение во временную папку `tglite-view` и открывает обычной программой Windows. Так открываются только картинки, PDF, простой текст, JSON, звук и видео до 50 МБ (никогда программы, скрипты и таблицы); папка `tglite-view` очищается при блокировке, выходе и следующем запуске.
 - `/copy` (или `C` в `F7`) кладёт текст сообщения в буфер обмена.
 - `P` в `F7` показывает уменьшенную копию фото из цветных полублоков (нужен терминал с полноцветным режимом, например Windows Terminal; любая клавиша закрывает). `Ctrl+V` (или `/paste`), когда в буфере обмена скриншот и нет текста, отправляет его как фото, а набранный в поле текст становится подписью.
+- `/album путь1 путь2 … [-- подпись]` отправляет 2–10 фото одним альбомом (пути с пробелами — в кавычках; каждый файл проверяется до отправки).
 - Опросы рисуются с вариантами, процентами и вашим выбором; `V` в `F7` — проголосовать (один вариант; в закрытом опросе голосовать нельзя).
 - `/links` — ссылки чата, Enter открывает ссылку в браузере.
 
@@ -353,16 +361,18 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 - `/pinned` — список всех закреплённых сообщений открытого чата (`Enter` открывает сообщение среди соседних).
 - `/topics` — список тем форума (группы с темами); `Enter` на теме — ваши сообщения уходят в эту тему (видно в заголовке поля ввода; `/topics off` возвращает в общий поток). Сама переписка по-прежнему показывается одной лентой, темы отдельно не открываются.
 - `/chat @имя` находит человека или канал по публичному имени и открывает чат, даже если вы ему ещё не писали. `/join t.me/+код` или `/join @имя` — вступить в группу или канал по ссылке-приглашению или публичному имени; `/leave` — выйти из открытой группы или канала (повторите для подтверждения; в личных чатах недоступно).
+- `/netcheck` проверяет каждый путь до Telegram (напрямую, прокси) и каждый дата-центр и говорит, какой работает; `/report` сохраняет `tglite-report.txt` рядом с exe: версия, система и последние ошибки, без номеров телефонов и текста сообщений, можно прикладывать к сообщению об ошибке.
 - `/find текст` (`F6`, `Ctrl+F`) — поиск по названиям, `/pin` — закрепить, `/readall` — всё прочитано, `/export` — сохранить переписку в `export/<чат>.txt`.
 
 **Удобство**
+- `Ctrl+Z` / `Ctrl+Y` — отмена и повтор набора в поле ввода (и в русской раскладке).
 - Вставка работает: `Ctrl+V`, `Shift+Insert`, вставка самого терминала или команда `/paste`.
 - Интерфейс на русском и английском (настройка «Язык интерфейса», выбирается при первом запуске).
 - Анимированный экран входа (всегда «Аврора») и экран блокировки («Аврора», «Матрица», «Звёзды» или без анимации, выбирается в настройках).
 - Мышь: клик по вкладке или чату, колесо прокручивает переписку (над списком чатов двигает выбор). Зажмите левую кнопку на сообщении и протяните — отметится несколько; если держать указатель у верхнего или нижнего края, переписка листается сама, тем быстрее, чем дольше держите. `Ctrl`+щелчок отмечает одно сообщение. Выключается в настройках. Пока мышь включена, выделение текста протягиванием и вставка правой кнопкой в консоли могут не работать (в Windows Terminal выделять можно с зажатым `Shift`); используйте `/copy` и `Ctrl+V` или выключите мышь.
-- Настройки: автоблокировка, прокси, звук, статусы, число сообщений, цвет, самоуничтожение, фон блокировки, ширина, язык, мышь, облачные черновики, тема (тёмная, светлая, высокий контраст, Solarized), пароль.
+- Настройки собраны в разделы (Защита, Подключение, Сообщения и звук, Внешний вид, Общие): автоблокировка, пароль, прокси, звук, уведомления Windows (по умолчанию выключены; только «новое сообщение в <чат>», пока вы отошли, текст не показывается), статусы, число сообщений, облачные черновики, цвет, тема (тёмная, светлая, высокий контраст, Solarized), ширина, фон блокировки, эмодзи в тексте (авто — только в Windows Terminal, всегда, никогда), самоуничтожение, язык, мышь.
 - `/faq` — подсказки «Если не работает» прямо в программе. В `tglite.log` пишутся ошибки, а `tg-lite --debug` делает журнал подробным (тексты переписки не пишутся никогда).
-- Эмодзи, невидимые символы и письменности кроме латиницы, греческого и кириллицы скрываются: консоль Windows не умеет их рисовать, и экран «рассыпался» бы.
+- Эмодзи, невидимые символы и письменности кроме латиницы, греческого и кириллицы скрываются: старая консоль Windows не умеет их рисовать, и экран «рассыпался» бы. В Windows Terminal простые эмодзи показываются (настройка «Эмодзи в тексте»); составные эмодзи, флаги и оттенки кожи остаются скрытыми.
 
 <table>
 <tr>
@@ -420,14 +430,16 @@ Tg-Lite — неофициальный клиент Telegram на Rust для с
 | F6 | `/find текст` | поиск по чатам |
 | | `/findmsg текст` `/findall текст` `/latest` | поиск сообщений в этом чате или везде, назад к последним |
 | | `/pinned` | все закреплённые сообщения открытого чата |
+| | `/netcheck` `/report` | какой путь до Telegram работает; безопасный текст для сообщения об ошибке |
 | | `/topics` `/topics off` | темы форума: выбрать, куда писать; назад в общий поток |
 | | `/chat @имя` | найти человека или канал по имени и открыть чат |
 | | `/join ссылка-или-@имя` `/leave` | вступить в группу или канал; выйти из открытого (повторите для подтверждения) |
-| F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки, G оригинал ответа, B назад, 1-6 реакция, K кнопки бота, V голос, P фото, Пробел — отметить несколько |
+| F7 | | выбор сообщения: R ответить, F переслать, E править, D удалить, C копировать, S скачать, O открыть, L ссылки, G оригинал ответа, B назад, 1-6 реакция, K кнопки бота, V голос, P фото, T читать текстовый файл, Пробел — отметить несколько |
 | F10 | `/quit` | выход |
 | | `/pin` `/readall` `/export` | закрепить чат, прочитать всё, сохранить переписку |
 | | `/edit` `/del` `/note` `/later` `/scheduled` | править или удалить своё последнее сообщение, заметка, отложить, список отложенных |
-| | `/send` `/save` `/open` `/copy` `/links` | отправить файл, скачать вложение, открыть вложение, копировать сообщение, ссылки |
+| Ctrl+Z / Ctrl+Y | | отмена и повтор в поле ввода |
+| | `/send` `/album` `/save` `/open` `/copy` `/links` | отправить файл, несколько фото одним альбомом, скачать вложение, открыть вложение, копировать сообщение, ссылки |
 | | `/passwd` `/proxy` `/faq` | сменить пароль, прокси, подсказки |
 
 `Ctrl+L`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+R`, `Ctrl+F` тоже работают, в латинской и русской раскладках. `Alt+Enter` и `Ctrl+J` тоже вставляют новую строку (Windows может забрать Alt+Enter для полноэкранного режима).
@@ -485,7 +497,7 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Ограничения
 
-- Только текст: фото, голосовые, стикеры и видео показываются подписями (откройте через `/open` или скачайте через `/save`). Эмодзи скрыты.
+- Только текст: фото, голосовые, стикеры и видео показываются подписями (откройте через `/open` или скачайте через `/save`). Эмодзи скрыты (кроме простых в Windows Terminal).
 - Нет секретных чатов и звонков.
 - Загружается до 3000 чатов (первые 100 появляются сразу, остальные следом); все вкладки и папки строятся из них. В памяти хранится не больше 1500 сообщений на чат.
 - Режим прокси применяется при следующем запуске; экран входа всегда с фоном «Аврора» (настройки лежат внутри зашифрованного файла).
@@ -496,7 +508,9 @@ workflow релиза их не использует, поэтому exe из р
 
 ## Планы
 
-**1.4.0 (эта версия):** индикатор связи и очередь исходящих, которая ждёт сеть, отметка нескольких сообщений (клавишами или протягиванием мыши с прокруткой у края) для пересылки, удаления и копирования разом, опросы с голосованием, темы форумов для отправки, превью фото в консоли, скриншот из буфера обмена как фото.
+**1.5.0 (эта версия):** настройки разбиты на разделы, несколько фото одним сообщением (`/album`), чтение текстовых файлов прямо в окне (`T`), отмена и повтор в поле ввода (`Ctrl+Z` / `Ctrl+Y`), уведомления Windows, эмодзи в Windows Terminal, `/netcheck` (какой путь до Telegram работает) и `/report` (безопасный текст для сообщения об ошибке).
+
+**1.4.0:** индикатор связи и очередь исходящих, которая ждёт сеть, отметка нескольких сообщений (клавишами или протягиванием мыши с прокруткой у края) для пересылки, удаления и копирования разом, опросы с голосованием, темы форумов для отправки, превью фото в консоли, скриншот из буфера обмена как фото.
 
 **1.3.1:** одна новая иконка для exe и репозитория, более мягкий звук уведомления, а сеанс в Telegram → Настройки → Устройства теперь называется `Tg-Lite v1.3.1 (Windows)`.
 
