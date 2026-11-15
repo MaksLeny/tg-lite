@@ -28,13 +28,15 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       DRY_RUN: ${{ inputs.dry_run }}
-      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Check secrets
         if: env.DRY_RUN != 'true'
+        # Секреты передаются только тем шагам, которым они нужны.
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ] || { echo "::error::Добавьте секреты TG_BOT_TOKEN и TG_CHAT_ID (Settings → Secrets and variables → Actions)"; exit 1; }
 
@@ -69,6 +71,9 @@ jobs:
 
       - name: Send to Telegram
         if: env.SKIP != '1' && env.DRY_RUN != 'true'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           api="https://api.telegram.org/bot${TG_BOT_TOKEN}"
           # chat_id вида @канал нельзя передавать через -F: curl принял бы «@…» за имя файла (ошибка 26), поэтому --form-string.
