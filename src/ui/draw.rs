@@ -45,7 +45,60 @@ pub(super) fn draw(f: &mut Frame, app: &mut App) {
             draw_main(f, app);
             draw_viewer(f, app);
         }
+        Mode::Quick => {
+            draw_main(f, app);
+            draw_quick(f, app);
+        }
     }
+}
+
+/// Окно быстрого перехода (Ctrl+K): строка запроса, под ней чаты или команды.
+fn draw_quick(f: &mut Frame, app: &App) {
+    let Some(p) = &app.quick else { return };
+    let area = f.area();
+    let width = area.width.saturating_sub(6).clamp(30, 70);
+    let rows = p.items.len().clamp(1, 12) as u16;
+    let rect = centered_rect(area, width, rows + 4);
+    let inner_w = rect.width.saturating_sub(4) as usize;
+    let accent = app.theme.accent;
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled("› ", Style::new().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::raw(p.query.clone()),
+        Span::styled("▏", Style::new().fg(accent)),
+    ])];
+    // Окно из 12 строк: выбранная всегда видна.
+    let top = p.sel.saturating_sub(11);
+    if p.items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            tr!(" Ничего не найдено. «/» — команды", " Nothing found. \"/\" lists commands"),
+            Style::new().fg(muted()),
+        )));
+    }
+    for (i, item) in p.items.iter().enumerate().skip(top).take(12) {
+        let hint_w = display_width(&item.hint);
+        let label_w = inner_w.saturating_sub(hint_w + 2);
+        let label = truncate(&item.label, label_w);
+        let pad = inner_w.saturating_sub(display_width(&label) + hint_w + 1);
+        let row = format!(" {label}{}{} ", " ".repeat(pad), item.hint);
+        let style =
+            if i == p.sel { Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD) } else { Style::new() };
+        lines.push(Line::from(Span::styled(row, style)));
+    }
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .style(base_style())
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(accent))
+                .title(Span::styled(tr!(" Быстрый переход ", " Quick switch "), Style::new().fg(accent).add_modifier(Modifier::BOLD)))
+                .title_bottom(Span::styled(
+                    tr!(" ↑ ↓ выбрать · Enter — открыть · «/» — команды · Esc ", " ↑ ↓ pick · Enter — open · \"/\" — commands · Esc "),
+                    Style::new().fg(muted()),
+                )),
+        ),
+        rect,
+    );
 }
 
 /// Текстовый файл: окно почти на весь экран, длинные строки переносятся, листается построчно.
@@ -136,6 +189,10 @@ fn draw_preview(f: &mut Frame, app: &App) {
 }
 
 pub(super) fn draw_main(f: &mut Frame, app: &mut App) {
+    if app.two_panes() {
+        draw_main_panes(f, app);
+        return;
+    }
     let area = f.area();
     let outer = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(3)]).split(area);
     draw_tabs(f, app, outer[0]);
@@ -159,6 +216,83 @@ pub(super) fn draw_main(f: &mut Frame, app: &mut App) {
     draw_messages(f, app, rows[0]);
     draw_input(f, app, rows[1], &layout, input_rows as usize);
     draw_status(f, app, rows[2]);
+}
+
+/// Вид «Два окна»: сверху вкладки открытых чатов, под ними два окна рядом, затем поле ввода и статус.
+/// На узком экране показывается только активное окно (второе открывается по Ctrl+← / →).
+fn draw_main_panes(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    let outer = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(3)]).split(area);
+    draw_open_tabs(f, app, outer[0]);
+    let input_width = outer[1].width.saturating_sub(2) as usize;
+    let layout = layout_input(&app.input, app.cursor, input_width);
+    let input_rows = layout.lines.len().clamp(1, 6) as u16;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(input_rows + 2), Constraint::Length(1)])
+        .split(outer[1]);
+    app.hit_list = Rect::default();
+    if rows[0].width >= PANES_MIN_WIDTH {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+        app.panes.hit = [cols[0], cols[1]];
+        let right = app.panes.right_active;
+        // Активное окно — всегда выбранный чат; второе окно рисуется с его собственной прокруткой.
+        draw_messages_in(f, app, cols[0], if right { Pane::Other } else { Pane::Active });
+        draw_messages_in(f, app, cols[1], if right { Pane::Active } else { Pane::Other });
+    } else {
+        app.panes.hit = [rows[0], Rect::default()];
+        draw_messages_in(f, app, rows[0], Pane::Active);
+    }
+    draw_input(f, app, rows[1], &layout, input_rows as usize);
+    draw_status(f, app, rows[2]);
+}
+
+/// Вкладки открытых чатов: окно активного выделено цветом, окно второго — подчёркиванием; у вкладок счётчик новых.
+fn draw_open_tabs(f: &mut Frame, app: &mut App, area: Rect) {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut hits: Vec<(u16, u16, PeerId)> = Vec::new();
+    let mut used = 0usize;
+    let avail = area.width as usize;
+    let hint = tr!(" Ctrl+K — открыть чат ", " Ctrl+K — open a chat ");
+    let reserve = if avail > 60 { display_width(hint) } else { 0 };
+    let ids: Vec<PeerId> = app.panes.open.clone();
+    for id in ids {
+        let Some(c) = app.chats.iter().find(|c| c.id == id) else { continue };
+        let title = truncate(&c.name, 16);
+        let badge = if c.unread > 0 && !app.is_muted(c) { format!(" {} ", c.unread.min(999)) } else { String::new() };
+        let w = display_width(&title) + 2 + display_width(&badge);
+        if used + w + 1 + reserve > avail {
+            spans.push(Span::styled("›", Style::new().fg(muted())));
+            break;
+        }
+        let style = if app.sel == Some(id) {
+            Style::new().bg(app.theme.accent).fg(Color::Black).add_modifier(Modifier::BOLD)
+        } else if app.panes.other == Some(id) {
+            Style::new().fg(palette().fg.unwrap_or(Color::Gray)).add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(palette().fg.unwrap_or(Color::Gray))
+        };
+        let x0 = area.x + used as u16;
+        hits.push((x0, x0 + w as u16, id));
+        spans.push(Span::styled(format!(" {title} "), style));
+        if !badge.is_empty() {
+            spans.push(Span::styled(badge, Style::new().bg(app.theme.select_bg).fg(Color::White).add_modifier(Modifier::BOLD)));
+        }
+        spans.push(Span::raw(" "));
+        used += w + 1;
+    }
+    if used == 0 {
+        spans.push(Span::styled(tr!(" Ctrl+K — открыть чат", " Ctrl+K — open a chat"), Style::new().fg(muted())));
+    } else if reserve > 0 {
+        let pad = avail.saturating_sub(used + reserve);
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(hint, Style::new().fg(muted())));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    app.panes.hit_tabs = hits;
 }
 
 pub(super) fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
@@ -225,6 +359,10 @@ pub(super) fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
     let idx = app.visible_idx();
     let visible: Vec<&ChatInfo> = idx.iter().map(|&i| &app.chats[i]).collect();
     let pinned: Vec<bool> = visible.iter().map(|c| app.is_pinned(c)).collect();
+    let two_lines = app.view() != View::Classic;
+    let tz = jiff::tz::TimeZone::system();
+    let today = local_date(now, &tz);
+    let favorites = app.favorites();
     let items: Vec<ListItem> = visible
         .iter()
         .zip(pinned.iter())
@@ -246,18 +384,71 @@ pub(super) fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
             let name_w = inner_w.saturating_sub(2 + display_width(&badge));
             let name = truncate(&c.name, name_w);
             let pad = name_w.saturating_sub(display_width(&name));
+            // Закреплённый чат: «*»; в новых видах — номер, по которому он открывается на Alt+цифра.
+            let pin_mark = if !pin {
+                Span::raw(" ")
+            } else if two_lines && let Some(n) = favorites.iter().position(|f| *f == c.id) {
+                Span::styled((n + 1).to_string(), Style::new().fg(app.theme.accent))
+            } else {
+                Span::styled("*", Style::new().fg(app.theme.accent))
+            };
+            let muted_chat = app.is_muted(c);
             let mut spans = vec![
                 Span::styled(tag.to_string(), Style::new().fg(tag_color).add_modifier(Modifier::BOLD)),
-                if pin { Span::styled("*", Style::new().fg(app.theme.accent)) } else { Span::raw(" ") },
+                pin_mark,
                 Span::styled(
                     format!("{name}{}", " ".repeat(pad)),
-                    if c.unread > 0 { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() },
+                    if c.unread > 0 && !muted_chat { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() },
                 ),
             ];
             if !badge.is_empty() {
-                spans.push(Span::styled(badge, Style::new().bg(app.theme.accent).fg(Color::Black).add_modifier(Modifier::BOLD)));
+                // У заглушённого чата счётчик серый: он не требует внимания.
+                let badge_style = if muted_chat {
+                    Style::new().bg(muted()).fg(Color::Black)
+                } else {
+                    Style::new().bg(app.theme.accent).fg(Color::Black).add_modifier(Modifier::BOLD)
+                };
+                spans.push(Span::styled(badge, badge_style));
             }
-            ListItem::new(Line::from(spans))
+            if !two_lines {
+                return ListItem::new(Line::from(spans));
+            }
+            // Вторая строка: «печатает…», черновик или последнее сообщение, справа время.
+            let when = if c.last_ts > 0 {
+                match local_date(c.last_ts, &tz) {
+                    Some(d) if Some(d) == today => jiff::Timestamp::from_second(c.last_ts)
+                        .map(|t| t.to_zoned(tz.clone()).strftime("%H:%M").to_string())
+                        .unwrap_or_default(),
+                    Some((_, m, d)) => format!("{d:02}.{m:02}"),
+                    None => String::new(),
+                }
+            } else {
+                String::new()
+            };
+            let draft = app.drafts.get(&c.id).map(|(t, _)| t.clone()).filter(|t| !t.trim().is_empty() && !t.starts_with('/'));
+            let draft = draft.or_else(|| Some(c.draft.clone()).filter(|t| !t.trim().is_empty()));
+            let typing = app.typing.get(&c.id).filter(|(t, _)| t.elapsed() < TYPING_TTL).map(|(_, l)| l.clone());
+            let (text, style) = if let Some(t) = typing {
+                (t, Style::new().fg(app.theme.accent).add_modifier(Modifier::ITALIC))
+            } else if let Some(d) = draft {
+                (
+                    format!("{}: {}", tr!("черновик", "draft"), d.split_whitespace().collect::<Vec<_>>().join(" ")),
+                    Style::new().fg(mention()),
+                )
+            } else {
+                (c.preview.clone(), Style::new().fg(muted()))
+            };
+            let when_w = display_width(&when);
+            let room = inner_w.saturating_sub(2 + when_w + usize::from(when_w > 0));
+            let text = truncate(&text, room);
+            let fill = inner_w.saturating_sub(2 + display_width(&text) + when_w);
+            let second = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(text, style),
+                Span::raw(" ".repeat(fill)),
+                Span::styled(when, Style::new().fg(muted())),
+            ]);
+            ListItem::new(vec![Line::from(spans), second])
         })
         .collect();
     let sel_pos = app.sel.and_then(|s| visible.iter().position(|c| c.id == s));
@@ -280,10 +471,27 @@ pub(super) fn draw_chat_list(f: &mut Frame, app: &mut App, area: Rect) {
     app.hit_list = area;
 }
 
+/// Какое окно сообщений рисуется: основное (выбранный чат) или второе окно вида «Два окна».
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Pane {
+    Active,
+    Other,
+}
+
 pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
+    draw_messages_in(f, app, area, Pane::Active);
+}
+
+/// Окно сообщений. У второго окна своя прокрутка, выбора сообщений и перехода к найденному в нём нет.
+pub(super) fn draw_messages_in(f: &mut Frame, app: &mut App, area: Rect, pane: Pane) {
     let tz = jiff::tz::TimeZone::system();
     let now = jiff::Timestamp::now().as_second();
-    let title = match app.selected() {
+    let active = pane == Pane::Active;
+    let two = app.two_panes();
+    let chat_id = if active { app.sel } else { app.panes.other };
+    let mut scroll = if active { app.scroll } else { app.panes.other_scroll };
+    let info = chat_id.and_then(|id| app.chats.iter().find(|c| c.id == id)).cloned();
+    let title = match &info {
         Some(c) => {
             let kind = match c.kind {
                 Kind::User => "",
@@ -294,6 +502,9 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(format!(" {}", c.name), Style::new().add_modifier(Modifier::BOLD)),
                 Span::styled(kind.to_string(), Style::new().fg(muted())),
             ];
+            if app.is_muted(c) {
+                spans.push(Span::styled(tr!(" · без звука", " · muted"), Style::new().fg(muted())));
+            }
             let typing = app.typing.get(&c.id).filter(|(t, _)| t.elapsed() < TYPING_TTL).map(|(_, l)| l.clone());
             if let Some(t) = typing {
                 spans.push(Span::styled(" · ", Style::new().fg(muted())));
@@ -313,16 +524,24 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         }
         None => Line::from(tr!(" Переписка ", " Chat ")),
     };
-    let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(muted())).title(title);
-    app.hit_msgs = area;
+    // В двух окнах рамка активного окна цветная: сразу видно, куда пойдёт набираемый текст.
+    let border = if two && active { app.theme.accent } else { muted() };
+    let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(border)).title(title);
+    if active {
+        app.hit_msgs = area;
+    }
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
 
-    let picking = app.mode == Mode::Pick;
+    let picking = active && app.mode == Mode::Pick;
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let mut lines: Vec<Line> = match app.sel {
+    let mut lines: Vec<Line> = match chat_id {
         None => vec![Line::from(Span::styled(
-            tr!("Выберите чат слева (↑ ↓), вкладки папок: Tab", "Pick a chat on the left (↑ ↓), folder tabs: Tab"),
+            if two {
+                tr!("Ctrl+K — открыть чат", "Ctrl+K — open a chat")
+            } else {
+                tr!("Выберите чат слева (↑ ↓), вкладки папок: Tab", "Pick a chat on the left (↑ ↓), folder tabs: Tab")
+            },
             Style::new().fg(muted()),
         ))],
         Some(id) => match app.histories.get(&id) {
@@ -331,11 +550,19 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
                 vec![Line::from(Span::styled(tr!("Сообщений пока нет", "No messages yet"), Style::new().fg(muted())))]
             }
             Some(msgs) => {
-                let focus = app.focus_msg.and_then(|fid| msgs.iter().position(|m| m.id == fid));
+                let focus = if active { app.focus_msg.and_then(|fid| msgs.iter().position(|m| m.id == fid)) } else { None };
                 let sel = if picking { Some(app.pick.min(msgs.len() - 1)) } else { focus };
-                let read_out = app.selected().filter(|c| c.kind == Kind::User && !c.is_self).map(|c| c.read_out);
-                let (l, r) =
-                    build_message_lines_marks(msgs, width, app.settings.bubble_pct(), sel, app.theme.select_bg, read_out, &app.marked);
+                let read_out = info.as_ref().filter(|c| c.kind == Kind::User && !c.is_self).map(|c| c.read_out);
+                let opts = text::LineOpts {
+                    bubble_pct: app.settings.bubble_pct(),
+                    selected: sel,
+                    sel_bg: app.theme.select_bg,
+                    read_out,
+                    marked: &app.marked,
+                    grouped: app.view() != View::Classic,
+                    divider: app.new_from.get(&id).copied(),
+                };
+                let (l, r) = text::build_message_lines_opts(msgs, width, &opts);
                 ranges = r;
                 l
             }
@@ -343,7 +570,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     // Сообщения, которые ждут связи, показываются внизу серым.
-    if let Some(id) = app.sel {
+    if let Some(id) = chat_id {
         for (_, text) in app.queued.iter().filter(|(c, _)| *c == id) {
             let one_line = text.replace('\n', " ");
             let note = tr!(" (в очереди)", " (queued)");
@@ -352,7 +579,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     // Закреплённое сообщение занимает верхнюю строку, если места достаточно.
-    let banner = app.sel.and_then(|id| app.pinned_msg.get(&id)).filter(|_| inner.height > 6).cloned();
+    let banner = chat_id.and_then(|id| app.pinned_msg.get(&id)).filter(|_| inner.height > 6).cloned();
     let body = match banner {
         Some(_) => Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: inner.height - 1 },
         None => inner,
@@ -362,28 +589,34 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         // Прокрутка так, чтобы выбранное сообщение было на экране.
         if let Some(&(s0, e0)) = ranges.get(app.pick) {
             let total = lines.len();
-            let end = total - app.scroll.min(total.saturating_sub(height));
+            let end = total - scroll.min(total.saturating_sub(height));
             let start = end.saturating_sub(height);
             if e0 > end {
-                app.scroll = total - e0;
+                scroll = total - e0;
             } else if s0 < start {
-                app.scroll = total.saturating_sub(s0 + height);
+                scroll = total.saturating_sub(s0 + height);
             }
         }
     }
     let max_scroll = lines.len().saturating_sub(height);
-    if app.focus_pending {
+    if active && app.focus_pending {
         // Найденное сообщение ставим примерно посередине окна.
-        let idx = app.sel.and_then(|id| app.histories.get(&id)).and_then(|h| h.iter().position(|m| Some(m.id) == app.focus_msg));
+        let idx = chat_id.and_then(|id| app.histories.get(&id)).and_then(|h| h.iter().position(|m| Some(m.id) == app.focus_msg));
         if let Some(&(s0, e0)) = idx.and_then(|i| ranges.get(i)) {
             let mid_end = ((s0 + e0) / 2 + height / 2).min(lines.len());
-            app.scroll = lines.len() - mid_end;
+            scroll = lines.len() - mid_end;
         }
         app.focus_pending = false;
     }
-    app.max_scroll = max_scroll;
-    app.scroll = app.scroll.min(max_scroll);
-    let end = lines.len() - app.scroll;
+    scroll = scroll.min(max_scroll);
+    if active {
+        app.max_scroll = max_scroll;
+        app.scroll = scroll;
+    } else {
+        app.panes.other_max = max_scroll;
+        app.panes.other_scroll = scroll;
+    }
+    let end = lines.len() - scroll;
     let start = end.saturating_sub(height);
     let visible: Vec<Line> = lines[start..end].to_vec();
     f.render_widget(block, area);
@@ -395,9 +628,11 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(Paragraph::new(line), Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
     }
     f.render_widget(Paragraph::new(visible), body);
-    app.geom = Some(MsgGeom { ranges, start, body });
+    if active {
+        app.geom = Some(MsgGeom { ranges, start, body });
+    }
 
-    if app.scroll > 0 && area.width > 12 {
+    if scroll > 0 && area.width > 12 {
         let tag = tr!(" ↑ выше · PgDn вниз ", " ↑ older · PgDn down ").to_string();
         let w = display_width(&tag) as u16;
         if area.width > w + 2 {
@@ -405,7 +640,7 @@ pub(super) fn draw_messages(f: &mut Frame, app: &mut App, area: Rect) {
             f.render_widget(Paragraph::new(tag).style(Style::new().fg(Color::Black).bg(app.theme.accent)), r);
         }
     }
-    if app.sel.is_some() && app.jumped == app.sel && area.height > 3 {
+    if active && app.sel.is_some() && app.jumped == app.sel && area.height > 3 {
         let tag = tr!(" старая переписка · PgDn или Esc — к последним ", " older messages · PgDn or Esc: latest ").to_string();
         let w = display_width(&tag) as u16;
         if area.width > w + 2 {
@@ -512,6 +747,12 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &App) {
         OverlayKind::Scheduled => {
             tr!(" ↑ ↓ выбрать · Enter — отменить отправку · Esc — закрыть", " ↑ ↓ select · Enter — cancel sending · Esc — close")
         }
+        OverlayKind::Drafts => {
+            tr!(
+                " ↑ ↓ выбрать · Enter — открыть чат с черновиком · Esc — закрыть",
+                " ↑ ↓ select · Enter — open the chat with the draft · Esc — close"
+            )
+        }
     };
     lines.push(Line::from(Span::styled(truncate(hint, (rect.width as usize).saturating_sub(2)), Style::new().fg(muted()))));
     f.render_widget(Clear, rect);
@@ -530,6 +771,11 @@ pub(super) fn draw_overlay(f: &mut Frame, app: &App) {
 
 pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect, layout: &InputLayout, rows: usize) {
     let mut title = vec![Span::styled(tr!(" Сообщение ", " Message "), Style::new().fg(app.theme.accent))];
+    if app.two_panes()
+        && let Some(c) = app.selected()
+    {
+        title.push(Span::styled(format!("→ {} ", truncate(&c.name, 20)), Style::new().fg(own())));
+    }
     if app.markdown {
         title.push(Span::styled("· Markdown ", Style::new().fg(own())));
     }
@@ -567,51 +813,17 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let pick_hint;
     let mode_hint = match app.mode {
         Mode::Pick => {
-            // Редкие действия показываем только там, где они применимы, и ставим в начало: хвост подсказки обрезается первым.
-            let m = app.picked();
-            let mut extra = String::new();
-            if m.is_some_and(|m| m.reply_to.is_some()) {
-                extra.push_str(tr!("G к оригиналу · ", "G original · "));
-            }
-            if !app.jump_back.is_empty() {
-                extra.push_str(tr!("B назад · ", "B back · "));
-            }
-            if m.is_some_and(|m| m.poll.is_some()) {
-                extra.push_str(tr!("V голос · ", "V vote · "));
-            }
-            if m.is_some_and(|m| {
-                m.caption.is_some()
-                    && (m.text.contains("[голосов")
-                        || m.text.contains("[voice")
-                        || m.text.contains("[аудио")
-                        || m.text.contains("[audio")
-                        || m.text.contains("[видео")
-                        || m.text.contains("[video"))
-            }) {
-                extra.push_str(tr!("O слушать/смотреть · ", "O play · "));
-            }
-            if m.is_some_and(|m| {
-                m.caption.is_some()
-                    && [".txt", ".md", ".log", ".json", ".csv", ".xml", ".yml", ".yaml", ".toml", ".ini", ".cfg"]
-                        .iter()
-                        .any(|e| m.text.to_lowercase().contains(e))
-            }) {
-                extra.push_str(tr!("T читать · ", "T read · "));
-            }
-            if m.is_some_and(|m| !m.buttons.is_empty()) {
-                extra.push_str(tr!("K кнопки · ", "K buttons · "));
-            }
             pick_hint = if !app.marked.is_empty() {
                 trf!(
                     " Выбрано {} · F переслать · D удалить · C копия · Пробел — отметка · Esc сбросить",
                     " Marked {} · F forward · D delete · C copy · Space toggles · Esc clears",
                     app.marked.len()
                 )
+            } else if let Some(m) = app.picked() {
+                // Только то, что для этого сообщения работает: список строит та же функция, что решает, что делают клавиши.
+                super::actions::pick_hint(&app.actions(m), !app.jump_back.is_empty())
             } else {
-                trf!(
-                    " {extra}R ответ · F переслать · E правка · D удалить · C копия · S скачать · O открыть · L ссылки · 1-6 реакция · Esc",
-                    " {extra}R reply · F forward · E edit · D delete · C copy · S save · O open · L links · 1-6 react · Esc"
-                )
+                String::from(" Esc")
             };
             Some(pick_hint.as_str())
         }
@@ -632,11 +844,25 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     // Подсказка подбирается под ширину окна, чтобы статус слева не вытеснялся.
-    let hints = [
+    let panes_hints = [
+        tr!(
+            " Ctrl+←/→ окно · Ctrl+K чат · Tab вкладки · Ctrl+W закрыть · F1 справка · F10 выход ",
+            " Ctrl+←/→ pane · Ctrl+K chat · Tab tabs · Ctrl+W close · F1 help · F10 quit "
+        ),
+        tr!(" Ctrl+←/→ окно · Ctrl+K чат · F1 справка ", " Ctrl+←/→ pane · Ctrl+K chat · F1 help "),
+        tr!(" F1 справка · F10 выход ", " F1 help · F10 quit "),
+        tr!(" F1 справка ", " F1 help "),
+    ];
+    let list_hints = [
+        tr!(
+            " Tab папки · Ctrl+K переход · F1 справка · F4 настройки · F2 замок · F10 выход ",
+            " Tab folders · Ctrl+K switch · F1 help · F4 settings · F2 lock · F10 quit "
+        ),
         tr!(" Tab папки · F1 справка · F4 настройки · F2 замок · F10 выход ", " Tab folders · F1 help · F4 settings · F2 lock · F10 quit "),
         tr!(" F1 справка · F10 выход ", " F1 help · F10 quit "),
         tr!(" F1 справка ", " F1 help "),
     ];
+    let hints: &[&str] = if app.two_panes() { &panes_hints } else { &list_hints };
     let hint = hints.iter().find(|h| display_width(h) + 20 <= area.width as usize).copied();
     let (left, right) = match hint {
         Some(h) => {
@@ -679,128 +905,6 @@ pub(super) fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
-pub(super) fn draw_help(f: &mut Frame, app: &App) {
-    let accent = app.theme.accent;
-    let key = |k: &str, d: &str| {
-        Line::from(vec![Span::styled(format!(" {k:<17}"), Style::new().fg(accent).add_modifier(Modifier::BOLD)), Span::raw(d.to_string())])
-    };
-    let lines = vec![
-        key("Enter", tr!("отправить", "send")),
-        key("Shift+Enter", tr!("новая строка (вставка текста целиком тоже работает)", "new line (pasting whole text works too)")),
-        key("↑ ↓", tr!("выбрать чат", "select chat")),
-        key("Tab / Shift+Tab", tr!("вкладки; после «/» — дополнить команду", "tabs; after \"/\" — complete command")),
-        key("PgUp / PgDn", tr!("прокрутка переписки", "scroll the chat")),
-        key(tr!("Мышь", "Mouse"), tr!("клик — чат или вкладка, колесо — прокрутка", "click — chat or tab, wheel — scroll")),
-        key(
-            "F7",
-            tr!("выбор сообщения: R ответить, F переслать, E править, D удалить", "pick message: R reply, F forward, E edit, D delete"),
-        ),
-        key(
-            tr!("F7 → 1-6, G, K, V, P, T", "F7 → 1-6, G, K, V, P, T"),
-            tr!(
-                "реакция (0 — снять); G оригинал, B назад; K кнопки; V голос; P фото; T текст",
-                "reaction (0 removes); G original, B back; K buttons; V vote; P photo; T text file"
-            ),
-        ),
-        key(
-            tr!("F7 → Пробел", "F7 → Space"),
-            tr!(
-                "отметить сообщения (Shift+↑↓, мышью с зажатой кнопкой); F, D, C — все сразу",
-                "mark messages (Shift+↑↓, or drag the mouse); F, D, C act on all"
-            ),
-        ),
-        key(
-            "Esc, Ctrl+Z/Y",
-            tr!(
-                "очистить ввод; отмена ответа, правки; Ctrl+Z/Y — отмена и повтор набора",
-                "clear input; cancel reply, edit; Ctrl+Z/Y undo and redo typing"
-            ),
-        ),
-        key(tr!("F2  или /lock", "F2  or /lock"), tr!("заблокировать (запрос пароля)", "lock (asks for password)")),
-        key(tr!("F3  или /md", "F3  or /md"), tr!("Markdown вкл/выкл", "Markdown on/off")),
-        key(
-            tr!("F4  или /settings", "F4  or /settings"),
-            tr!("настройки; /proxy, /passwd — прокси и пароль", "settings; /proxy, /passwd — proxy, password"),
-        ),
-        key(tr!("F5  или /refresh", "F5  or /refresh"), tr!("обновить список чатов", "refresh chat list")),
-        key("F6 / Ctrl+F", tr!("поиск по чатам (/find текст; Esc сбрасывает)", "search chats (/find text; Esc resets)")),
-        key(tr!("F10 или /quit", "F10 or /quit"), tr!("выход", "quit")),
-        key(
-            tr!("/later 30 текст", "/later 30 text"),
-            tr!("через 30 минут; /note текст — заметка в «Избранное»", "in 30 minutes; /note text — note to Saved Messages"),
-        ),
-        key(
-            tr!("/edit [текст], /del", "/edit [text], /del"),
-            tr!("править / удалить своё последнее сообщение", "edit / delete your last message"),
-        ),
-        key(
-            "/pin /readall /export",
-            tr!("закрепить чат; всё прочитано; сохранить переписку в export/", "pin chat; mark all read; save the chat to export/"),
-        ),
-        key(
-            tr!("/send путь [текст]", "/send path [text]"),
-            tr!("отправить файл (можно перетащить файл в окно)", "send a file (you can drag a file into the window)"),
-        ),
-        key("/save", tr!("скачать последнее вложение (или S в режиме F7)", "download the last attachment (or S in F7 mode)")),
-        key(
-            "/open, /copy",
-            tr!(
-                "открыть вложение программой Windows (O в F7); копировать текст сообщения (C в F7)",
-                "open an attachment with the default app (O in F7); copy message text (C in F7)"
-            ),
-        ),
-        key(
-            "/findmsg /findall",
-            tr!(
-                "найти сообщения в чате или во всех чатах; PgUp у верха подгружает старые",
-                "search messages in this chat or in all chats; PgUp at the top loads older ones"
-            ),
-        ),
-        key(
-            "Alt+↑ / Alt+↓",
-            tr!(
-                "прошлые сообщения и команды (↑ ↓ тоже, когда в поле есть текст)",
-                "previous messages and commands (↑ ↓ too when the input has text)"
-            ),
-        ),
-        key(
-            "Ctrl+V / /paste",
-            tr!(
-                "вставить из буфера обмена (также Shift+Insert); /faq — если не работает",
-                "paste from clipboard (also Shift+Insert); /faq — if it fails"
-            ),
-        ),
-        key(
-            "/links, /scheduled",
-            tr!("ссылки чата (L для сообщения); отложенные, отмена", "chat links (L for a message); scheduled, cancel"),
-        ),
-        key("/pinned, /chat", tr!("закреплённые чата; открыть чат: /chat @имя", "pinned messages; open a chat: /chat @name")),
-        key(
-            "/join, /leave, /topics",
-            tr!("вступить по ссылке; выйти из чата; темы форума (писать в тему)", "join by link; leave a chat; forum topics (post to one)"),
-        ),
-        Line::from(Span::styled(
-            trf!(
-                " Ctrl+L/Q/T/R/F тоже работают · Tg-Lite {VERSION} · любая клавиша закрывает",
-                " Ctrl+L/Q/T/R/F work too · Tg-Lite {VERSION} · any key closes"
-            ),
-            Style::new().fg(muted()),
-        )),
-    ];
-    let rect = centered_rect(f.area(), 72, lines.len() as u16 + 2);
-    f.render_widget(Clear, rect);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .style(base_style())
-                .borders(Borders::ALL)
-                .border_style(Style::new().fg(accent))
-                .title(Span::styled(tr!(" Справка ", " Help "), Style::new().fg(accent).add_modifier(Modifier::BOLD))),
-        ),
-        rect,
-    );
-}
-
 pub(super) fn on_off(v: bool) -> &'static str {
     if v { tr!("включено", "on") } else { tr!("выключено", "off") }
 }
@@ -832,6 +936,9 @@ pub(super) fn draw_settings(f: &mut Frame, app: &App) {
         (tr!("Пароль приложения", "App password"), tr!("сменить…", "change…").to_string()),
         (tr!("Эмодзи в тексте", "Emoji in text"), s.emoji_name().to_string()),
         (tr!("Уведомления Windows", "Windows notifications"), on_off(s.notify).to_string()),
+        (tr!("Вид", "View"), s.view_name().to_string()),
+        (tr!("Тихие часы", "Quiet hours"), s.quiet_label()),
+        (tr!("Сжимать фото при отправке", "Shrink photos on send"), on_off(s.compress).to_string()),
     ];
     let width = 78u16;
     let label_w = 28usize;

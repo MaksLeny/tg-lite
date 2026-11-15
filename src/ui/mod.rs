@@ -83,6 +83,11 @@ const COMMANDS: &[&str] = &[
     "/album",
     "/netcheck",
     "/report",
+    "/view",
+    "/mute",
+    "/dnd",
+    "/next",
+    "/drafts",
 ];
 
 /// Частые вопросы: показываются командой /faq.
@@ -306,6 +311,8 @@ enum Mode {
     Preview,
     /// Чтение текстового файла.
     Viewer,
+    /// Быстрый переход к чату или команде (Ctrl+K).
+    Quick,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -322,6 +329,8 @@ enum OverlayKind {
     Poll,
     /// Темы форума: выбранная становится местом отправки.
     Topics,
+    /// Чаты с неотправленным текстом (`/drafts`).
+    Drafts,
 }
 
 #[derive(Default)]
@@ -362,7 +371,7 @@ enum Tab {
     Folder(i32),
 }
 
-const SETTINGS_ROWS: usize = 17;
+const SETTINGS_ROWS: usize = 20;
 
 /// Разделы настроек: заголовок и номера строк (в порядке показа). Номера строк не менялись,
 /// поэтому порядок на экране не влияет на то, где хранится каждое значение.
@@ -370,8 +379,8 @@ fn settings_sections() -> [(&'static str, &'static [usize]); 5] {
     [
         (tr!("Защита", "Security"), &[0, 6, 14]),
         (tr!("Подключение", "Connection"), &[1]),
-        (tr!("Сообщения и звук", "Messages and sound"), &[2, 16, 3, 4, 12]),
-        (tr!("Внешний вид", "Appearance"), &[13, 5, 7, 8, 9, 15]),
+        (tr!("Сообщения и звук", "Messages and sound"), &[2, 16, 18, 3, 4, 12, 19]),
+        (tr!("Внешний вид", "Appearance"), &[17, 13, 5, 7, 8, 9, 15]),
         (tr!("Общие", "General"), &[10, 11]),
     ]
 }
@@ -457,6 +466,20 @@ pub struct App {
     preview: Option<Preview>,
     /// Открытый текстовый файл.
     viewer: Option<Viewer>,
+    /// Последний результат `/netcheck`: попадает в `/report`.
+    last_netcheck: Vec<String>,
+    /// Вид «Два окна»: второй чат, вкладки открытых чатов, прокрутка второго окна.
+    panes: Panes,
+    /// Номер первого непрочитанного сообщения чата на момент открытия: перед ним рисуется «новые сообщения».
+    new_from: HashMap<PeerId, i32>,
+    /// Окно быстрого перехода (Ctrl+K).
+    quick: Option<Quick>,
+    /// Справка: сколько строк пропущено сверху, сколько строк видно и насколько её можно листать (считает отрисовка).
+    help_top: usize,
+    help_rows: usize,
+    help_max: usize,
+    /// «Не беспокоить» до этого момента (`/dnd`): ни звука, ни уведомлений.
+    dnd_until: Option<Instant>,
     /// Ждём второго D для удаления всех отмеченных.
     pending_delete_marked: bool,
     /// Чат, для которого уже набрано первое /leave и ждём повторного.
@@ -556,6 +579,14 @@ impl App {
             last_notify: None,
             preview: None,
             viewer: None,
+            last_netcheck: Vec::new(),
+            panes: Panes::default(),
+            new_from: HashMap::new(),
+            quick: None,
+            help_top: 0,
+            help_rows: 0,
+            help_max: 0,
+            dnd_until: None,
             pending_delete_marked: false,
             pending_leave: None,
             net: None,
@@ -617,6 +648,10 @@ impl App {
 
     /// Делает чат выбранным и видимым, даже если он не входит в открытую вкладку.
     fn reveal_chat(&mut self, id: PeerId) {
+        if self.two_panes() {
+            self.open_in_panes(id);
+            return;
+        }
         if !self.visible_ids().contains(&id) {
             self.tab = Tab::All;
             self.filter.clear();
@@ -711,6 +746,11 @@ impl App {
         if new == self.sel {
             return;
         }
+        if self.mode == Mode::Pick {
+            // Номер выбранного сообщения относится к прежнему чату.
+            self.mode = Mode::Chat;
+            self.pick_note.clear();
+        }
         let had_old = self.sel.is_some();
         let was_editing = self.edit_target.take().is_some();
         if was_editing {
@@ -719,6 +759,7 @@ impl App {
         }
         self.reply = None;
         if let Some(old) = self.sel {
+            self.new_from.remove(&old);
             if !was_editing {
                 let text = self.input.clone();
                 self.queue_draft(old, &text);
@@ -744,6 +785,11 @@ impl App {
         }
         self.older_busy = false;
         self.sel = new;
+        if let Some(id) = new
+            && self.two_panes()
+        {
+            self.note_open(id);
+        }
         self.pending_delete = None;
         self.marked.clear();
         self.pending_delete_marked = false;
@@ -831,6 +877,9 @@ impl App {
 
     /// Следит, чтобы выбранный чат был виден в текущей вкладке. Возвращает true, если выбор сменился.
     fn ensure_selection(&mut self) -> bool {
+        if self.two_panes() {
+            return self.ensure_panes();
+        }
         let vis = self.visible_ids();
         if let Some(s) = self.sel
             && vis.contains(&s)
@@ -865,8 +914,9 @@ impl App {
         self.ensure_selection();
     }
 
+    /// Непрочитанные для заголовка окна: заглушённые чаты не считаются.
     fn total_unread(&self) -> i32 {
-        self.chats.iter().map(|c| c.unread.max(0)).sum()
+        self.chats.iter().filter(|c| !self.is_muted(c)).map(|c| c.unread.max(0)).sum()
     }
 
     fn title(&self) -> String {
@@ -891,6 +941,7 @@ impl App {
         self.viewer = None;
         self.marked.clear();
         self.overlay = None;
+        self.quick = None;
         util::clear_view_dir(); // файлы, открытые через /open, не должны лежать на диске при блокировке
     }
 
@@ -906,6 +957,46 @@ impl App {
         self.input.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(self.input.len())
     }
 
+    /// Возвращает текст, который не ушёл, туда, где его найдут: в поле ввода своего чата, а если там уже
+    /// набрано другое, то ниже набранного; для чата, который сейчас не открыт, — в его черновик.
+    /// Текст никогда не попадает в поле ввода чужого чата: его можно было бы отправить не туда.
+    fn restore_unsent(&mut self, chat: PeerId, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if self.sel == Some(chat) && self.edit_target.is_none() {
+            if self.input.trim().is_empty() {
+                self.input = text;
+            } else if !self.input.contains(text.as_str()) {
+                self.input.push_str("\n\n");
+                self.input.push_str(&text);
+            }
+            self.cursor = self.input_len();
+            return;
+        }
+        match self.drafts.get_mut(&chat) {
+            Some((d, cur)) if d.trim().is_empty() => {
+                *d = text;
+                *cur = d.chars().count();
+            }
+            Some((d, cur)) => {
+                if !d.contains(text.as_str()) {
+                    d.push_str("\n\n");
+                    d.push_str(&text);
+                }
+                *cur = d.chars().count();
+            }
+            None => {
+                let cur = text.chars().count();
+                self.drafts.insert(chat, (text, cur));
+            }
+        }
+        if let Some(c) = self.chats.iter().find(|c| c.id == chat) {
+            self.status =
+                trf!("Не отправлено: текст сохранён черновиком чата «{}»", "Not sent: the text is kept as the draft of \"{}\"", c.name);
+        }
+    }
+
     /// Вставка текста (из буфера обмена или из события терминала) в зависимости от экрана.
     fn paste(&mut self, text: Option<String>) {
         let Some(text) = text.or_else(crate::util::clipboard_text) else {
@@ -914,7 +1005,7 @@ impl App {
         };
         match self.mode {
             Mode::Chat => {
-                let room = MAX_MESSAGE_CHARS.saturating_sub(self.input_len());
+                let room = crate::split::MAX_INPUT_CHARS.saturating_sub(self.input_len());
                 let clean = crate::util::paste_clean(&text, room);
                 if clean.is_empty() {
                     self.status = tr!("Нечего вставлять", "Nothing to paste").into();
@@ -939,6 +1030,10 @@ impl App {
             self.status = tr!("Сначала выберите чат", "Select a chat first").into();
             return true;
         };
+        if !chat.can_write {
+            self.status = self.read_only_note();
+            return true;
+        }
         let dir = util::view_dir();
         let path = dir.join(format!("screenshot-{}.png", jiff::Timestamp::now().as_second()));
         if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, &png).is_err() {
@@ -948,7 +1043,7 @@ impl App {
         }
         let caption = std::mem::take(&mut self.input).trim().to_string();
         self.cursor = 0;
-        let _ = cmd.send(Cmd::SendFile { chat, path, caption });
+        let _ = cmd.send(Cmd::SendFile { chat, path, caption, compress: self.settings.compress });
         self.status = tr!("Отправляю скриншот…", "Sending the screenshot…").into();
         true
     }
@@ -1078,6 +1173,26 @@ impl App {
     }
 
     fn handle_event(&mut self, ev: Event, cmd: &mpsc::UnboundedSender<Cmd>) {
+        self.handle_event_inner(ev, cmd);
+        self.keep_pick_valid();
+    }
+
+    /// Режим выбора сообщения не должен остаться без чата, без сообщений или с номером за концом переписки:
+    /// пока он открыт, события могут убрать чат из списка или удалить сообщения.
+    fn keep_pick_valid(&mut self) {
+        if self.mode != Mode::Pick {
+            return;
+        }
+        let len = self.sel.and_then(|id| self.histories.get(&id)).map_or(0, Vec::len);
+        if len == 0 {
+            self.mode = Mode::Chat;
+            self.pick_note.clear();
+        } else if self.pick >= len {
+            self.pick = len - 1;
+        }
+    }
+
+    fn handle_event_inner(&mut self, ev: Event, cmd: &mpsc::UnboundedSender<Cmd>) {
         match ev {
             Event::DialogsPage(page) => {
                 self.merge_dialogs(page);
@@ -1119,6 +1234,12 @@ impl App {
                 }
                 if !msgs.iter().any(|m| m.id == focus) {
                     self.status = tr!("Не удалось открыть найденное сообщение", "Could not open the found message").into();
+                    return;
+                }
+                if !self.chats.iter().any(|c| c.id == chat) {
+                    // Пока грузилось окружение, чат пропал из списка (вышли из него, список обновился): открывать нечего.
+                    self.status =
+                        tr!("Чата найденного сообщения уже нет в списке", "The chat of the found message is no longer in the list").into();
                     return;
                 }
                 self.reveal_chat(chat);
@@ -1188,10 +1309,7 @@ impl App {
                     self.queued.remove(i);
                 }
                 self.status = trf!("Не отправлено из очереди: {reason}", "Not sent from the queue: {reason}");
-                if self.input.is_empty() {
-                    self.input = text;
-                    self.cursor = self.input_len();
-                }
+                self.restore_unsent(chat, text);
             }
             Event::Reacted { chat, msg } => {
                 if let Some(m) = self.histories.get_mut(&chat).and_then(|h| h.iter_mut().find(|m| m.id == msg.id)) {
@@ -1245,6 +1363,7 @@ impl App {
                 }
             }
             Event::NetCheck(lines) => {
+                self.last_netcheck = lines.clone();
                 if self.mode == Mode::Locked {
                     return;
                 }
@@ -1320,6 +1439,8 @@ impl App {
                 if self.sel == Some(id) {
                     self.sel = None;
                     self.ensure_selection();
+                } else if self.two_panes() {
+                    self.ensure_panes(); // вышли из чата во втором окне: освобождаем окно и вкладку
                 }
                 self.status = tr!("Вы вышли из чата", "You left the chat").into();
             }
@@ -1361,12 +1482,16 @@ impl App {
                 }
                 self.histories.insert(chat, msgs);
                 self.resolve_fwd(chat);
-                if self.sel == Some(chat) {
-                    self.scroll = 0;
+                if self.is_visible_chat(chat) {
+                    if self.sel == Some(chat) {
+                        self.scroll = 0;
+                    }
                     if let Some(pos) = self.chats.iter().position(|c| c.id == chat)
                         && self.chats[pos].unread > 0
                         && self.mode != Mode::Locked
                     {
+                        let unread = self.chats[pos].unread;
+                        self.mark_new_from(chat, unread);
                         let _ = cmd.send(Cmd::MarkRead(self.chats[pos].clone()));
                         self.chats[pos].unread = 0;
                     }
@@ -1383,11 +1508,12 @@ impl App {
                     }
                     return;
                 }
-                let is_open = self.sel == Some(chat);
+                let is_open = self.is_visible_chat(chat);
                 let outgoing = msg.outgoing;
                 if !outgoing {
                     self.typing.remove(&chat);
                 }
+                let for_preview = msg.clone();
                 // «Новое» = такого сообщения ещё не было. Если история чата не загружена, оно новое тоже:
                 // иначе счётчик непрочитанных не рос бы для всех чатов, кроме открытых.
                 let known = self.histories.get(&chat).is_some_and(|h| h.iter().any(|m| m.id == msg.id));
@@ -1401,10 +1527,13 @@ impl App {
                         } else {
                             self.chats[pos].unread += 1;
                         }
-                        if self.settings.sound && !(is_open && self.mode == Mode::Chat) {
-                            beep();
+                        // Заглушённый чат и тихие часы: без звука и всплывающих окон.
+                        if self.may_alert(chat) {
+                            if self.settings.sound && !(is_open && self.mode == Mode::Chat) {
+                                beep();
+                            }
+                            self.maybe_notify(&chat_name);
                         }
-                        self.maybe_notify(&chat_name);
                         self.status = if self.mode == Mode::Locked {
                             tr!("Новое сообщение", "New message").into()
                         } else {
@@ -1415,6 +1544,7 @@ impl App {
                         // Чат с новым сообщением поднимается наверх списка.
                         let c = self.chats.remove(pos);
                         self.chats.insert(0, c);
+                        self.touch_preview(chat, &for_preview);
                     }
                 } else if !self.reload_pending {
                     // Чата ещё нет в списке (новый диалог): перезагрузим список.
@@ -1422,7 +1552,12 @@ impl App {
                     let _ = cmd.send(Cmd::LoadDialogs);
                 }
                 if added && is_open {
-                    self.scroll = 0;
+                    // В двух окнах новое сообщение прокручивает к концу то окно, где этот чат стоит.
+                    if self.sel == Some(chat) {
+                        self.scroll = 0;
+                    } else {
+                        self.panes.other_scroll = 0;
+                    }
                 }
             }
             Event::Sent { chat, msg, scheduled } => {
@@ -1431,19 +1566,14 @@ impl App {
                 } else {
                     self.status = tr!("Отправлено", "Sent").into();
                     // Если история чата ещё не загружена, сообщение подтянется вместе с ней.
+                    self.touch_preview(chat, &msg);
                     self.push_unique(chat, msg, false);
                     if self.sel == Some(chat) {
                         self.scroll = 0;
                     }
                 }
             }
-            Event::SendFailed { text } => {
-                // Возвращаем текст в поле ввода, чтобы длинный пост не пропал.
-                if self.input.is_empty() {
-                    self.input = text;
-                    self.cursor = self.input_len();
-                }
-            }
+            Event::SendFailed { chat, text } => self.restore_unsent(chat, text),
             Event::Edited { chat, msg } => {
                 if let Some(h) = self.histories.get_mut(&chat)
                     && let Some(m) = h.iter_mut().find(|m| m.id == msg.id)
@@ -1462,8 +1592,12 @@ impl App {
                         }
                     }
                     m.edited = true;
+                    if msg.media.is_some() {
+                        m.media = msg.media;
+                    }
                     m.buttons = msg.buttons;
                     m.reactions = msg.reactions;
+                    m.link = msg.link;
                 }
             }
             Event::Deleted { chat, ids } => {
@@ -1597,6 +1731,12 @@ impl App {
             13 => s.palette = cycle(&[0u8, 1, 2, 3], s.palette, dir),
             15 => s.emoji = cycle(&[0u8, 1, 2], s.emoji, dir),
             16 => s.notify = !s.notify,
+            17 => {
+                let v = cycle(&[0u8, 1, 2], s.view, dir);
+                self.set_view(v);
+            }
+            18 => s.quiet = cycle(&[0u8, 1, 2, 3, 4], s.quiet, dir),
+            19 => s.compress = !s.compress,
             _ => {
                 if activate {
                     self.mode = Mode::NewPassword;
@@ -1725,13 +1865,25 @@ impl App {
                     self.mode = Mode::Chat;
                     self.marked.clear();
                 }
-                if y == 0 {
+                if self.two_panes() {
+                    // Вкладка открытого чата или щелчок во втором окне.
+                    if y == 0 {
+                        if let Some(&(_, _, id)) = self.panes.hit_tabs.iter().find(|(a, b, _)| x >= *a && x < *b) {
+                            self.open_chat(id);
+                        }
+                    } else {
+                        let other = usize::from(!self.panes.right_active);
+                        if inside(self.panes.hit[other]) && self.panes.hit[other].width > 0 {
+                            self.switch_pane(other == 1);
+                        }
+                    }
+                } else if y == 0 {
                     if let Some((_, _, t)) = self.hit_tabs.iter().find(|(a, b, _)| x >= *a && x < *b) {
                         self.tab = t.clone();
                         self.ensure_selection();
                     }
                 } else if inside(self.hit_list) && y > self.hit_list.y && y + 1 < self.hit_list.y + self.hit_list.height {
-                    let row = (y - self.hit_list.y - 1) as usize + self.list_state.offset();
+                    let row = ((y - self.hit_list.y - 1) / self.list_row_height()) as usize + self.list_state.offset();
                     if let Some(&id) = self.visible_ids().get(row)
                         && self.sel != Some(id)
                     {
@@ -1767,6 +1919,13 @@ impl App {
                             self.go_latest(cmd);
                         }
                         self.scroll = self.scroll.saturating_sub(3);
+                    }
+                } else if self.two_panes() && self.panes.other.is_some() && inside(self.panes.hit[usize::from(!self.panes.right_active)]) {
+                    // Колесо над вторым окном прокручивает его, не переключая окно.
+                    if up {
+                        self.panes.other_scroll = (self.panes.other_scroll + 3).min(self.panes.other_max);
+                    } else {
+                        self.panes.other_scroll = self.panes.other_scroll.saturating_sub(3);
                     }
                 } else if inside(self.hit_list) {
                     self.move_selection(if up { -1 } else { 1 });
@@ -1950,7 +2109,7 @@ impl App {
                 return;
             }
             Mode::Help => {
-                self.mode = Mode::Chat;
+                self.handle_help_key(key);
                 return;
             }
             Mode::Settings => {
@@ -1968,6 +2127,7 @@ impl App {
             Mode::Viewer => {
                 let Some(v) = self.viewer.as_mut() else {
                     self.mode = Mode::Pick;
+                    self.keep_pick_valid();
                     return;
                 };
                 let last = v.lines.len().saturating_sub(1);
@@ -1982,6 +2142,7 @@ impl App {
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                         self.viewer = None;
                         self.mode = Mode::Pick;
+                        self.keep_pick_valid();
                     }
                     _ => {}
                 }
@@ -1993,6 +2154,7 @@ impl App {
                 }
                 self.preview = None;
                 self.mode = Mode::Pick;
+                self.keep_pick_valid();
                 return;
             }
             Mode::Pick => {
@@ -2001,6 +2163,10 @@ impl App {
             }
             Mode::Forward => {
                 self.handle_forward_key(key, cmd);
+                return;
+            }
+            Mode::Quick => {
+                self.handle_quick_key(key);
                 return;
             }
             Mode::Chat => {}
@@ -2015,6 +2181,9 @@ impl App {
                 'f' => self.start_find(),
                 't' => self.toggle_markdown(),
                 'j' => self.insert_char('\n'),
+                'k' => self.open_quick(),
+                'n' => self.cmd_next(),
+                'w' if self.two_panes() => self.close_tab(),
                 _ => {}
             }
             return;
@@ -2022,8 +2191,14 @@ impl App {
 
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::F(1) => self.mode = Mode::Help,
+            // Два окна: Ctrl+←/→ или F8 — другое окно; Alt+цифра — закреплённый чат по номеру.
+            KeyCode::Left if ctrl && self.two_panes() => self.switch_pane(false),
+            KeyCode::Right if ctrl && self.two_panes() => self.switch_pane(true),
+            KeyCode::F(8) if self.two_panes() => self.switch_pane(!self.panes.right_active),
+            KeyCode::Char(d) if alt && !ctrl && d.is_ascii_digit() && d != '0' => self.open_favorite(d.to_digit(10).unwrap_or(0) as usize),
+            KeyCode::F(1) => self.open_help(),
             KeyCode::F(2) => self.lock(),
             KeyCode::F(3) => self.toggle_markdown(),
             KeyCode::F(4) => self.mode = Mode::Settings,
@@ -2040,6 +2215,8 @@ impl App {
                 self.insert_char(' ');
             }
             KeyCode::Tab if self.input.starts_with('/') && !self.input.contains(' ') => self.complete_command(),
+            KeyCode::Tab if self.two_panes() => self.cycle_open(1),
+            KeyCode::BackTab if self.two_panes() => self.cycle_open(-1),
             KeyCode::Tab => self.switch_tab(1),
             KeyCode::BackTab => self.switch_tab(-1),
             KeyCode::Backspace => self.backspace(),
@@ -2055,6 +2232,9 @@ impl App {
             KeyCode::Down if alt || ((!self.input.is_empty() || self.hist_pos.is_some()) && !self.input_history.is_empty()) => {
                 self.history_step(1)
             }
+            // В двух окнах списка чатов нет: стрелки листают переписку.
+            KeyCode::Up if self.two_panes() => self.scroll = (self.scroll + 1).min(self.max_scroll),
+            KeyCode::Down if self.two_panes() => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Up => self.move_selection(-1),
             KeyCode::Down => self.move_selection(1),
             KeyCode::PageUp => {
@@ -2129,7 +2309,7 @@ impl App {
                 1 => self.lock(),
                 2 => self.should_quit = true,
                 3 => self.refresh(cmd),
-                4 => self.mode = Mode::Help,
+                4 => self.open_help(),
                 5 => self.mode = Mode::Settings,
                 _ => {
                     self.settings_row = 14;
@@ -2143,7 +2323,21 @@ impl App {
             self.status = tr!("Сначала выберите чат", "Select a chat first").into();
             return;
         };
+        if !chat.can_write {
+            // Текст остаётся в поле ввода: его можно отправить в другой чат или сохранить через /note.
+            self.status = self.read_only_note();
+            return;
+        }
         if let Some(id) = self.edit_target {
+            if text.chars().count() > MAX_MESSAGE_CHARS {
+                // Правка — одно сообщение: на части она не делится.
+                self.status = trf!(
+                    "Ошибка: правка длиннее {MAX_MESSAGE_CHARS} символов ({}), Telegram её не примет. Сократите текст",
+                    "Error: the edit is longer than {MAX_MESSAGE_CHARS} characters ({}), Telegram will not accept it. Shorten the text",
+                    text.chars().count()
+                );
+                return;
+            }
             let _ = cmd.send(Cmd::Edit { chat, id, text, markdown: self.markdown });
             self.status = tr!("Исправляю сообщение…", "Editing message…").into();
             self.clear_input();
@@ -2162,17 +2356,21 @@ impl App {
             self.status = tr!("Пустое сообщение", "Empty message").into();
             return;
         }
-        if !self.markdown && body.chars().count() > MAX_MESSAGE_CHARS {
+        // Telegram берёт не больше 4096 символов за раз: длинный текст уйдёт несколькими сообщениями по порядку.
+        let parts = crate::split::split_message(&body, self.markdown).len();
+        if parts > crate::split::MAX_PARTS {
             self.status = trf!(
-                "Ошибка: сообщение длиннее {MAX_MESSAGE_CHARS} символов ({}), Telegram его не примет. Сократите текст",
-                "Error: message is longer than {MAX_MESSAGE_CHARS} characters ({}), Telegram will not accept it. Shorten the text",
-                body.chars().count()
+                "Текст слишком длинный: вышло бы {parts} сообщений, не больше {}. Отправьте его файлом: /send путь",
+                "The text is too long: it would be {parts} messages, {} at most. Send it as a file: /send path",
+                crate::split::MAX_PARTS
             );
             return;
         }
-        self.status = match delay {
-            Some(min) => trf!("Планирую на {}…", "Scheduling for {}…", when_label(min)),
-            None => tr!("Отправляю…", "Sending…").into(),
+        self.status = match (delay, parts) {
+            (Some(min), 1) => trf!("Планирую на {}…", "Scheduling for {}…", when_label(min)),
+            (Some(min), n) => trf!("Планирую на {} ({n} сообщ.)…", "Scheduling for {} ({n} messages)…", when_label(min)),
+            (None, 1) => tr!("Отправляю…", "Sending…").into(),
+            (None, n) => trf!("Длинный текст уходит по частям: {n} сообщ.…", "Long text goes in parts: {n} messages…"),
         };
         let in_topic = self.topic.as_ref().filter(|(c, _, _)| *c == chat.id).map(|(_, id, _)| *id);
         let reply_to = self.reply.take().map(|(id, _)| id).or(in_topic);
@@ -2378,6 +2576,14 @@ impl App {
                         self.open_found(chat_id, id, ts, cmd);
                     }
                 }
+                OverlayKind::Drafts => {
+                    let target = ov.items[ov.sel].target;
+                    self.overlay = None;
+                    self.mode = Mode::Chat;
+                    if let Some((chat_id, _, _)) = target {
+                        self.open_chat(chat_id);
+                    }
+                }
                 OverlayKind::Scheduled => {
                     if ov.confirm == Some(ov.sel) {
                         let item = ov.items.remove(ov.sel);
@@ -2427,6 +2633,43 @@ impl App {
 
     fn picked(&self) -> Option<&ChatMsg> {
         self.histories.get(&self.sel?)?.get(self.pick)
+    }
+
+    /// Состояние программы для `/report`.
+    fn report_state(&self) -> util::ReportState<'_> {
+        util::ReportState {
+            settings: &self.settings,
+            chats: self.chats.len(),
+            histories: self.histories.values().filter(|h| !h.is_empty()).count(),
+            messages: self.histories.values().map(Vec::len).sum(),
+            queued: self.queued.len(),
+            connection: match self.net {
+                None => "checking".into(),
+                Some(None) => "no reply from Telegram".into(),
+                Some(Some(ms)) => format!("online, {ms} ms"),
+            },
+            app_uptime: self.started.elapsed(),
+            terminal: crossterm::terminal::size().ok(),
+            locked: self.mode == Mode::Locked,
+            netcheck: &self.last_netcheck,
+        }
+    }
+
+    /// Что можно сделать с сообщением в выбранном чате (подсказка F7 и клавиши берут ответ отсюда).
+    fn actions(&self, m: &ChatMsg) -> actions::Actions {
+        actions_for(m, self.selected().is_none_or(|c| c.can_write), &util::has_handler)
+    }
+
+    /// Почему в этот чат нельзя писать.
+    fn read_only_note(&self) -> String {
+        match self.selected().map(|c| c.kind) {
+            Some(Kind::Channel) => tr!(
+                "Писать сюда нельзя: в этом канале публикуют только администраторы",
+                "You cannot write here: only administrators post in this channel"
+            )
+            .into(),
+            _ => tr!("Писать в этот чат вам нельзя (запрет в группе)", "You are not allowed to write in this chat").into(),
+        }
     }
 
     fn handle_pick_key(&mut self, key: KeyEvent, cmd: &mpsc::UnboundedSender<Cmd>) {
@@ -2544,23 +2787,33 @@ impl App {
                 },
             },
             (_, Some('t')) => {
-                if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
-                    if m.caption.is_none() {
-                        self.pick_note = tr!("В этом сообщении нет файла", "This message has no file").into();
-                    } else {
-                        let _ = cmd.send(Cmd::ViewText { chat, id: m.id });
-                        self.status = tr!("Читаю файл…", "Reading the file…").into();
-                    }
+                let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) else { return };
+                if self.actions(&m).read {
+                    let _ = cmd.send(Cmd::ViewText { chat, id: m.id });
+                    self.status = tr!("Читаю файл…", "Reading the file…").into();
+                } else {
+                    self.pick_note = match &m.media {
+                        None => tr!("В этом сообщении нет файла", "This message has no file").into(),
+                        Some(x) if !util::is_text_file(&x.name) => tr!(
+                            "Это не текстовый файл (читаются txt, md, log, json, csv, xml, yml, toml, ini)",
+                            "This is not a text file (txt, md, log, json, csv, xml, yml, toml, ini can be read)"
+                        )
+                        .into(),
+                        Some(_) => tr!(
+                            "Файл больше 1 МБ: откройте его через O или сохраните через S",
+                            "The file is larger than 1 MB: open it with O or save it with S"
+                        )
+                        .into(),
+                    };
                 }
             }
             (_, Some('p')) => {
-                if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
-                    if m.caption.is_none() {
-                        self.pick_note = tr!("В этом сообщении нет фото", "This message has no photo").into();
-                    } else {
-                        let _ = cmd.send(Cmd::Preview { chat, id: m.id });
-                        self.status = tr!("Загружаю превью…", "Loading the preview…").into();
-                    }
+                let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) else { return };
+                if self.actions(&m).photo {
+                    let _ = cmd.send(Cmd::Preview { chat, id: m.id });
+                    self.status = tr!("Загружаю превью…", "Loading the preview…").into();
+                } else {
+                    self.pick_note = tr!("В этом сообщении нет фото", "This message has no photo").into();
                 }
             }
             (_, Some('v')) => {
@@ -2614,6 +2867,9 @@ impl App {
                     }
                 }
             }
+            (_, Some('r')) if self.selected().is_some_and(|c| !c.can_write) => {
+                self.pick_note = self.read_only_note();
+            }
             (_, Some('r')) => {
                 if let Some(m) = self.picked().cloned() {
                     let who = if m.outgoing { tr!("Я", "Me").to_string() } else { m.sender.clone() };
@@ -2630,6 +2886,12 @@ impl App {
                         self.status = tr!("Можно править только свои сообщения", "You can only edit your own messages").into();
                         self.pick_note =
                             tr!("Это чужое сообщение: править можно только свои", "Not your message: you can only edit your own").into();
+                    } else if !is_editable(&m) {
+                        self.pick_note = tr!(
+                            "Это сообщение нельзя править (опрос, стикер, геопозиция, контакт)",
+                            "This message cannot be edited (poll, sticker, location, contact)"
+                        )
+                        .into();
                     } else if !self.input.is_empty() {
                         self.pick_note = tr!(
                             "В поле ввода уже есть текст: отправьте или очистите его (Esc), потом правьте",
@@ -2693,8 +2955,10 @@ impl App {
             }
             (_, Some('s')) => {
                 if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
-                    if m.caption.is_none() {
-                        self.pick_note = tr!("В этом сообщении нет вложения", "This message has no attachment").into();
+                    if m.media.is_none() {
+                        self.pick_note =
+                            tr!("В этом сообщении нет файла, который можно скачать", "This message has no file that can be downloaded")
+                                .into();
                     } else {
                         let _ = cmd.send(Cmd::Save { chat, id: m.id });
                         self.status = tr!("Скачиваю…", "Downloading…").into();
@@ -2720,12 +2984,13 @@ impl App {
             }
             (_, Some('o')) => {
                 if let (Some(chat), Some(m)) = (self.selected().cloned(), self.picked().cloned()) {
-                    if m.caption.is_none() {
-                        self.pick_note = tr!("В этом сообщении нет вложения", "This message has no attachment").into();
-                    } else {
-                        let _ = cmd.send(Cmd::Open { chat, id: m.id });
-                        self.status = tr!("Скачиваю для просмотра…", "Downloading to view…").into();
-                        self.mode = Mode::Chat;
+                    match open_check(&m, &util::has_handler) {
+                        Err(why) => self.pick_note = why.note(),
+                        Ok(_) => {
+                            let _ = cmd.send(Cmd::Open { chat, id: m.id });
+                            self.status = tr!("Скачиваю для просмотра…", "Downloading to view…").into();
+                            self.mode = Mode::Chat;
+                        }
                     }
                 }
             }
@@ -2814,6 +3079,11 @@ impl App {
     fn finish_forward(&mut self, src: &ChatInfo) {
         self.fwd_src = None;
         self.mode = Mode::Chat;
+        if !self.chats.iter().any(|c| c.id == src.id) {
+            // Пока выбирали, куда переслать, исходный чат пропал из списка (вышли из него, список обновился).
+            self.ensure_selection();
+            return;
+        }
         if !self.visible_ids().contains(&src.id) {
             self.tab = Tab::All;
             self.filter.clear();
@@ -2887,6 +3157,26 @@ impl App {
                 let _ = cmd.send(Cmd::ListTopics(chat));
                 self.status = tr!("Загружаю темы…", "Loading topics…").into();
             }
+            "/view" => {
+                self.clear_input();
+                self.cmd_view(arg, saver);
+            }
+            "/mute" => {
+                self.clear_input();
+                self.cmd_mute(saver);
+            }
+            "/dnd" => {
+                self.clear_input();
+                self.cmd_dnd(arg);
+            }
+            "/next" => {
+                self.clear_input();
+                self.cmd_next();
+            }
+            "/drafts" => {
+                self.clear_input();
+                self.cmd_drafts();
+            }
             "/netcheck" => {
                 self.clear_input();
                 let _ = cmd.send(Cmd::NetCheck(Box::new(self.settings.clone())));
@@ -2894,7 +3184,8 @@ impl App {
             }
             "/report" => {
                 self.clear_input();
-                self.status = match util::write_report(&self.settings, self.chats.len()) {
+                let state = self.report_state();
+                self.status = match util::write_report(&state) {
                     Ok(p) => trf!(
                         "Отчёт сохранён: {}. В нём нет переписки, паролей и номера: приложите его к сообщению о проблеме",
                         "Report saved: {}. It has no messages, passwords or phone number: attach it to your bug report",
@@ -2995,19 +3286,7 @@ impl App {
             }
             "/export" => {
                 self.clear_input();
-                let Some(c) = self.selected().cloned() else {
-                    self.status = tr!("Сначала выберите чат", "Select a chat first").into();
-                    return true;
-                };
-                match self.histories.get(&c.id) {
-                    Some(h) if !h.is_empty() => {
-                        self.status = match crate::util::write_export(&c.name, &export_text(&c.name, h)) {
-                            Ok(p) => trf!("Сохранено: {}", "Saved: {}", p.display()),
-                            Err(e) => trf!("Ошибка: не удалось сохранить файл: {e}", "Error: could not save the file: {e}"),
-                        };
-                    }
-                    _ => self.status = tr!("В этом чате пока нечего сохранять", "Nothing to save in this chat yet").into(),
-                }
+                self.cmd_export(arg, &util::export_dir());
             }
             "/note" => {
                 if arg.is_empty() {
@@ -3074,7 +3353,7 @@ impl App {
                 self.clear_input();
                 let (Some(chat), Some(m)) = (
                     self.selected().cloned(),
-                    self.sel.and_then(|id| self.histories.get(&id)).and_then(|h| h.iter().rev().find(|m| m.caption.is_some())).cloned(),
+                    self.sel.and_then(|id| self.histories.get(&id)).and_then(|h| h.iter().rev().find(|m| m.media.is_some())).cloned(),
                 ) else {
                     self.status = tr!("В загруженных сообщениях нет вложений", "No attachments in the loaded messages").into();
                     return true;
@@ -3084,11 +3363,16 @@ impl App {
             }
             "/open" => {
                 self.clear_input();
-                let (Some(chat), Some(m)) = (
-                    self.selected().cloned(),
-                    self.sel.and_then(|id| self.histories.get(&id)).and_then(|h| h.iter().rev().find(|m| m.caption.is_some())).cloned(),
-                ) else {
-                    self.status = tr!("В загруженных сообщениях нет вложений", "No attachments in the loaded messages").into();
+                let Some(chat) = self.selected().cloned() else { return true };
+                // Последнее вложение, которое можно открыть; если открываемых нет, объясняем, чем плохо последнее.
+                let history = self.sel.and_then(|id| self.histories.get(&id));
+                let openable = history.and_then(|h| h.iter().rev().find(|m| open_check(m, &util::has_handler).is_ok())).cloned();
+                let Some(m) = openable else {
+                    let last = history.and_then(|h| h.iter().rev().find(|m| m.media.is_some()));
+                    self.status = match last.map(|m| open_check(m, &util::has_handler)) {
+                        Some(Err(why)) => why.note(),
+                        _ => tr!("В загруженных сообщениях нет вложений", "No attachments in the loaded messages").into(),
+                    };
                     return true;
                 };
                 let _ = cmd.send(Cmd::Open { chat, id: m.id });
@@ -3114,9 +3398,13 @@ impl App {
                     self.status = tr!("Сначала выберите чат", "Select a chat first").into();
                     return true;
                 };
+                if !chat.can_write {
+                    self.status = self.read_only_note();
+                    return true;
+                }
                 match parse_send(arg) {
                     Some((path, caption)) if std::path::Path::new(&path).is_file() => {
-                        let _ = cmd.send(Cmd::SendFile { chat, path: path.into(), caption });
+                        let _ = cmd.send(Cmd::SendFile { chat, path: path.into(), caption, compress: self.settings.compress });
                         self.status = tr!("Отправляю файл…", "Sending file…").into();
                         self.clear_input();
                     }
@@ -3139,6 +3427,10 @@ impl App {
                     self.status = tr!("Сначала выберите чат", "Select a chat first").into();
                     return true;
                 };
+                if !chat.can_write {
+                    self.status = self.read_only_note();
+                    return true;
+                }
                 let (paths, caption) = parse_album(arg);
                 if !(2..=10).contains(&paths.len()) {
                     self.status = tr!(
@@ -3150,7 +3442,7 @@ impl App {
                     self.status = trf!("Ошибка: файл не найден: {bad}", "Error: file not found: {bad}");
                 } else {
                     let paths = paths.into_iter().map(Into::into).collect();
-                    let _ = cmd.send(Cmd::SendAlbum { chat, paths, caption });
+                    let _ = cmd.send(Cmd::SendAlbum { chat, paths, caption, compress: self.settings.compress });
                     self.status = tr!("Отправляю альбом…", "Sending the album…").into();
                     self.clear_input();
                 }
@@ -3230,8 +3522,12 @@ impl App {
     }
 }
 
+mod actions;
 mod draw;
+mod export;
+mod help;
 mod text;
+mod views;
 /// Текстовый файл в окне чтения: имя, строки и номер первой видимой строки.
 struct Viewer {
     name: String,
@@ -3262,9 +3558,12 @@ struct Drag {
     started: bool,
 }
 
+use actions::{actions_for, is_editable, open_check};
 use draw::*;
+use help::draw_help;
 use text::*;
 pub(crate) use text::{ctrl_letter, is_paste_key};
+use views::{PANES_MIN_WIDTH, Panes, Quick, View};
 
 // ------------------------------------------------------------------ главный цикл
 
@@ -3390,6 +3689,10 @@ pub async fn run(
                 if last_refresh.elapsed() >= REFRESH_EVERY {
                     last_refresh = Instant::now();
                     let _ = cmd.send(Cmd::LoadDialogs);
+                }
+                if let Some(e) = saver.take_save_error() {
+                    app.status = trf!("Не удалось сохранить настройки и сессию на диск: {e}", "Could not save the settings and session to disk: {e}");
+                    dirty = true;
                 }
                 if last_save.elapsed() >= SAVE_EVERY {
                     last_save = Instant::now();

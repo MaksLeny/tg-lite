@@ -1530,6 +1530,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
+name = "jpeg-encoder"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0370574b86f7eca156b9f298392b5e69a23f8c86f3f865add60bbc2e79467a6"
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3096,7 +3102,7 @@ dependencies = [
 
 [[package]]
 name = "tg-lite"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3109,6 +3115,7 @@ dependencies = [
  "grammers-session",
  "jiff",
  "jpeg-decoder",
+ "jpeg-encoder",
  "png",
  "rand 0.10.3",
  "ratatui",

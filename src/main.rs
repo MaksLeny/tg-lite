@@ -3,6 +3,9 @@ mod i18n;
 mod lock;
 mod proxy;
 mod settings;
+mod shrink;
+mod split;
+mod sysinfo;
 mod tg;
 mod ui;
 mod util;
@@ -187,6 +190,7 @@ async fn connect_auto(session: &Arc<VaultSession>, api_id: i32, routes: &[Route]
         match tokio::time::timeout(Duration::from_secs(12), conn.client.is_authorized()).await {
             Ok(Ok(authorized)) => {
                 log(&format!("connected {}", route.label()));
+                util::set_route(&route.describe());
                 return Some((conn, authorized));
             }
             Ok(Err(e)) => log(&format!("connect {}: {}", route.label(), proxy::redact_text(&e.to_string()))),

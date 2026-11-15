@@ -25,6 +25,15 @@ pub enum Route {
 }
 
 impl Route {
+    /// Короткое описание маршрута для отчёта: без адреса и порта прокси.
+    pub fn describe(&self) -> String {
+        match self {
+            Route::Direct => "direct".to_string(),
+            Route::Socks5(a) => format!("socks5, {}", crate::sysinfo::describe_proxy(a)),
+            Route::HttpBridge(a) => format!("http proxy through a local bridge, {}", crate::sysinfo::describe_proxy(a)),
+        }
+    }
+
     pub fn label(&self) -> String {
         match self {
             Route::Direct => tr!("напрямую", "directly").to_string(),
@@ -211,7 +220,7 @@ pub fn parse_reg_value(output: &str, name: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn reg_query(name: &str) -> Option<String> {
-    let out = std::process::Command::new("reg")
+    let out = std::process::Command::new(crate::util::system_exe("reg"))
         .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", name])
         .output()
         .ok()?;
@@ -223,10 +232,8 @@ fn system_proxy_routes() -> Vec<Route> {
     #[cfg(windows)]
     {
         let enabled = reg_query("ProxyEnable").map(|v| v.trim() == "0x1" || v.trim() == "1").unwrap_or(false);
-        if enabled {
-            if let Some(server) = reg_query("ProxyServer") {
-                return parse_proxy_server(&server);
-            }
+        if enabled && let Some(server) = reg_query("ProxyServer") {
+            return parse_proxy_server(&server);
         }
     }
     vec![]

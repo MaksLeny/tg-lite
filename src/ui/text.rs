@@ -267,6 +267,7 @@ pub(super) fn read_mark(id: i32, read_out: i32) -> &'static str {
 }
 
 /// То же, но с отметками прочтения: `read_out` задан только в личных чатах.
+#[cfg(test)]
 pub(super) fn build_message_lines_marks(
     msgs: &[ChatMsg],
     width: usize,
@@ -276,6 +277,46 @@ pub(super) fn build_message_lines_marks(
     read_out: Option<i32>,
     marked: &std::collections::BTreeSet<i32>,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    let opts = LineOpts { bubble_pct, selected, sel_bg, read_out, marked, grouped: false, divider: None };
+    build_message_lines_opts(msgs, width, &opts)
+}
+
+/// Как показывать историю: общая часть для всех видов окна.
+pub(super) struct LineOpts<'a> {
+    pub bubble_pct: usize,
+    pub selected: Option<usize>,
+    pub sel_bg: Color,
+    /// Отметки прочтения своих сообщений; задан только в личных чатах.
+    pub read_out: Option<i32>,
+    pub marked: &'a std::collections::BTreeSet<i32>,
+    /// Виды «Мессенджер» и «Два окна»: имя автора один раз над серией сообщений, у каждого сообщения время в конце.
+    pub grouped: bool,
+    /// Номер первого непрочитанного сообщения: перед ним рисуется строка «новые сообщения».
+    pub divider: Option<i32>,
+}
+
+/// Серия сообщений: подряд от одного автора, не позже чем через 5 минут, в один день, без пересылки и ответа.
+/// У продолжения серии нет собственной строки с именем.
+fn continues_series(prev: &ChatMsg, m: &ChatMsg, same_day: bool) -> bool {
+    same_day
+        && prev.outgoing == m.outgoing
+        && (m.outgoing || prev.sender == m.sender)
+        && (0..=300).contains(&(m.ts - prev.ts))
+        && m.fwd.is_none()
+        && m.reply_to.is_none()
+}
+
+/// Строка «новые сообщения» между прочитанным и непрочитанным.
+pub(super) fn new_messages_line() -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {} ──", tr!("новые сообщения", "new messages")),
+        Style::new().fg(mention()).add_modifier(Modifier::BOLD),
+    ))
+    .centered()
+}
+
+pub(super) fn build_message_lines_opts(msgs: &[ChatMsg], width: usize, opts: &LineOpts) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    let LineOpts { bubble_pct, selected, sel_bg, read_out, marked, grouped, divider } = *opts;
     let tz = jiff::tz::TimeZone::system();
     let today = local_date(jiff::Timestamp::now().as_second(), &tz);
     let bubble = (width * bubble_pct / 100).clamp(16, width.saturating_sub(4).max(16));
@@ -285,13 +326,20 @@ pub(super) fn build_message_lines_marks(
 
     for (idx, m) in msgs.iter().enumerate() {
         let day = local_date(m.ts, &tz);
+        let mut new_day = false;
         if let Some(d) = day
             && Some(d) != prev_day
         {
             let label = format!("── {} ──", day_label(d, today));
             lines.push(Line::from(Span::styled(label, Style::new().fg(muted()))).centered());
             prev_day = day;
+            new_day = true;
         }
+        let at_divider = divider == Some(m.id) && m.id > 0;
+        if at_divider {
+            lines.push(new_messages_line());
+        }
+        let cont = grouped && idx > 0 && !at_divider && continues_series(&msgs[idx - 1], m, !new_day);
         let first = lines.len();
         let time = if m.edited { trf!("{} (изм.)", "{} (edited)", m.time) } else { m.time.clone() };
         let note = |text: String| Span::styled(text, Style::new().fg(muted()).add_modifier(Modifier::ITALIC));
@@ -316,27 +364,39 @@ pub(super) fn build_message_lines_marks(
             });
         }
 
+        // Отметка прочтения и цвет её: «√»/«√√».
+        let mark_text = read_out.map(|r| read_mark(m.id, r)).unwrap_or("");
+        let mark_color = if read_out.is_some_and(|r| m.id > 0 && m.id <= r) { own() } else { muted() };
         if m.outgoing {
-            lines.push(
-                Line::from(vec![
-                    Span::styled(
-                        m.views.map(|v| trf!("{} просм. · ", "{} views · ", short_count(v))).unwrap_or_default(),
-                        Style::new().fg(muted()),
-                    ),
-                    Span::styled(format!("{time} "), Style::new().fg(muted())),
-                    Span::styled(tr!("Я", "Me"), Style::new().fg(own()).add_modifier(Modifier::BOLD)),
-                    Span::styled(
-                        read_out.map(|r| read_mark(m.id, r)).unwrap_or(""),
-                        Style::new().fg(if read_out.is_some_and(|r| m.id > 0 && m.id <= r) { own() } else { muted() }),
-                    ),
-                ])
-                .right_aligned(),
-            );
+            if !cont {
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            m.views.map(|v| trf!("{} просм. · ", "{} views · ", short_count(v))).unwrap_or_default(),
+                            Style::new().fg(muted()),
+                        ),
+                        Span::styled(format!("{time} "), Style::new().fg(muted())),
+                        Span::styled(tr!("Я", "Me"), Style::new().fg(own()).add_modifier(Modifier::BOLD)),
+                        Span::styled(mark_text, Style::new().fg(mark_color)),
+                    ])
+                    .right_aligned(),
+                );
+            }
             for n in &notes {
                 lines.push(Line::from(vec![note(truncate(n, inner)), Span::styled(" │", Style::new().fg(own()))]).right_aligned());
             }
-            for l in wrap_lines(&m.text, inner) {
-                lines.push(Line::from(vec![Span::raw(l), Span::styled(" │", Style::new().fg(own()))]).right_aligned());
+            // У продолжения серии время стоит в конце последней строки: место под него оставляем при переносе.
+            let tail = if cont { format!("  {time}{mark_text}") } else { String::new() };
+            let wrapped = wrap_lines(&m.text, inner.saturating_sub(display_width(&tail)));
+            let last = wrapped.len().saturating_sub(1);
+            for (i, l) in wrapped.into_iter().enumerate() {
+                let mut spans = vec![Span::raw(l)];
+                if cont && i == last {
+                    spans.push(Span::styled(format!("  {time}"), Style::new().fg(muted())));
+                    spans.push(Span::styled(mark_text, Style::new().fg(mark_color)));
+                }
+                spans.push(Span::styled(" │", Style::new().fg(own())));
+                lines.push(Line::from(spans).right_aligned());
             }
             for spans in extra_rows(m, inner) {
                 let mut spans = spans;
@@ -345,21 +405,34 @@ pub(super) fn build_message_lines_marks(
             }
         } else {
             let color = name_color(&m.sender);
-            let mut head = Vec::new();
-            if m.mentioned {
-                head.push(Span::styled("@ ", Style::new().fg(mention()).add_modifier(Modifier::BOLD)));
+            if !cont {
+                let mut head = Vec::new();
+                if m.mentioned {
+                    head.push(Span::styled("@ ", Style::new().fg(mention()).add_modifier(Modifier::BOLD)));
+                }
+                head.push(Span::styled(m.sender.clone(), Style::new().fg(color).add_modifier(Modifier::BOLD)));
+                head.push(Span::styled(format!(" {time}"), Style::new().fg(muted())));
+                if let Some(v) = m.views {
+                    head.push(Span::styled(trf!(" · {} просм.", " · {} views", short_count(v)), Style::new().fg(muted())));
+                }
+                lines.push(Line::from(head));
             }
-            head.push(Span::styled(m.sender.clone(), Style::new().fg(color).add_modifier(Modifier::BOLD)));
-            head.push(Span::styled(format!(" {time}"), Style::new().fg(muted())));
-            if let Some(v) = m.views {
-                head.push(Span::styled(trf!(" · {} просм.", " · {} views", short_count(v)), Style::new().fg(muted())));
-            }
-            lines.push(Line::from(head));
             for n in &notes {
                 lines.push(Line::from(vec![Span::styled("│ ", Style::new().fg(color)), note(truncate(n, inner))]));
             }
-            for l in wrap_lines(&m.text, inner) {
-                lines.push(Line::from(vec![Span::styled("│ ", Style::new().fg(color)), Span::raw(l)]));
+            let tail = if cont { format!("  {time}") } else { String::new() };
+            let wrapped = wrap_lines(&m.text, inner.saturating_sub(display_width(&tail)));
+            let last = wrapped.len().saturating_sub(1);
+            for (i, l) in wrapped.into_iter().enumerate() {
+                let mut spans = vec![Span::styled("│ ", Style::new().fg(color)), Span::raw(l)];
+                if cont && i == last {
+                    spans.push(Span::styled(tail.clone(), Style::new().fg(muted())));
+                }
+                lines.push(Line::from(spans));
+            }
+            if cont && m.mentioned {
+                // Упоминание видно и у продолжения серии: значок «@» в начале первой строки.
+                lines[first].spans.insert(0, Span::styled("@ ", Style::new().fg(mention()).add_modifier(Modifier::BOLD)));
             }
             for spans in extra_rows(m, inner) {
                 let mut row = vec![Span::styled("│ ", Style::new().fg(color))];
@@ -385,14 +458,45 @@ pub(super) fn build_message_lines_marks(
             lines[first].spans.insert(0, Span::styled(f, Style::new().fg(own()).add_modifier(Modifier::BOLD)));
         }
         ranges.push((first, lines.len()));
-        lines.push(Line::from(""));
+        // В виде «по авторам» пустая строка только между сериями.
+        let next_continues = grouped
+            && msgs.get(idx + 1).is_some_and(|n| {
+                continues_series(m, n, day.is_some() && local_date(n.ts, &tz) == day) && !(divider == Some(n.id) && n.id > 0)
+            });
+        if !next_continues {
+            lines.push(Line::from(""));
+        }
     }
     (lines, ranges)
 }
 
 /// Строки под текстом сообщения: реакции и кнопки бота (ряд кнопок — одна строка).
+/// Доля голосов за вариант в процентах, всегда от 0 до 100. Числа приходят от сервера и могут быть любыми:
+/// больше 21 миллиона голосов (в `i32` умножение на 100 переполнялось), вариант больше общего числа, минус.
+pub(super) fn poll_percent(voters: i32, total: i32) -> usize {
+    if total <= 0 {
+        return 0;
+    }
+    (i64::from(voters.max(0)) * 100 / i64::from(total)).clamp(0, 100) as usize
+}
+
 pub(super) fn extra_rows(m: &ChatMsg, inner: usize) -> Vec<Vec<Span<'static>>> {
     let mut rows = Vec::new();
+    if let Some(l) = &m.link {
+        // Карточка ссылки: сайт и заголовок, ниже начало описания. Данные уже пришли от Telegram, программа никуда не ходит.
+        let bar = || Span::styled("▎ ", Style::new().fg(muted()));
+        let head = match (l.site.is_empty(), l.title.is_empty()) {
+            (false, false) => format!("{} — {}", l.site, l.title),
+            (true, false) => l.title.clone(),
+            _ => l.site.clone(),
+        };
+        if !head.is_empty() {
+            rows.push(vec![bar(), Span::styled(truncate(&head, inner.saturating_sub(2)), Style::new().add_modifier(Modifier::BOLD))]);
+        }
+        if !l.desc.is_empty() {
+            rows.push(vec![bar(), Span::styled(truncate(&l.desc.replace('\n', " "), inner.saturating_sub(2)), Style::new().fg(muted()))]);
+        }
+    }
     if !m.reactions.is_empty() {
         let mut spans = Vec::new();
         for r in &m.reactions {
@@ -413,7 +517,7 @@ pub(super) fn extra_rows(m: &ChatMsg, inner: usize) -> Vec<Vec<Span<'static>>> {
             Style::new().add_modifier(Modifier::BOLD),
         )]);
         for o in &p.options {
-            let pct = if p.total > 0 { (o.voters * 100 / p.total) as usize } else { 0 };
+            let pct = poll_percent(o.voters, p.total);
             let filled = pct / 10;
             let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
             let mark = if o.chosen { "●" } else { "○" };
@@ -441,18 +545,6 @@ pub(super) fn extra_rows(m: &ChatMsg, inner: usize) -> Vec<Vec<Span<'static>>> {
         rows.push(vec![Span::styled(truncate(&text, inner), Style::new().fg(palette().fg.unwrap_or(Color::Reset)))]);
     }
     rows
-}
-
-/// Текст переписки для сохранения в файл: «дата время имя: текст».
-pub(super) fn export_text(chat_name: &str, msgs: &[ChatMsg]) -> String {
-    let tz = jiff::tz::TimeZone::system();
-    let mut out = trf!("Переписка: {chat_name}\nСохранено Tg-Lite {VERSION}\n\n", "Chat: {chat_name}\nSaved by Tg-Lite {VERSION}\n\n");
-    for m in msgs {
-        let when =
-            jiff::Timestamp::from_second(m.ts).map(|t| t.to_zoned(tz.clone()).strftime("%d.%m.%Y %H:%M").to_string()).unwrap_or_default();
-        out.push_str(&format!("[{when}] {}: {}\n", m.sender, m.text.replace('\n', "\n    ")));
-    }
-    out
 }
 
 pub(super) fn beep() {

@@ -27,9 +27,14 @@ pub struct Secrets {
     pub api_id: i32,
     pub api_hash: String,
     pub session: SessionBlob,
-    /// Нет в хранилищах версий 0.0.1/0.0.2: тогда берутся значения по умолчанию.
-    #[serde(default)]
+    /// Нет в хранилищах версий 0.0.1/0.0.2: тогда берутся значения по умолчанию. Непонятное поле (скажем, значение
+    /// из другой версии программы) не мешает открыть хранилище: остальное читается, а оно получает значение по умолчанию.
+    #[serde(default, deserialize_with = "lenient_settings")]
     pub settings: Settings,
+}
+
+fn lenient_settings<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Settings, D::Error> {
+    Ok(Settings::from_json_lenient(serde_json::Value::deserialize(d)?))
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -268,6 +273,9 @@ pub struct Saver {
     write_lock: Mutex<()>,
     /// После самоуничтожения хранилище больше не пишется (иначе файл появился бы снова).
     wiped: std::sync::atomic::AtomicBool,
+    /// Ошибка последнего фонового сохранения; интерфейс показывает её один раз. Без этого смена пароля на полном или
+    /// недоступном диске выглядела бы удавшейся, а при следующем запуске понадобился бы прежний пароль.
+    save_error: Mutex<Option<String>>,
 }
 
 struct SaverState {
@@ -292,6 +300,7 @@ impl Saver {
             state: Mutex::new(SaverState { password, settings }),
             write_lock: Mutex::new(()),
             wiped: std::sync::atomic::AtomicBool::new(false),
+            save_error: Mutex::new(None),
         }
     }
 
@@ -352,11 +361,26 @@ impl Saver {
     /// Сохраняет в фоне, не задерживая интерфейс (Argon2 на слабом ПК занимает заметное время).
     pub fn save_in_background(self: &std::sync::Arc<Self>) {
         let s = std::sync::Arc::clone(self);
-        std::thread::spawn(move || {
-            if let Err(e) = s.save() {
+        std::thread::spawn(move || s.save_remembering());
+    }
+
+    /// Сохраняет; ошибку пишет в журнал и запоминает для `take_save_error`.
+    fn save_remembering(&self) {
+        // Замок ошибки берём только после записи: Argon2 идёт секунды, а интерфейс спрашивает ошибку каждый такт.
+        let result = self.save();
+        let mut slot = self.save_error.lock().unwrap_or_else(|e| e.into_inner());
+        match result {
+            Ok(()) => *slot = None, // диск снова в порядке: старое сообщение больше не нужно
+            Err(e) => {
                 crate::util::log(&format!("не удалось сохранить хранилище: {e}"));
+                *slot = Some(e.to_string());
             }
-        });
+        }
+    }
+
+    /// Ошибка фонового сохранения, если она была с прошлого вызова.
+    pub fn take_save_error(&self) -> Option<String> {
+        self.save_error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
 
@@ -388,6 +412,18 @@ mod tests {
     }
 
     #[test]
+    fn vault_with_an_unknown_setting_value_still_opens() {
+        // Запись другой версии: неизвестный вид прокси. Раньше такое хранилище не открывалось совсем (с верным паролем).
+        let mut v = serde_json::to_value(sample()).unwrap();
+        let settings = v.as_object_mut().unwrap().get_mut("settings").unwrap().as_object_mut().unwrap();
+        settings.insert("proxy_mode".into(), serde_json::json!("Socks5"));
+        settings.insert("lock_minutes".into(), serde_json::json!(30));
+        let s: Secrets = serde_json::from_value(v).unwrap();
+        assert_eq!((s.settings.lock_minutes, s.settings.proxy_mode), (30, crate::settings::ProxyMode::Auto));
+        assert_eq!(s.api_id, 12345);
+    }
+
+    #[test]
     fn wrong_password_is_rejected() {
         let enc = encrypt(&sample(), "correct horse").unwrap();
         let err = decrypt(&enc, "wrong").err().unwrap();
@@ -412,6 +448,37 @@ mod tests {
         assert!(saver.is_wiped());
         saver.save().unwrap(); // не должен вернуть файл
         assert!(!path.exists(), "после самоуничтожения хранилище не пишется");
+    }
+
+    #[test]
+    fn a_failed_background_save_is_remembered_once_and_cleared_by_a_good_one() {
+        // Путь, который нельзя создать: «папка» на самом деле файл.
+        let blocker = std::env::temp_dir().join(format!("tglt-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, b"x").unwrap();
+        let bad = blocker.join("sub").join("tglite.vault");
+        let make = |path: std::path::PathBuf| {
+            Saver::new(
+                VaultFile::new(path),
+                1,
+                "abcdef0123456789".into(),
+                std::sync::Arc::new(VaultSession::from_blob(SessionBlob::default())),
+                "pw".into(),
+                Settings::default(),
+            )
+        };
+        let saver = make(bad);
+        assert!(saver.take_save_error().is_none());
+        saver.save_remembering();
+        assert!(saver.take_save_error().is_some(), "ошибка записи запомнена");
+        assert!(saver.take_save_error().is_none(), "и показывается один раз");
+        let _ = std::fs::remove_file(&blocker);
+        // Исправный диск: ошибки нет.
+        let good = std::env::temp_dir().join(format!("tglt-goodsave-{}.vault", std::process::id()));
+        let saver = make(good.clone());
+        saver.save_remembering();
+        assert!(saver.take_save_error().is_none());
+        assert!(good.exists());
+        let _ = std::fs::remove_file(&good);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "tg-lite"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 
 [dependencies]
@@ -15,6 +15,7 @@ grammers-mtsender = "0.11.0"
 grammers-session = { version = "0.11.0", default-features = false, features = ["serde"] }
 jiff = "0.2.38"
 jpeg-decoder = { version = "0.3.2", default-features = false }
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
 png = "0.17"
 rand = "0.10.3"
 ratatui = "0.30.2"

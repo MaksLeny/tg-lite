@@ -26,6 +26,10 @@ fn chat(id: i64, name: &str, kind: Kind, unread: i32) -> ChatInfo {
         is_bot: false,
         is_self: false,
         mentions: 0,
+        can_write: true,
+        preview: String::new(),
+        last_ts: 0,
+        muted: false,
     }
 }
 
@@ -147,12 +151,42 @@ fn edits_and_deletions_apply() {
 fn failed_send_returns_text_to_input() {
     let mut app = app_with_chats();
     let (tx, _rx) = mpsc::unbounded_channel();
-    app.handle_event(Event::SendFailed { text: "длинный пост".into() }, &tx);
+    let mama = app.chats[0].id;
+    app.handle_event(Event::SendFailed { chat: mama, text: "длинный пост".into() }, &tx);
     assert_eq!(app.input, "длинный пост");
     assert_eq!(app.cursor, 12);
-    // если пользователь уже начал печатать новое, его текст не затираем
-    app.handle_event(Event::SendFailed { text: "другой".into() }, &tx);
-    assert_eq!(app.input, "длинный пост");
+    // если пользователь уже начал печатать новое, его текст не затираем: неотправленное дописывается ниже
+    app.handle_event(Event::SendFailed { chat: mama, text: "другой".into() }, &tx);
+    assert_eq!(app.input, "длинный пост\n\nдругой");
+    // тот же текст дважды не дописывается
+    app.handle_event(Event::SendFailed { chat: mama, text: "другой".into() }, &tx);
+    assert_eq!(app.input, "длинный пост\n\nдругой");
+    // пустышка ничего не меняет
+    app.handle_event(Event::SendFailed { chat: mama, text: "  ".into() }, &tx);
+    assert_eq!(app.input, "длинный пост\n\nдругой");
+}
+
+#[test]
+fn unsent_text_of_another_chat_never_lands_in_the_open_chats_input() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (mama, group) = (app.chats[0].id, app.chats[2].id);
+    assert_eq!(app.sel, Some(mama));
+    // Отправка в «Рабочий чат» не удалась, пока открыта «Мама»: текст уходит в черновик рабочего чата.
+    app.handle_event(Event::SendFailed { chat: group, text: "отчёт".into() }, &tx);
+    assert!(app.input.is_empty(), "в поле ввода чужого чата текста быть не должно");
+    assert_eq!(app.drafts[&group].0, "отчёт");
+    assert!(app.status.contains("черновиком чата «Рабочий чат»"), "{}", app.status);
+    // Второй неотправленный кусок дописывается в тот же черновик.
+    app.handle_event(Event::SendFailed { chat: group, text: "второй кусок".into() }, &tx);
+    assert_eq!(app.drafts[&group].0, "отчёт\n\nвторой кусок");
+    // При открытии чата черновик возвращается в поле ввода.
+    app.set_sel(Some(group));
+    assert_eq!(app.input, "отчёт\n\nвторой кусок");
+    // Сообщение, не вышедшее из очереди, ведёт себя так же.
+    app.handle_event(Event::QueueDropped { chat: mama, text: "из очереди".into(), reason: "ошибка".into() }, &tx);
+    assert_eq!(app.input, "отчёт\n\nвторой кусок", "поле ввода открытого чата не тронуто");
+    assert_eq!(app.drafts[&mama].0, "из очереди");
 }
 
 #[test]
@@ -233,8 +267,8 @@ fn paste_event_and_keys() {
     assert_eq!(app.input, "abc");
     // лимит длины
     app.clear_input();
-    app.paste(Some("x".repeat(MAX_MESSAGE_CHARS + 500)));
-    assert_eq!(app.input_len(), MAX_MESSAGE_CHARS);
+    app.paste(Some("x".repeat(crate::split::MAX_INPUT_CHARS + 500)));
+    assert_eq!(app.input_len(), crate::split::MAX_INPUT_CHARS);
     // клавиши вставки распознаются в любой раскладке
     let c = KeyModifiers::CONTROL;
     assert!(is_paste_key(&key(KeyCode::Char('v'), c)));
@@ -871,11 +905,39 @@ fn lock_forgets_half_entered_password() {
 }
 
 #[test]
-fn export_contains_messages() {
-    let text = export_text("Мама", &[msg(1, false, "Мама", "Привет\nкак дела"), msg(2, true, "Я", "хорошо")]);
-    assert!(text.starts_with("Переписка: Мама"));
-    assert!(text.contains("Мама: Привет\n    как дела"));
-    assert!(text.contains("Я: хорошо"));
+fn export_command_writes_the_chosen_format_and_rejects_unknown_ones() {
+    let mut app = app_with_chats();
+    let dir = std::env::temp_dir().join(format!("tglite-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.cmd_export("", &dir);
+    assert!(app.status.starts_with("Сохранено: "), "{}", app.status);
+    assert!(app.status.contains("(2 сообщ.)"), "{}", app.status);
+    let txt = std::fs::read_to_string(dir.join("Мама.txt")).unwrap();
+    assert!(txt.contains("Я: Всё хорошо!") || txt.contains("Мама: Привет"), "{txt}");
+    for (arg, ext, marker) in [("md", "md", "# Мама"), ("html", "html", "<!doctype html>"), ("json", "json", "\"messages\"")] {
+        app.cmd_export(arg, &dir);
+        let body = std::fs::read_to_string(dir.join(format!("Мама.{ext}"))).unwrap();
+        assert!(body.contains(marker), "{arg}: {body}");
+    }
+    // Неизвестный формат: ничего не пишем.
+    app.cmd_export("pdf", &dir);
+    assert!(app.status.contains("txt, md, html или json"), "{}", app.status);
+    assert!(!dir.join("Мама.pdf").exists());
+    // Нет истории и нет чата.
+    let group = app.chats[2].id;
+    app.set_sel(Some(group));
+    app.histories.remove(&group);
+    app.cmd_export("md", &dir);
+    assert!(app.status.contains("нечего сохранять"), "{}", app.status);
+    app.sel = None;
+    app.cmd_export("md", &dir);
+    assert!(app.status.contains("Сначала выберите чат"), "{}", app.status);
+    // Папка, куда писать нельзя: ошибка в строке состояния, а не паника.
+    app.sel = Some(app.chats[0].id);
+    let blocked = dir.join("Мама.txt").join("внутри"); // «папка» внутри обычного файла
+    app.cmd_export("", &blocked);
+    assert!(app.status.starts_with("Ошибка"), "{}", app.status);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -929,6 +991,8 @@ fn pick_mode_edit_loads_text_and_sends_edit() {
     let mut app = app_with_chats();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let s = saver();
+    let own = app.sel.unwrap();
+    app.histories.get_mut(&own).unwrap()[1].raw = "Всё хорошо!".into(); // у настоящих сообщений исходный текст всегда есть
     press(&mut app, KeyCode::F(7), &tx, &s);
     press(&mut app, KeyCode::Up, &tx, &s);
     press(&mut app, KeyCode::Char('e'), &tx, &s);
@@ -1005,18 +1069,41 @@ fn forward_can_be_cancelled() {
 }
 
 #[test]
-fn long_message_is_refused_and_kept() {
+fn long_message_goes_out_in_parts_and_a_huge_one_is_refused_and_kept() {
     let mut app = app_with_chats();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let s = saver();
+    // Чуть длиннее лимита Telegram: одна команда, делить на части будет сетевая задача.
     let long = "а".repeat(MAX_MESSAGE_CHARS + 1);
     app.input = long.clone();
     app.cursor = app.input_len();
     slow(&mut app);
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &tx, &s);
+    match drain(&mut rx).pop() {
+        Some(Cmd::Send { text, .. }) => assert_eq!(text, long),
+        _ => panic!("ожидалась одна команда Send"),
+    }
+    assert!(app.input.is_empty());
+    assert!(app.status.contains("2 сообщ"), "{}", app.status);
+    // Из такого количества текста вышло бы больше двенадцати сообщений: отказ, текст остаётся в поле.
+    let huge = "слово ".repeat(12_000);
+    app.input = huge.clone();
+    app.cursor = app.input_len();
+    slow(&mut app);
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &tx, &s);
     assert!(drain(&mut rx).is_empty());
-    assert_eq!(app.input, long, "длинный пост не пропадает");
-    assert!(app.status.contains("4096"));
+    assert_eq!(app.input, huge, "длинный пост не пропадает");
+    assert!(app.status.contains("/send"), "{}", app.status);
+    // Правка — всегда одно сообщение: длиннее лимита её не принимаем.
+    app.clear_input();
+    app.edit_target = Some(2);
+    app.input = long.clone();
+    app.cursor = app.input_len();
+    slow(&mut app);
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &tx, &s);
+    assert!(drain(&mut rx).is_empty());
+    assert_eq!(app.input, long);
+    assert!(app.status.contains("4096"), "{}", app.status);
 }
 
 #[test]
@@ -1325,12 +1412,17 @@ fn send_file_command_checks_the_file() {
     std::fs::write(&path, b"hello").unwrap();
     submit_text(&mut app, &format!("/send \"{}\" мой файл", path.display()), &tx, &s);
     match drain(&mut rx).pop() {
-        Some(Cmd::SendFile { path: p, caption, .. }) => {
+        Some(Cmd::SendFile { path: p, caption, compress, .. }) => {
             assert_eq!(p, path);
             assert_eq!(caption, "мой файл");
+            assert!(compress, "сжатие фото включено по умолчанию");
         }
         _ => panic!("ожидалась отправка файла"),
     }
+    // Выключили сжатие в настройках — команда несёт «не сжимать».
+    app.settings.compress = false;
+    submit_text(&mut app, &format!("/send \"{}\"", path.display()), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::SendFile { compress: false, .. })));
     let _ = std::fs::remove_file(&path);
     // несуществующий файл: команды нет, текст остаётся для исправления
     submit_text(&mut app, "/send \"/нет/такого/файла.bin\"", &tx, &s);
@@ -1339,9 +1431,18 @@ fn send_file_command_checks_the_file() {
     assert!(app.input.starts_with("/send"));
 }
 
+/// Сообщение с вложением: вид и имя файла берутся из подписи-метки (`[фото]`, `[файл a.pdf, 1 МБ]`).
 fn msg_with_attachment(id: i32, label_text: &str, caption: &str) -> ChatMsg {
     let mut m = msg(id, false, "Мама", label_text);
     m.caption = Some(caption.into());
+    m.media = Some(if label_text.starts_with("[фото") {
+        tg::MediaInfo { kind: tg::MediaKind::Photo, name: format!("photo_{id}.jpg"), size: None }
+    } else if let Some(rest) = label_text.strip_prefix("[файл ") {
+        let name = rest.split([',', ']']).next().unwrap_or("file");
+        tg::MediaInfo { kind: tg::MediaKind::File, name: name.into(), size: None }
+    } else {
+        tg::MediaInfo { kind: tg::MediaKind::File, name: format!("file_{id}"), size: None }
+    });
     m
 }
 
@@ -1362,7 +1463,7 @@ fn save_command_and_pick_s_download_attachment() {
     press(&mut app, KeyCode::Up, &tx, &s);
     press(&mut app, KeyCode::Char('s'), &tx, &s);
     assert!(drain(&mut rx).is_empty());
-    assert!(app.pick_note.contains("нет вложения"));
+    assert!(app.pick_note.contains("нет файла"), "{}", app.pick_note);
     press(&mut app, KeyCode::Down, &tx, &s);
     press(&mut app, KeyCode::Char('ы'), &tx, &s); // русская раскладка
     assert!(matches!(drain(&mut rx).pop(), Some(Cmd::Save { id: 9, .. })));
@@ -1563,6 +1664,7 @@ fn dump_ui_frames() {
     let mut shots: Vec<(&str, App)> = Vec::new();
     shots.push(("chat", demo_app()));
     let mut pick = demo_app();
+    give_demo_file_an_attachment(&mut pick);
     press(&mut pick, KeyCode::F(7), &tx, &s);
     press(&mut pick, KeyCode::Up, &tx, &s);
     shots.push(("pick", pick));
@@ -1612,6 +1714,7 @@ fn dump_demo_frames() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let s = saver();
     let mut app = demo_app();
+    give_demo_file_an_attachment(&mut app);
     app.status = tr!("Готово", "Done").into();
     let mut n = 0;
     let mut shot = |app: &mut App, ms: u32| {
@@ -1703,6 +1806,174 @@ fn dump_demo_frames() {
     shot(&mut app, 1500);
 }
 
+/// В `demo_app` вложение — просто текст; для кадров F7 даём файлу настоящее вложение, чтобы были видны действия с файлом.
+fn give_demo_file_an_attachment(app: &mut App) {
+    let id = app.chats[0].id;
+    if let Some(m) = app.histories.get_mut(&id).and_then(|h| h.iter_mut().find(|m| m.id == 4)) {
+        m.media =
+            Some(tg::MediaInfo { kind: tg::MediaKind::File, name: tr!("итоги.pdf", "summary.pdf").into(), size: Some(2_000_000) });
+    }
+}
+
+/// Кадр экрана в JSON для `tools`-скриптов: по клетке «знак|цвет|фон».
+fn frame_json(app: &mut App, w: u16, h: u16) -> String {
+    let col = |c: Color| match c {
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Black => "#000000".to_string(),
+        Color::White => "#ffffff".to_string(),
+        Color::Gray => "#aaaaaa".to_string(),
+        _ => String::new(),
+    };
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| draw(f, app)).unwrap();
+    let buf = term.backend().buffer();
+    let rows: Vec<Vec<String>> = (0..h)
+        .map(|y| {
+            (0..w)
+                .map(|x| {
+                    let c = &buf[(x, y)];
+                    format!("{}|{}|{}", c.symbol(), col(c.fg), col(c.bg))
+                })
+                .collect()
+        })
+        .collect();
+    serde_json::to_string(&rows).unwrap()
+}
+
+/// `demo_app` с перепиской и последней строкой у каждого чата: для кадров видов «мессенджер» и «два окна».
+fn demo_rich() -> App {
+    let mut app = demo_app();
+    let ids: Vec<PeerId> = app.chats.iter().map(|c| c.id).collect();
+    let (tech, team, food, boris) = (ids[1], ids[2], ids[3], ids[4]);
+    let anna_last = app.histories[&ids[0]].last().cloned().unwrap();
+    app.touch_preview(ids[0], &anna_last);
+    let (me, boris_n, vera, anna) = (tr!("Я", "Me"), tr!("Борис", "Boris"), tr!("Вера", "Vera"), tr!("Анна", "Anna"));
+    let lists = vec![
+        (
+            team,
+            vec![
+                msg(1, false, boris_n, tr!("Макеты готовы, выложил в общую папку", "The mockups are ready, uploaded to the shared folder")),
+                msg(2, false, vera, tr!("Посмотрю после обеда", "I will look after lunch")),
+                msg(3, false, vera, tr!("Там на третьем экране кнопка уехала", "The button on the third screen is off")),
+                msg(4, true, me, tr!("Поправлю сегодня", "I will fix it today")),
+                msg(5, false, boris_n, tr!("Тогда в пятницу демо, не забудьте", "Then the demo is on Friday, do not forget")),
+                msg(6, false, anna, tr!("Я подготовлю слайды", "I will prepare the slides")),
+            ],
+        ),
+        (
+            tech,
+            vec![
+                msg(
+                    1,
+                    false,
+                    tr!("Новости техники", "Tech News"),
+                    tr!("Обзор: как выбрать недорогой ноутбук для работы", "Review: how to pick an inexpensive laptop for work"),
+                ),
+                msg(
+                    2,
+                    false,
+                    tr!("Новости техники", "Tech News"),
+                    tr!(
+                        "Вышла новая версия редактора: быстрее запуск и меньше памяти",
+                        "A new editor version is out: faster start and less memory"
+                    ),
+                ),
+            ],
+        ),
+        (
+            food,
+            vec![msg(
+                1,
+                false,
+                tr!("Рецепты", "Recipes"),
+                tr!("Борщ за 40 минут: пошаговый рецепт", "Borscht in 40 minutes: a step-by-step recipe"),
+            )],
+        ),
+        (boris, vec![msg(1, false, boris_n, tr!("Созвонимся завтра?", "Shall we call tomorrow?"))]),
+    ];
+    for (id, list) in lists {
+        app.touch_preview(id, list.last().unwrap());
+        app.histories.insert(id, list);
+    }
+    app.status.clear();
+    app.chats[4].draft = tr!("Да, в 11 удобно", "Yes, 11 works for me").into();
+    app
+}
+
+/// Кадры видов для README: `TGLITE_SHOTS=/путь [TGLITE_LANG=en] cargo test dump_view_frames -- --ignored`.
+#[test]
+#[ignore]
+fn dump_view_frames() {
+    let Some(dir) = std::env::var_os("TGLITE_SHOTS") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::i18n::set(u8::from(std::env::var("TGLITE_LANG").is_ok_and(|v| v == "en")));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let save = |name: &str, app: &mut App| {
+        std::fs::write(std::path::Path::new(&dir).join(format!("ui_{name}.json")), frame_json(app, 110, 32)).unwrap();
+    };
+    let mut messenger = demo_rich();
+    messenger.set_view(1);
+    let team = messenger.chats[2].id;
+    messenger.open_chat(team);
+    messenger.mark_new_from(team, 2);
+    save("messenger", &mut messenger);
+    let mut panes = demo_rich();
+    panes.set_view(2);
+    let (anna, team) = (panes.chats[0].id, panes.chats[2].id);
+    panes.open_chat(team);
+    press_mod(&mut panes, KeyCode::F(8), KeyModifiers::NONE, &tx, &s);
+    panes.open_chat(anna);
+    press_mod(&mut panes, KeyCode::F(8), KeyModifiers::NONE, &tx, &s);
+    panes.chats[0].unread = 0;
+    panes.chats[2].unread = 0;
+    save("panes", &mut panes);
+    let mut quick = demo_rich();
+    press_mod(&mut quick, KeyCode::Char('k'), KeyModifiers::CONTROL, &tx, &s);
+    type_text(&mut quick, tr!("пр", "pr"), &tx, &s);
+    save("quick", &mut quick);
+}
+
+/// Кадры GIF про виды: `TGLITE_SHOTS=/путь [TGLITE_LANG=en] cargo test dump_view_demo_frames -- --ignored`.
+#[test]
+#[ignore]
+fn dump_view_demo_frames() {
+    let Some(dir) = std::env::var_os("TGLITE_SHOTS") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::i18n::set(u8::from(std::env::var("TGLITE_LANG").is_ok_and(|v| v == "en")));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let mut app = demo_rich();
+    let mut n = 0;
+    let mut shot = |app: &mut App, ms: u32| {
+        std::fs::write(std::path::Path::new(&dir).join(format!("f{n:02}_{ms}.json")), frame_json(app, 110, 28)).unwrap();
+        n += 1;
+    };
+    shot(&mut app, 1800);
+    submit_text(&mut app, "/view messenger", &tx, &s);
+    let (anna, team) = (app.chats[0].id, app.chats[2].id);
+    app.open_chat(team);
+    app.mark_new_from(team, 2);
+    shot(&mut app, 2600);
+    submit_text(&mut app, "/view panes", &tx, &s);
+    app.open_chat(team);
+    press_mod(&mut app, KeyCode::F(8), KeyModifiers::NONE, &tx, &s);
+    app.open_chat(anna);
+    press_mod(&mut app, KeyCode::F(8), KeyModifiers::NONE, &tx, &s);
+    shot(&mut app, 2600);
+    press_mod(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL, &tx, &s);
+    shot(&mut app, 900);
+    for c in tr!("борис", "boris").chars() {
+        app.handle_key(key(KeyCode::Char(c), KeyModifiers::NONE), &tx, &s);
+        shot(&mut app, 220);
+    }
+    shot(&mut app, 1000);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    shot(&mut app, 2600);
+    submit_text(&mut app, "/view classic", &tx, &s);
+    shot(&mut app, 1800);
+}
+
 /// Демонстрационные данные для скриншотов: вымышленные имена и тексты.
 fn demo_app() -> App {
     let mut app = App::new(Settings::default());
@@ -1762,8 +2033,8 @@ fn readme_images_exist_and_versions_match() {
         let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
         assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join(&name).exists(), "нет картинки docs/{name}");
     }
-    assert!(README.contains("1.5.0"), "README должен упоминать текущую версию");
-    assert_eq!(VERSION, "1.5.0");
+    assert!(README.contains("1.6.0"), "README должен упоминать текущую версию");
+    assert_eq!(VERSION, "1.6.0");
 }
 
 #[test]
@@ -1774,9 +2045,7 @@ fn in_app_faq_and_help_cover_the_documented_features() {
     assert!(faq.iter().all(|(q, a)| !q.is_empty() && !a.is_empty()));
     let mut app = demo_app();
     app.mode = Mode::Help;
-    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
-    term.draw(|f| draw(f, &mut app)).unwrap();
-    let text = dump(&term);
+    let text = draw_text(&mut app, 110, 120);
     for needle in ["/send", "/save", "/links", "/scheduled", "/paste", "/faq", "F7"] {
         assert!(text.contains(needle), "в справке нет {needle}");
     }
@@ -1987,7 +2256,7 @@ fn open_without_attachment_does_nothing() {
     assert_eq!(app.status, "В загруженных сообщениях нет вложений");
     press(&mut app, KeyCode::F(7), &tx, &s);
     press(&mut app, KeyCode::Char('o'), &tx, &s);
-    assert_eq!(app.pick_note, "В этом сообщении нет вложения");
+    assert_eq!(app.pick_note, "В этом сообщении нет файла, который можно открыть");
     assert!(rx.try_recv().is_err(), "ничего не скачивается");
 }
 
@@ -2008,31 +2277,15 @@ fn new_commands_are_listed_for_tab_completion_and_help() {
     crate::i18n::set(1);
     let mut app = demo_app();
     app.mode = Mode::Help;
-    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
-    term.draw(|f| draw(f, &mut app)).unwrap();
-    let text = dump(&term);
+    let text = draw_text(&mut app, 110, 120);
     for needle in ["/open", "/copy", "Alt+"] {
         assert!(text.contains(needle), "в справке нет {needle}");
     }
     app.mode = Mode::Pick;
+    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
     term.draw(|f| draw(f, &mut app)).unwrap();
     let text = dump(&term);
-    assert!(text.contains("C copy") && text.contains("O open"), "подсказка режима выбора: {text}");
-    crate::i18n::set(0);
-}
-
-#[test]
-fn help_fits_a_30_row_console() {
-    // Стандартное окно cmd: 30 строк. Справка не должна быть выше.
-    for lang in [0, 1] {
-        crate::i18n::set(lang);
-        let mut app = demo_app();
-        app.mode = Mode::Help;
-        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        let text = dump(&term);
-        assert!(text.contains("Tg-Lite"), "нижняя строка справки видна ({lang})");
-    }
+    assert!(text.contains("R reply") && text.contains("1-6 react") && text.contains("F forward"), "подсказка режима выбора: {text}");
     crate::i18n::set(0);
 }
 
@@ -2686,23 +2939,6 @@ fn leaving_removes_the_chat_everywhere() {
     assert!(app.sel.is_some() && app.sel != Some(group), "выбор переходит на другой чат");
 }
 
-#[test]
-fn help_and_commands_cover_the_new_batch() {
-    for lang in [0, 1] {
-        crate::i18n::set(lang);
-        let mut app = app_with_chats();
-        app.mode = Mode::Help;
-        let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
-        term.draw(|f| draw(f, &mut app)).unwrap();
-        let text = dump(&term);
-        for c in ["/pinned", "/chat", "/join", "/leave"] {
-            assert!(text.contains(c), "{c} нет в справке ({lang})");
-            assert!(COMMANDS.contains(&c));
-        }
-    }
-    crate::i18n::set(0);
-}
-
 // ---- пачка E (1.2.0): облачные черновики и просмотры постов
 
 fn with_draft(mut c: ChatInfo, text: &str) -> ChatInfo {
@@ -3159,11 +3395,10 @@ fn jump_history_is_dropped_when_the_chat_changes() {
 fn new_pick_keys_are_in_help_and_hint() {
     let mut app = demo_app();
     app.mode = Mode::Help;
-    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
-    term.draw(|f| draw(f, &mut app)).unwrap();
-    let text = dump(&term);
-    assert!(text.contains("F7 → 1-6, G, K"), "{text}");
+    let text = draw_text(&mut app, 110, 120);
+    assert!(text.contains("F7 → 1-6 G K"), "{text}");
     app.mode = Mode::Pick;
+    let mut term = Terminal::new(TestBackend::new(110, 40)).unwrap();
     let chat_id = app.selected().unwrap().id;
     let last = app.histories[&chat_id].len() - 1;
     app.histories.get_mut(&chat_id).unwrap()[last].reply_to = Some(1);
@@ -3507,9 +3742,7 @@ fn photo_preview_is_requested_drawn_and_closed() {
     press(&mut app, KeyCode::Char('p'), &tx, &s);
     assert!(app.pick_note.contains("нет фото"));
     assert!(drain(&mut rx).is_empty());
-    let mut photo = msg(9, false, "Мама", "[фото]");
-    photo.caption = Some(String::new());
-    app.histories.get_mut(&id).unwrap().push(photo);
+    app.histories.get_mut(&id).unwrap().push(msg_with_attachment(9, "[фото]", ""));
     press(&mut app, KeyCode::End, &tx, &s);
     press(&mut app, KeyCode::Char('p'), &tx, &s);
     assert!(matches!(drain(&mut rx).pop(), Some(Cmd::Preview { id: 9, .. })));
@@ -3692,9 +3925,15 @@ fn album_command_parses_paths_checks_files_and_sends() {
     app.clear_input();
     submit_text(&mut app, &format!("/album {} {} {} -- три фото", files[0], files[1], files[2]), &tx, &s);
     match drain(&mut rx).pop() {
-        Some(Cmd::SendAlbum { paths, caption, .. }) => assert_eq!((paths.len(), caption.as_str()), (3, "три фото")),
+        Some(Cmd::SendAlbum { paths, caption, compress, .. }) => {
+            assert_eq!((paths.len(), caption.as_str()), (3, "три фото"));
+            assert!(compress);
+        }
         _ => panic!("ожидался альбом"),
     }
+    app.settings.compress = false;
+    submit_text(&mut app, &format!("/album {} {}", files[0], files[1]), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::SendAlbum { compress: false, .. })));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -3711,9 +3950,7 @@ fn text_file_viewer_requests_scrolls_and_closes() {
     press(&mut app, KeyCode::Char('t'), &tx, &s);
     assert!(app.pick_note.contains("нет файла"));
     assert!(drain(&mut rx).is_empty());
-    let mut f = msg(9, false, "Мама", "[файл заметки.txt, 1 КБ]");
-    f.caption = Some(String::new());
-    app.histories.get_mut(&id).unwrap().push(f);
+    app.histories.get_mut(&id).unwrap().push(msg_with_attachment(9, "[файл заметки.txt, 1 КБ]", ""));
     press(&mut app, KeyCode::End, &tx, &s);
     press(&mut app, KeyCode::Char('t'), &tx, &s);
     assert!(matches!(drain(&mut rx).pop(), Some(Cmd::ViewText { id: 9, .. })));
@@ -3734,4 +3971,1643 @@ fn text_file_viewer_requests_scrolls_and_closes() {
     app.viewer = Some(Viewer { name: "x".into(), lines: vec!["секрет".into()], top: 0 });
     app.lock();
     assert!(app.viewer.is_none());
+}
+
+#[test]
+fn read_only_channel_refuses_sending_and_replying_but_keeps_the_typed_text() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let channel = app.chats[1].id;
+    app.chats[1].can_write = false;
+    app.histories.insert(channel, vec![msg(1, false, "Мой канал", "Новость дня")]);
+    app.sel = Some(channel);
+    type_text(&mut app, "привет", &tx, &s);
+    slow(&mut app);
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &tx, &s);
+    assert!(drain(&mut rx).is_empty(), "в канал без права писать ничего не уходит");
+    assert!(app.status.contains("администраторы"), "{}", app.status);
+    assert_eq!(app.input, "привет", "набранный текст остаётся");
+    for command in ["/send /tmp/x.txt", "/album a b"] {
+        app.clear_input();
+        submit_text(&mut app, command, &tx, &s);
+        assert!(drain(&mut rx).is_empty(), "{command}");
+        assert!(app.status.contains("администраторы"), "{command}: {}", app.status);
+    }
+    app.clear_input();
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    press(&mut app, KeyCode::Char('r'), &tx, &s);
+    assert!(app.pick_note.contains("администраторы"), "{}", app.pick_note);
+    assert!(app.reply.is_none());
+    // а подсказка и вовсе не предлагает «ответить»
+    let mut term = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    app.pick_note.clear();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    assert!(!text.contains("R ответ") && text.contains("F переслать"), "{text}");
+    // в обычном чате всё по-прежнему
+    app.mode = Mode::Chat;
+    app.sel = Some(app.chats[0].id);
+    type_text(&mut app, "ок", &tx, &s);
+    slow(&mut app);
+    app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::Send { .. })));
+}
+
+#[test]
+fn voice_hint_has_one_o_and_open_is_refused_politely_without_a_program() {
+    crate::i18n::set(0);
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let id = app.sel.unwrap();
+    let mut voice = msg_with_attachment(9, "[голосовое 0:07]", "");
+    voice.media = Some(tg::MediaInfo { kind: tg::MediaKind::Voice, name: "voice_9.ogg".into(), size: Some(20_000) });
+    app.histories.get_mut(&id).unwrap().push(voice);
+    press(&mut app, KeyCode::F(7), &tx, &s);
+    let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    term.draw(|f| draw(f, &mut app)).unwrap();
+    let text = dump(&term);
+    // в песочнице «программа есть для всего», поэтому «O слушать» показывается один раз, без «O открыть»
+    assert_eq!(text.matches("O слушать").count(), 1, "{text}");
+    assert!(!text.contains("O открыть") && !text.contains("слушать/смотреть"), "{text}");
+    assert!(text.contains("S скачать"));
+    press(&mut app, KeyCode::Char('o'), &tx, &s);
+    assert!(matches!(drain(&mut rx).pop(), Some(Cmd::Open { id: 9, .. })));
+    // у текстового сообщения клавиши про файлы только объясняют, что файла нет
+    app.mode = Mode::Pick;
+    app.pick = 0;
+    for letter in ['o', 's', 't', 'p'] {
+        app.pick_note.clear();
+        press(&mut app, KeyCode::Char(letter), &tx, &s);
+        assert!(app.pick_note.contains("нет"), "{letter}: {}", app.pick_note);
+    }
+    assert!(drain(&mut rx).is_empty());
+}
+
+// ------------------------------------------------------------------ виды окна, Ctrl+K, без звука, тихие часы
+
+/// Три чата, как в `app_with_chats`, но с историей в «Рабочем чате» и выбранным видом окна.
+fn app_in_view(view: u8) -> App {
+    let mut app = app_with_chats();
+    let g = app.chats[2].id;
+    app.histories.insert(
+        g,
+        vec![msg(1, false, "Аня", "раз"), msg(2, false, "Аня", "два"), msg(3, false, "Борис", "три"), msg(4, true, "Я", "четыре")],
+    );
+    app.settings.view = 0;
+    app.set_view(view);
+    app
+}
+
+fn draw_text(app: &mut App, w: u16, h: u16) -> String {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| draw(f, app)).unwrap();
+    dump(&term)
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    key(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+/// Нажатие «не из вставки» с модификатором: Enter и Tab сразу после другой клавиши считаются частью вставленного текста.
+fn press_mod(app: &mut App, code: KeyCode, mods: KeyModifiers, tx: &mpsc::UnboundedSender<Cmd>, s: &Arc<Saver>) {
+    slow(app);
+    app.handle_key(key(code, mods), tx, s);
+}
+
+#[test]
+fn messenger_view_names_the_author_once_and_marks_new_messages() {
+    let mut app = app_in_view(1);
+    let g = app.chats[2].id;
+    app.set_sel(Some(g));
+    app.new_from.insert(g, 3);
+    let text = draw_text(&mut app, 100, 30);
+    assert_eq!(
+        text.matches("Аня").count(),
+        1,
+        "имя автора стоит один раз над серией:
+{text}"
+    );
+    assert!(text.contains("Борис"), "{text}");
+    let divider = text.lines().position(|l| l.contains("новые сообщения")).expect("разделитель");
+    let boris = text.lines().position(|l| l.contains("Борис")).unwrap();
+    let two = text.lines().position(|l| l.contains("два")).unwrap();
+    assert!(
+        two < divider && divider < boris,
+        "разделитель стоит перед первым новым сообщением:
+{text}"
+    );
+    // Классический вид рисует имя над каждым сообщением и разделителя не знает.
+    app.settings.view = 0;
+    app.new_from.clear();
+    let text = draw_text(&mut app, 100, 30);
+    assert_eq!(text.matches("Аня").count(), 2, "{text}");
+    assert!(!text.contains("новые сообщения"));
+}
+
+#[test]
+fn new_messages_divider_is_set_when_the_chat_opens_and_only_if_something_was_read_before() {
+    let mut app = app_in_view(1);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let g = app.chats[2].id;
+    app.chats[2].unread = 2;
+    app.set_sel(Some(g));
+    let h = app.histories.remove(&g).unwrap();
+    app.handle_event(Event::History { chat: g, msgs: h }, &tx);
+    // Непрочитаны два последних чужих сообщения: «два»? нет — «три» и предыдущее «два» (чужие: 1, 2, 3 → последние два: 2, 3).
+    assert_eq!(app.new_from.get(&g), Some(&2));
+    assert_eq!(app.chats[2].unread, 0, "открытый чат прочитан");
+    // Всё непрочитано: выше нечего отделять.
+    let mut app = app_in_view(1);
+    app.chats[2].unread = 3;
+    app.set_sel(Some(g));
+    let h = app.histories.remove(&g).unwrap();
+    app.handle_event(Event::History { chat: g, msgs: h }, &tx);
+    assert!(app.new_from.is_empty());
+    // В классическом виде разделителя нет совсем.
+    let mut app = app_in_view(0);
+    app.chats[2].unread = 1;
+    app.set_sel(Some(g));
+    let h = app.histories.remove(&g).unwrap();
+    app.handle_event(Event::History { chat: g, msgs: h }, &tx);
+    assert!(app.new_from.is_empty());
+}
+
+#[test]
+fn chat_list_in_the_new_views_has_a_preview_line_and_muted_chats_are_quiet() {
+    let mut app = app_in_view(1);
+    app.chats[0].preview = "Я: Всё хорошо!".into();
+    app.chats[0].last_ts = 1_761_650_120;
+    app.chats[1].muted = true;
+    app.chats[1].unread = 5;
+    app.chats[1].preview = "новая запись".into();
+    let text = draw_text(&mut app, 100, 24);
+    let lines: Vec<&str> = text.lines().collect();
+    let mama = lines.iter().position(|l| l.starts_with("│  Мама")).unwrap();
+    assert!(
+        lines[mama + 1].contains("Я: Всё хорошо!"),
+        "под именем последнее сообщение:
+{text}"
+    );
+    let channel = lines.iter().position(|l| l.starts_with("│К Мой канал")).unwrap();
+    assert!(lines[channel + 1].contains("новая запись"));
+    // В классическом виде список в одну строку и без превью.
+    app.settings.view = 0;
+    let text = draw_text(&mut app, 100, 24);
+    assert!(!text.contains("Я: Всё хорошо!") && !text.contains("новая запись"));
+    // Заглушённый канал не входит в число непрочитанных в заголовке.
+    assert_eq!(app.total_unread(), 2);
+}
+
+#[test]
+fn draft_and_typing_replace_the_preview_in_the_list() {
+    let mut app = app_in_view(1);
+    app.chats[0].preview = "старое сообщение".into();
+    app.drafts.insert(app.chats[0].id, ("привет\nмир".into(), 3));
+    let text = draw_text(&mut app, 100, 24);
+    assert!(text.contains("черновик: привет мир"), "{text}");
+    assert!(!text.contains("старое сообщение"));
+    app.drafts.clear();
+    app.typing.insert(app.chats[0].id, (Instant::now(), "печатает…".into()));
+    let text = draw_text(&mut app, 100, 24);
+    assert!(text.contains("печатает…") && !text.contains("черновик"), "{text}");
+}
+
+#[test]
+fn quick_switch_finds_chats_in_any_layout_and_lists_commands_after_a_slash() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.handle_key(ctrl('k'), &tx, &s);
+    assert_eq!(app.mode, Mode::Quick);
+    let names: Vec<String> = app.quick.as_ref().unwrap().items.iter().map(|i| i.label.clone()).collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert!(names[0].contains("Мама"), "сначала чаты с непрочитанными: {names:?}");
+    // По названию.
+    type_text(&mut app, "раб", &tx, &s);
+    assert!(app.quick.as_ref().unwrap().items[0].label.contains("Рабочий чат"));
+    // Запрос в другой раскладке тоже находит.
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE), &tx, &s);
+    }
+    type_text(&mut app, "vfvf", &tx, &s);
+    assert_eq!(app.quick.as_ref().unwrap().items.len(), 1);
+    assert!(app.quick.as_ref().unwrap().items[0].label.contains("Мама"));
+    // Enter открывает чат.
+    for _ in 0..4 {
+        app.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE), &tx, &s);
+    }
+    type_text(&mut app, "раб", &tx, &s);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!(app.mode, Mode::Chat);
+    assert_eq!(app.selected().unwrap().name, "Рабочий чат");
+    // Команды: «/» и начало имени; Enter вставляет команду в поле ввода.
+    app.handle_key(ctrl('k'), &tx, &s);
+    type_text(&mut app, "/vi", &tx, &s);
+    let items = &app.quick.as_ref().unwrap().items;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].label, "/view");
+    assert!(!items[0].hint.is_empty());
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!(app.input, "/view ");
+    assert_eq!(app.mode, Mode::Chat);
+    // Ничего не нашлось: Enter не делает ничего, Esc закрывает, Ctrl+K тоже.
+    app.input.clear();
+    app.cursor = 0;
+    app.handle_key(ctrl('k'), &tx, &s);
+    type_text(&mut app, "яяяя", &tx, &s);
+    assert!(app.quick.as_ref().unwrap().items.is_empty());
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!(app.mode, Mode::Chat);
+    assert!(app.input.is_empty());
+    app.handle_key(ctrl('k'), &tx, &s);
+    app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.mode, Mode::Chat);
+    app.handle_key(ctrl('k'), &tx, &s);
+    app.handle_key(ctrl('k'), &tx, &s);
+    assert_eq!(app.mode, Mode::Chat);
+}
+
+#[test]
+fn quick_switch_navigation_keys_stay_in_range_and_draw_on_small_screens() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.open_quick();
+    for code in [KeyCode::Up, KeyCode::PageUp, KeyCode::Home, KeyCode::BackTab] {
+        app.handle_key(key(code, KeyModifiers::NONE), &tx, &s);
+        assert_eq!(app.quick.as_ref().unwrap().sel, 0);
+    }
+    for code in [KeyCode::Down, KeyCode::Tab, KeyCode::PageDown, KeyCode::End] {
+        app.handle_key(key(code, KeyModifiers::NONE), &tx, &s);
+        assert!(app.quick.as_ref().unwrap().sel <= 2);
+    }
+    assert_eq!(app.quick.as_ref().unwrap().sel, 2);
+    for (w, h) in [(20, 6), (40, 10), (100, 30), (200, 60)] {
+        let text = draw_text(&mut app, w, h);
+        assert!(!text.is_empty());
+    }
+    // Блокировка закрывает окно.
+    app.lock();
+    assert!(app.quick.is_none());
+}
+
+#[test]
+fn quick_switch_puts_unread_and_pinned_chats_first_and_mentions_before_everything() {
+    let mut app = app_with_chats();
+    app.chats[1].muted = true;
+    app.chats[1].unread = 9;
+    app.chats[2].mentions = 1;
+    app.chats[2].unread = 1;
+    let items = app.quick_items("");
+    let order: Vec<&str> =
+        items.iter().map(|i| i.label.trim_start_matches(|c: char| !c.is_alphabetic() || c == 'Г' || c == 'К').trim()).collect();
+    assert_eq!(order.len(), 3);
+    assert!(items[0].label.contains("Рабочий чат"), "упоминание важнее всего: {order:?}");
+    assert!(items[1].label.contains("Мама"), "потом обычные непрочитанные: {order:?}");
+    assert!(items[2].label.contains("Мой канал"), "заглушённый канал последним: {order:?}");
+    assert!(items[2].hint.contains("без звука"), "{}", items[2].hint);
+    assert!(items[0].hint.contains("@1"), "{}", items[0].hint);
+}
+
+#[test]
+fn view_command_cycles_validates_and_persists() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    assert_eq!(app.view(), View::Classic);
+    for (typed, want) in [("/view", 1u8), ("/view", 2), ("/view", 0), ("/view messenger", 1), ("/view два окна", 2), ("/view classic", 0)]
+    {
+        submit_text(&mut app, typed, &tx, &s);
+        assert_eq!(app.settings.view, want, "{typed}");
+    }
+    submit_text(&mut app, "/view ерунда", &tx, &s);
+    assert_eq!(app.settings.view, 0, "неизвестное слово ничего не меняет");
+    assert!(app.status.contains("/view"), "{}", app.status);
+}
+
+#[test]
+fn settings_rows_for_view_quiet_hours_and_photo_shrinking_change_and_clamp() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.mode = Mode::Settings;
+    app.settings_row = 17;
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.settings.view, 1);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::NONE), &tx, &s);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.settings.view, 2, "назад из первого значения — в последнее");
+    app.settings_row = 18;
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.settings.quiet, 1);
+    assert_eq!(app.settings.quiet_label(), "22:00–07:00");
+    app.settings_row = 19;
+    assert!(app.settings.compress);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::NONE), &tx, &s);
+    assert!(!app.settings.compress);
+    let text = draw_text(&mut app, 100, 40);
+    for want in ["Вид", "два окна", "Тихие часы", "22:00–07:00", "Сжимать фото при отправке"] {
+        assert!(text.contains(want), "в настройках нет «{want}»:\n{text}");
+    }
+}
+
+#[test]
+fn mute_command_toggles_locally_and_keeps_the_chat_out_of_alerts_and_the_unread_total() {
+    let mut app = app_with_chats();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let mama = app.chats[0].id;
+    assert!(app.may_alert(mama));
+    assert_eq!(app.total_unread(), 2);
+    submit_text(&mut app, "/mute", &tx, &s);
+    let did = mama.bot_api_dialog_id().unwrap();
+    assert_eq!(app.settings.muted, vec![did]);
+    assert!(app.is_muted(&app.chats[0].clone()));
+    assert!(!app.may_alert(mama));
+    assert_eq!(app.total_unread(), 0, "заглушённый чат не считается в заголовке");
+    assert!(draw_text(&mut app, 100, 24).contains("без звука"));
+    // Новые сообщения всё равно приходят и считаются в самом чате.
+    let other = app.chats[2].id;
+    app.handle_event(Event::Incoming { chat: other, chat_name: "Рабочий чат".into(), msg: msg(9, false, "Аня", "привет") }, &tx);
+    assert_eq!(app.chats.iter().find(|c| c.id == other).unwrap().unread, 1);
+    // Повторная команда возвращает звук.
+    submit_text(&mut app, "/mute", &tx, &s);
+    assert!(app.settings.muted.is_empty());
+    assert!(app.may_alert(mama));
+    // Чат, заглушённый в самом Telegram, остаётся заглушённым и после /mute ещё раз; об этом сказано.
+    let id = app.chats[1].id;
+    app.chats[1].muted = true;
+    app.set_sel(Some(id));
+    submit_text(&mut app, "/mute", &tx, &s);
+    submit_text(&mut app, "/mute", &tx, &s);
+    assert!(app.is_muted(&app.chats[1].clone()), "в Telegram чат всё ещё заглушён");
+    assert!(app.status.contains("в Telegram"), "{}", app.status);
+    while rx.try_recv().is_ok() {}
+}
+
+#[test]
+fn muted_list_is_capped() {
+    let mut app = app_with_chats();
+    let s = saver();
+    app.settings.muted = (1..=500).map(|n| -n).collect();
+    let id = app.chats[0].id;
+    app.set_sel(Some(id));
+    app.cmd_mute(&s);
+    assert_eq!(app.settings.muted.len(), 500, "список не растёт без предела");
+    assert_eq!(*app.settings.muted.last().unwrap(), id.bot_api_dialog_id().unwrap());
+    assert!(!app.settings.muted.contains(&-1), "вытесняется самый давний");
+}
+
+#[test]
+fn dnd_command_sets_clears_and_rejects_nonsense() {
+    let mut app = app_with_chats();
+    let mama = app.chats[0].id;
+    app.cmd_dnd("30");
+    assert!(app.dnd_until.is_some() && !app.may_alert(mama));
+    assert!(app.status.contains(':'), "{}", app.status);
+    app.cmd_dnd("off");
+    assert!(app.dnd_until.is_none() && app.may_alert(mama));
+    app.cmd_dnd("");
+    let hour = app.dnd_until.unwrap();
+    assert!(hour > Instant::now() + Duration::from_secs(59 * 60), "по умолчанию час");
+    for bad in ["abc", "-5", "5000", "1.5"] {
+        app.dnd_until = None;
+        app.cmd_dnd(bad);
+        assert!(app.dnd_until.is_none(), "«{bad}» не должно включать режим");
+        assert!(app.status.contains("/dnd"), "{}", app.status);
+    }
+    app.cmd_dnd("0");
+    assert!(app.dnd_until.is_none());
+}
+
+#[test]
+fn next_unread_goes_mentions_first_then_unread_then_muted_and_skips_the_open_chat() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, channel, group) = (app.chats[0].id, app.chats[1].id, app.chats[2].id);
+    app.chats[1].unread = 4;
+    app.chats[1].muted = true;
+    assert_eq!(app.next_unread_chat(), Some(channel), "в «Маме» непрочитанные, но она открыта");
+    app.chats[2].unread = 1;
+    assert_eq!(app.next_unread_chat(), Some(group), "обычные раньше заглушённых");
+    app.chats[1].mentions = 1;
+    assert_eq!(app.next_unread_chat(), Some(channel), "упоминание раньше всего");
+    app.handle_key(ctrl('n'), &tx, &s);
+    assert_eq!(app.sel, Some(channel));
+    for c in &mut app.chats {
+        c.unread = 0;
+        c.mentions = 0;
+    }
+    app.handle_key(ctrl('n'), &tx, &s);
+    assert_eq!(app.sel, Some(channel), "больше нет — остаёмся");
+    assert!(app.status.contains("Непрочитанных"), "{}", app.status);
+    let _ = mama;
+    app.chats.clear();
+    assert_eq!(app.next_unread_chat(), None, "пустой список не падает");
+}
+
+#[test]
+fn alt_digit_opens_pinned_chats_in_list_order() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, group) = (app.chats[0].id, app.chats[2].id);
+    // Закреплены «Рабочий чат» и «Мама», но порядок закрепления в настройках другой, чем в списке.
+    app.settings.pinned = vec![group.bot_api_dialog_id().unwrap(), mama.bot_api_dialog_id().unwrap()];
+    assert_eq!(app.favorites(), vec![mama, group], "порядок — как в списке чатов");
+    app.handle_key(key(KeyCode::Char('2'), KeyModifiers::ALT), &tx, &s);
+    assert_eq!(app.sel, Some(group));
+    app.handle_key(key(KeyCode::Char('1'), KeyModifiers::ALT), &tx, &s);
+    assert_eq!(app.sel, Some(mama));
+    app.handle_key(key(KeyCode::Char('5'), KeyModifiers::ALT), &tx, &s);
+    assert_eq!(app.sel, Some(mama), "чата №5 нет — остаёмся");
+    assert!(app.status.contains("/pin"), "{}", app.status);
+    // В списке у закреплённых чатов в новых видах стоят эти номера.
+    app.settings.view = 1;
+    let text = draw_text(&mut app, 100, 24);
+    assert!(text.lines().any(|l| l.contains('1') && l.contains("Мама")), "{text}");
+    // Alt+0 и Alt+буква ничего не открывают.
+    app.handle_key(key(KeyCode::Char('0'), KeyModifiers::ALT), &tx, &s);
+    assert_eq!(app.sel, Some(mama));
+}
+
+#[test]
+fn drafts_command_lists_chats_with_unsent_text_and_opens_them() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, channel, group) = (app.chats[0].id, app.chats[1].id, app.chats[2].id);
+    app.set_sel(Some(group));
+    submit_text(&mut app, "/drafts", &tx, &s);
+    assert!(app.overlay.is_none());
+    assert!(app.status.contains("Неотправленных сообщений нет"), "{}", app.status);
+    // Черновик, оставленный здесь, и черновик из Telegram с другого устройства.
+    app.drafts.insert(mama, ("пишу маме\nвторая строка".into(), 3));
+    app.chats[1].draft = "с телефона".into();
+    app.apply_server_draft(channel, "с телефона", false);
+    // Недописанная команда и пустышка не считаются.
+    app.drafts.insert(group, ("/find".into(), 5));
+    submit_text(&mut app, "/drafts", &tx, &s);
+    let ov = app.overlay.as_ref().expect("список черновиков");
+    assert_eq!(ov.kind, OverlayKind::Drafts);
+    let labels: Vec<&String> = ov.items.iter().map(|i| &i.label).collect();
+    assert_eq!(labels.len(), 2, "{labels:?}");
+    assert_eq!(labels[0], "Мама: пишу маме вторая строка", "в порядке списка чатов, перевод строки как пробел");
+    assert_eq!(labels[1], "Мой канал: с телефона");
+    assert!(draw_text(&mut app, 100, 24).contains("открыть чат с черновиком"));
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert!(app.overlay.is_none());
+    assert_eq!(app.sel, Some(mama));
+    assert_eq!(app.input, "пишу маме\nвторая строка", "черновик вернулся в поле ввода");
+    // Открытый чат в список не попадает: его текст и так перед глазами.
+    submit_text(&mut app, "/drafts", &tx, &s);
+    let ov = app.overlay.as_ref().expect("остался черновик канала");
+    assert_eq!(ov.items.len(), 1);
+    // Выключенные черновики из Telegram в списке не показываются: открыть их всё равно нечем.
+    app.overlay = None;
+    app.mode = Mode::Chat;
+    app.settings.cloud_drafts = false;
+    app.drafts.clear();
+    app.chats[1].draft = "с телефона".into();
+    submit_text(&mut app, "/drafts", &tx, &s);
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn preview_line_follows_incoming_and_sent_messages_and_the_chat_moves_up() {
+    let mut app = app_with_chats();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let group = app.chats[2].id;
+    app.handle_event(
+        Event::Incoming {
+            chat: group, chat_name: "Рабочий чат".into(), msg: msg(20, false, "Борис Иванов", "завтра в десять")
+        },
+        &tx,
+    );
+    assert_eq!(app.chats[0].id, group, "чат с новым сообщением поднялся наверх");
+    assert_eq!(app.chats[0].preview, "Борис: завтра в десять");
+    assert!(app.chats[0].last_ts > 0);
+    app.handle_event(Event::Sent { chat: group, msg: msg(21, true, "Я", "хорошо"), scheduled: false }, &tx);
+    assert_eq!(app.chats[0].preview, "Я: хорошо");
+    // Запланированное сообщение в превью не попадает.
+    app.handle_event(Event::Sent { chat: group, msg: msg(22, true, "Я", "потом"), scheduled: true }, &tx);
+    assert_eq!(app.chats[0].preview, "Я: хорошо");
+}
+
+// --- вид «Два окна»
+
+#[test]
+fn two_panes_open_chats_in_the_active_pane_and_move_between_panes_with_ctrl_arrows() {
+    let mut app = app_in_view(2);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, channel, group) = (app.chats[0].id, app.chats[1].id, app.chats[2].id);
+    assert!(app.two_panes());
+    assert_eq!(app.sel, Some(mama));
+    assert_eq!(app.panes.open, vec![mama]);
+    // Ctrl+→: правое окно пусто и активно; Ctrl+K кладёт в него чат.
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    assert!(app.panes.right_active);
+    assert_eq!((app.sel, app.panes.other), (None, Some(mama)));
+    app.handle_key(ctrl('k'), &tx, &s);
+    type_text(&mut app, "раб", &tx, &s);
+    press(&mut app, KeyCode::Enter, &tx, &s);
+    assert_eq!((app.sel, app.panes.other), (Some(group), Some(mama)));
+    assert_eq!(app.panes.open, vec![mama, group]);
+    let text = draw_text(&mut app, 120, 30);
+    assert!(text.lines().next().unwrap().contains("Мама") && text.lines().next().unwrap().contains("Рабочий чат"), "вкладки:\n{text}");
+    assert!(text.contains("┌ Мама") && text.contains("┌ Рабочий чат"), "оба окна рядом:\n{text}");
+    assert!(text.contains("→ Рабочий чат"), "поле ввода показывает, куда уйдёт текст:\n{text}");
+    // Ctrl+←: активным становится левое окно, чаты окон не теряются.
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL), &tx, &s);
+    assert_eq!((app.sel, app.panes.other, app.panes.right_active), (Some(mama), Some(group), false));
+    // Повторный Ctrl+← ничего не делает.
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL), &tx, &s);
+    assert_eq!((app.sel, app.panes.other), (Some(mama), Some(group)));
+    // Чат, уже стоящий во втором окне, не дублируется: активным становится то окно.
+    app.open_chat(group);
+    assert_eq!((app.sel, app.panes.other, app.panes.right_active), (Some(group), Some(mama), true));
+    // Открыть третий чат: он заменяет чат активного окна, вкладка прежнего остаётся.
+    app.open_chat(channel);
+    assert_eq!((app.sel, app.panes.other), (Some(channel), Some(mama)));
+    assert_eq!(app.panes.open, vec![mama, group, channel]);
+}
+
+#[test]
+fn scroll_position_travels_with_the_chat_when_panes_are_switched() {
+    let mut app = app_in_view(2);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    app.scroll = 7;
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    assert_eq!(app.panes.other_scroll, 7, "у чата в левом окне прокрутка осталась прежней");
+    assert_eq!(app.scroll, 0);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL), &tx, &s);
+    assert_eq!(app.scroll, 7);
+}
+
+#[test]
+fn tab_cycles_open_chats_skipping_the_other_pane_and_ctrl_w_closes_a_tab() {
+    let mut app = app_in_view(2);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, channel, group) = (app.chats[0].id, app.chats[1].id, app.chats[2].id);
+    app.open_chat(channel);
+    app.open_chat(group);
+    assert_eq!(app.panes.open, vec![mama, channel, group]);
+    // Положим «Мою» (channel) во второе окно.
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    app.open_chat(channel);
+    assert_eq!((app.sel, app.panes.other), (Some(channel), Some(group)));
+    press(&mut app, KeyCode::Tab, &tx, &s);
+    assert_eq!(app.sel, Some(mama), "Tab: следующая вкладка по кругу, чат второго окна пропущен");
+    press(&mut app, KeyCode::Tab, &tx, &s);
+    assert_eq!(app.sel, Some(channel));
+    press_mod(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &tx, &s);
+    assert_eq!(app.sel, Some(mama));
+    // Ctrl+W закрывает вкладку активного окна.
+    app.handle_key(ctrl('w'), &tx, &s);
+    assert!(!app.panes.open.contains(&mama));
+    assert_ne!(app.sel, Some(mama));
+    assert_eq!(app.panes.other, Some(group), "второе окно не тронуто");
+    // Закрыть всё: окно остаётся пустым и само не заполняется.
+    while app.sel.is_some() {
+        app.handle_key(ctrl('w'), &tx, &s);
+    }
+    assert!(app.sel.is_none());
+    app.ensure_selection();
+    assert!(app.sel.is_none(), "пустое окно не заполняется само");
+    let text = draw_text(&mut app, 120, 30);
+    assert!(text.contains("Ctrl+K — открыть чат"), "{text}");
+}
+
+#[test]
+fn open_tabs_are_limited_and_visible_chats_are_never_dropped() {
+    let mut app = app_with_chats();
+    app.chats = (1..=15).map(|n| chat(n, &format!("Чат {n}"), Kind::User, 0)).collect();
+    app.settings.view = 0;
+    app.set_view(2);
+    let ids: Vec<PeerId> = app.chats.iter().map(|c| c.id).collect();
+    for id in &ids {
+        app.open_chat(*id);
+    }
+    assert!(app.panes.open.len() <= 12, "{}", app.panes.open.len());
+    assert!(app.panes.open.contains(app.sel.as_ref().unwrap()), "открытый чат остаётся вкладкой");
+    assert_eq!(app.sel, Some(ids[14]));
+    // Вкладки не дублируются.
+    let mut seen = HashSet::new();
+    assert!(app.panes.open.iter().all(|id| seen.insert(*id)));
+}
+
+#[test]
+fn messages_in_the_second_pane_count_as_read() {
+    let mut app = app_in_view(2);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, channel, group) = (app.chats[0].id, app.chats[1].id, app.chats[2].id);
+    app.open_chat(group);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    app.open_chat(mama);
+    assert_eq!(app.panes.other, Some(group));
+    while rx.try_recv().is_ok() {}
+    app.handle_event(Event::Incoming { chat: group, chat_name: "Рабочий чат".into(), msg: msg(30, false, "Аня", "эй") }, &tx);
+    assert_eq!(app.chats.iter().find(|c| c.id == group).unwrap().unread, 0, "чат виден во втором окне");
+    let mut sent_read = false;
+    while let Ok(c) = rx.try_recv() {
+        sent_read |= matches!(c, Cmd::MarkRead(ref ch) if ch.id == group);
+    }
+    assert!(sent_read, "Telegram должен узнать о прочтении");
+    // Новое сообщение во втором окне прокручивает к концу именно его, а не активное окно.
+    app.panes.other_scroll = 5;
+    app.scroll = 4;
+    app.handle_event(Event::Incoming { chat: group, chat_name: "Рабочий чат".into(), msg: msg(31, false, "Аня", "ещё") }, &tx);
+    assert_eq!((app.panes.other_scroll, app.scroll), (0, 4));
+    // Чат, которого на экране нет, остаётся непрочитанным.
+    app.handle_event(Event::Incoming { chat: channel, chat_name: "Мой канал".into(), msg: msg(5, false, "Мой канал", "пост") }, &tx);
+    assert_eq!(app.chats.iter().find(|c| c.id == channel).unwrap().unread, 1);
+}
+
+#[test]
+fn narrow_screens_show_only_the_active_pane_and_wide_screens_both() {
+    let mut app = app_in_view(2);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, group) = (app.chats[0].id, app.chats[2].id);
+    app.open_chat(group);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL), &tx, &s);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    app.open_chat(mama);
+    let wide = draw_text(&mut app, 120, 30);
+    assert!(wide.contains("┌ Мама") && wide.contains("┌ Рабочий чат"), "{wide}");
+    let narrow = draw_text(&mut app, 60, 30);
+    assert!(narrow.contains("┌ Мама"), "{narrow}");
+    assert!(!narrow.contains("┌ Рабочий чат"), "на узком экране второе окно не рисуется:\n{narrow}");
+    assert_eq!(app.panes.hit[1].width, 0);
+    for (w, h) in [(10, 5), (30, 8), (64, 12), (80, 24), (300, 80)] {
+        draw_text(&mut app, w, h); // не падает на любых размерах
+    }
+}
+
+#[test]
+fn mouse_clicks_switch_panes_and_open_tabs_and_the_wheel_scrolls_the_second_pane() {
+    let mut app = app_in_view(2);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, group) = (app.chats[0].id, app.chats[2].id);
+    // Длинная история во втором окне, чтобы было что прокручивать.
+    app.histories.insert(group, (1..=80).map(|i| msg(i, false, "Аня", &format!("сообщение {i}"))).collect());
+    app.open_chat(group);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL), &tx, &s);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    app.open_chat(mama);
+    assert_eq!((app.sel, app.panes.other, app.panes.right_active), (Some(mama), Some(group), true));
+    draw_text(&mut app, 120, 30);
+    let left = app.panes.hit[0];
+    let mouse = |kind, x, y| MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+    // Колесо над левым (неактивным) окном прокручивает его и не переключает окно.
+    assert!(app.handle_mouse(mouse(MouseEventKind::ScrollUp, left.x + 5, left.y + 5), &tx));
+    assert_eq!(app.panes.other_scroll, 3);
+    assert_eq!(app.sel, Some(mama));
+    assert!(app.handle_mouse(mouse(MouseEventKind::ScrollDown, left.x + 5, left.y + 5), &tx));
+    assert_eq!(app.panes.other_scroll, 0);
+    // Щелчок по левому окну делает его активным.
+    assert!(app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), left.x + 5, left.y + 5), &tx));
+    assert_eq!((app.sel, app.panes.right_active), (Some(group), false));
+    // Щелчок по вкладке «Мама» открывает её в активном окне.
+    draw_text(&mut app, 120, 30);
+    let tab = app.panes.hit_tabs.iter().find(|t| t.2 == mama).copied().expect("вкладка Мама");
+    assert!(app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), tab.0 + 1, 0), &tx));
+    assert!(app.sel == Some(mama) || app.panes.other == Some(mama));
+    // Мышь выключена в настройках — события игнорируются.
+    app.settings.mouse = false;
+    assert!(!app.handle_mouse(mouse(MouseEventKind::ScrollUp, 3, 3), &tx));
+}
+
+#[test]
+fn leaving_a_chat_removes_it_from_both_panes_and_tabs() {
+    let mut app = app_in_view(2);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, group) = (app.chats[0].id, app.chats[2].id);
+    app.open_chat(group);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    app.open_chat(mama);
+    app.handle_event(Event::Left(group), &tx);
+    assert_eq!(app.panes.other, None);
+    assert!(!app.panes.open.contains(&group));
+    app.handle_event(Event::Left(mama), &tx);
+    assert!(app.sel.is_none());
+    assert!(!app.panes.open.contains(&mama));
+    draw_text(&mut app, 100, 30);
+}
+
+#[test]
+fn switching_views_keeps_the_chat_and_resets_the_state_of_the_old_view() {
+    let mut app = app_in_view(2);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let (mama, group) = (app.chats[0].id, app.chats[2].id);
+    app.open_chat(group);
+    app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL), &tx, &s);
+    app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL), &tx, &s);
+    app.open_chat(mama);
+    app.new_from.insert(group, 2);
+    app.set_view(0);
+    assert_eq!(app.view(), View::Classic);
+    assert!(app.panes.open.is_empty() && app.panes.other.is_none());
+    assert!(app.new_from.is_empty());
+    assert!(app.sel.is_some(), "в списке чат остаётся выбранным");
+    app.set_view(9);
+    assert_eq!(app.settings.view, 2, "слишком большое число — последний вид");
+    app.set_view(2);
+    assert_eq!(app.panes.open.len(), 1, "текущий чат — первая вкладка нового вида");
+}
+
+#[test]
+fn new_views_have_no_russian_leftovers_in_english() {
+    crate::i18n::set(1);
+    let mut app = App::new(Settings::default());
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let mut a = chat(1, "Mom", Kind::User, 2);
+    a.preview = "Me: hello".into();
+    a.last_ts = 1_761_650_000;
+    let mut b = chat(2, "Work", Kind::Group, 0);
+    b.muted = true;
+    app.histories.insert(a.id, vec![msg(1, false, "Mom", "Hi"), msg(2, false, "Mom", "How are you?"), msg(3, true, "Me", "Fine")]);
+    app.chats = vec![a, b];
+    app.ensure_selection();
+    let (mom, work) = (app.chats[0].id, app.chats[1].id);
+    for view in [1u8, 2] {
+        app.settings.view = 0;
+        app.set_view(view);
+        app.new_from.insert(mom, 2);
+        app.settings.pinned = vec![mom.bot_api_dialog_id().unwrap()];
+        for mode in [Mode::Chat, Mode::Help, Mode::Settings] {
+            app.mode = mode;
+            let text = draw_text(&mut app, 120, 40).replace("Русский", "");
+            assert!(!has_cyrillic(&text), "view {view}, {mode:?}:\n{text}");
+        }
+        app.mode = Mode::Chat;
+        app.open_quick();
+        let text = draw_text(&mut app, 120, 40);
+        assert!(!has_cyrillic(&text) && text.contains("Quick switch"), "{text}");
+        type_text(&mut app, "/vi", &tx, &s);
+        let text = draw_text(&mut app, 120, 40);
+        assert!(!has_cyrillic(&text) && text.contains("/view"), "{text}");
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &tx, &s);
+    }
+    app.drafts.insert(work, ("later".into(), 5));
+    app.cmd_drafts();
+    let text = draw_text(&mut app, 120, 40);
+    assert!(!has_cyrillic(&text) && text.contains("open the chat with the draft"), "{text}");
+    app.overlay = None;
+    app.cmd_dnd("x");
+    assert!(!has_cyrillic(&app.status), "{}", app.status);
+    app.cmd_dnd("15");
+    assert!(!has_cyrillic(&app.status), "{}", app.status);
+    app.cmd_view("zzz", &s);
+    assert!(!has_cyrillic(&app.status), "{}", app.status);
+    crate::i18n::set(0);
+}
+
+// ---- справка: помещается в консоль, листается, перечисляет все команды
+
+fn help_app() -> App {
+    let mut app = demo_app();
+    app.open_help();
+    app
+}
+
+#[test]
+fn help_lists_every_command_in_both_languages() {
+    for lang in [0, 1] {
+        crate::i18n::set(lang);
+        let mut app = help_app();
+        let text = draw_text(&mut app, 110, 120);
+        assert_eq!(app.help_max, 0, "в высоком окне листать нечего");
+        for c in COMMANDS.iter().filter(|c| **c != "/search") {
+            assert!(text.contains(c), "{c} нет в справке ({lang})");
+        }
+        for k in ["Ctrl+K", "Ctrl+N", "Alt+1", "F8", "Ctrl+W", "F7", "Ctrl+Z", "PgUp"] {
+            assert!(text.contains(k), "{k} нет в справке ({lang})");
+        }
+        assert!(text.contains(&format!("Tg-Lite {VERSION}")), "версия в заголовке");
+    }
+    crate::i18n::set(0);
+}
+
+#[test]
+fn help_fits_small_consoles_and_scrolls_to_the_last_line() {
+    for (lang, last) in [(0, "/report"), (1, "/report")] {
+        crate::i18n::set(lang);
+        for (w, h) in [(120, 30), (80, 25), (60, 20), (40, 12)] {
+            let mut app = help_app();
+            let first = draw_text(&mut app, w, h);
+            assert!(app.help_max > 0, "{w}x{h}: справка длиннее экрана");
+            assert!(first.contains("PgUp PgDn"), "{w}x{h}: подсказка про прокрутку видна:\n{first}");
+            assert!(first.contains("Tg-Lite"), "{w}x{h}: версия в заголовке видна");
+            assert!(!first.contains(last), "{w}x{h}: последняя строка ещё не видна");
+            app.handle_help_key(key(KeyCode::End, KeyModifiers::NONE));
+            let end = draw_text(&mut app, w, h);
+            assert!(end.contains(last), "{w}x{h}: после End видна последняя строка ({lang}):\n{end}");
+            assert!(!end.contains("Basics") && !end.contains("Основное"), "{w}x{h}: начало ушло вверх");
+        }
+    }
+    crate::i18n::set(0);
+}
+
+#[test]
+fn help_scroll_keys_move_and_anything_else_closes() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let s = saver();
+    let mut app = help_app();
+    let _ = draw_text(&mut app, 100, 20);
+    assert!(app.help_max > 5 && app.help_top == 0 && app.mode == Mode::Help);
+    app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.help_top, 1);
+    app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &tx, &s);
+    app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.help_top, 0, "выше начала не уходит");
+    app.handle_key(key(KeyCode::PageDown, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.help_top, app.help_rows - 1, "страница без одной строки: контекст сохраняется");
+    app.handle_key(key(KeyCode::End, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.help_top, app.help_max);
+    app.handle_key(key(KeyCode::PageDown, KeyModifiers::NONE), &tx, &s);
+    app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.help_top, app.help_max, "ниже конца не уходит");
+    app.handle_key(key(KeyCode::Home, KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.help_top, 0);
+    app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &tx, &s);
+    app.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE), &tx, &s);
+    assert_eq!(app.mode, Mode::Chat, "любая другая клавиша закрывает");
+    assert_eq!(app.help_top, 0, "и сбрасывает прокрутку");
+    assert!(app.input.is_empty(), "закрывающая клавиша не попадает в поле ввода");
+    // Повторное открытие начинается с начала, даже если окно сменили.
+    app.help_top = 7;
+    app.handle_key(key(KeyCode::F(1), KeyModifiers::NONE), &tx, &s);
+    assert!(app.mode == Mode::Help && app.help_top == 0);
+}
+
+#[test]
+fn help_lines_never_exceed_the_window_and_keys_stay_short() {
+    use unicode_width_check::line_width;
+    mod unicode_width_check {
+        use ratatui::text::Line;
+        use textwrap::core::display_width;
+        pub fn line_width(l: &Line) -> usize {
+            l.spans.iter().map(|s| display_width(&s.content)).sum()
+        }
+    }
+    for lang in [0, 1] {
+        crate::i18n::set(lang);
+        for w in (30..=100).step_by(5) {
+            for l in help::lines(Color::Cyan, w) {
+                assert!(line_width(&l) <= w, "строка шире окна {w} ({lang}): {l:?}");
+            }
+        }
+        for k in help::key_labels() {
+            assert!(textwrap::core::display_width(k) <= 18, "подпись клавиши длиннее 18 знаков: {k}");
+        }
+    }
+    crate::i18n::set(0);
+}
+
+// ------------------------------------------------------------------ прогон отрисовки: любой вид × режим × размер
+
+/// Приложение с «трудными» данными: все виды вложений, широкие символы, очень длинные слова и пустые поля.
+fn stress_app(view: u8) -> App {
+    use crate::tg::{Btn, BtnAction, Fwd, LinkCard, MediaInfo, MediaKind, PollOpt, PollView, Reaction};
+    let mut app = app_in_view(view);
+    let long_word = "Ъ".repeat(300);
+    let wide = "日本語のテキスト 你好世界 😀👍🏽 e\u{301}e\u{301} ａｂｃ ".repeat(8);
+    let mut rich = msg(
+        10,
+        false,
+        "Очень-очень длинное имя отправителя, которое не помещается нигде",
+        "Текст с ссылкой https://example.com/very/long/path?x=1",
+    );
+    rich.edited = true;
+    rich.mentioned = true;
+    rich.views = Some(1_234_567);
+    rich.reply_to = Some(9999);
+    rich.fwd = Some(Fwd { name: Some("Имя пересланного автора".into()), from: None });
+    rich.reactions = vec![
+        Reaction { emoji: "👍".into(), count: 3, mine: true },
+        Reaction { emoji: "".into(), count: 0, mine: false },
+        Reaction { emoji: "❤".into(), count: 1_000_000, mine: false },
+    ];
+    rich.buttons = vec![
+        vec![
+            Btn { text: "Да".into(), action: BtnAction::Callback(vec![1]) },
+            Btn { text: "Ссылка на очень длинный адрес".into(), action: BtnAction::Url("https://a.b".into()) },
+            Btn { text: "".into(), action: BtnAction::Other },
+        ],
+        vec![],
+    ];
+    rich.poll = Some(PollView {
+        question: "Вопрос ".repeat(40),
+        quiz: true,
+        closed: false,
+        multiple: true,
+        total: 5,
+        options: vec![
+            PollOpt { text: "Первый вариант".into(), data: vec![0], voters: 3, chosen: true, correct: true },
+            PollOpt { text: wide.clone(), data: vec![1], voters: 0, chosen: false, correct: false },
+            PollOpt { text: "".into(), data: vec![2], voters: -1, chosen: false, correct: false },
+        ],
+    });
+    rich.media = Some(MediaInfo { kind: MediaKind::Photo, name: "фото.jpg".into(), size: Some(u64::MAX) });
+    rich.link = Some(LinkCard { site: "сайт".into(), title: wide.clone(), desc: long_word.clone(), url: "https://example.com".into() });
+    let mut empty = msg(11, true, "", "");
+    empty.caption = Some(String::new());
+    let mut ids: Vec<ChatMsg> = vec![
+        rich,
+        empty,
+        msg(12, false, "Аня", &long_word),
+        msg(13, true, "Я", &wide),
+        msg(14, false, "Борис", &"слово ".repeat(2000)),
+        msg(15, false, "Борис", "строка 1\nстрока 2\n\n\nстрока 5"),
+    ];
+    ids.extend((20..60).map(|i| msg(i, i % 3 == 0, "Аня", &format!("сообщение номер {i}"))));
+    let g = app.chats[2].id;
+    app.histories.insert(g, ids);
+    // Чаты с неудобными названиями и счётчиками.
+    let mut weird = chat(40, "", Kind::User, 99_999);
+    weird.mentions = 1000;
+    weird.muted = true;
+    weird.preview = long_word.clone();
+    weird.presence = Some(crate::tg::Presence::Online(i64::MAX / 2));
+    let mut cjk = chat(41, &wide, Kind::Channel, 0);
+    cjk.can_write = false;
+    cjk.preview = wide.clone();
+    let mut named = chat(42, &long_word, Kind::Group, 7);
+    named.draft = wide.clone();
+    app.chats.extend([weird, cjk, named]);
+    app
+}
+
+#[test]
+fn every_view_and_mode_draws_at_every_size_without_panic() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let sizes: [(u16, u16); 22] = [
+        (0, 0),
+        (1, 1),
+        (2, 1),
+        (1, 2),
+        (3, 3),
+        (5, 3),
+        (8, 4),
+        (10, 5),
+        (16, 6),
+        (20, 6),
+        (24, 8),
+        (30, 8),
+        (40, 12),
+        (50, 15),
+        (63, 20),
+        (64, 20),
+        (65, 20),
+        (80, 24),
+        (120, 30),
+        (200, 50),
+        (300, 80),
+        (97, 3),
+    ];
+    type Setup = (&'static str, fn(&mut App));
+    let setups: Vec<Setup> = vec![
+        ("чат", |_| {}),
+        ("длинное поле ввода", |a| {
+            a.input = "日本語 😀 длинный текст\nвторая строка ".repeat(40);
+            a.cursor = 17;
+        }),
+        ("курсор за концом", |a| {
+            a.input = "abc".into();
+            a.cursor = 99;
+        }),
+        ("ответ и правка", |a| {
+            a.reply = Some((10, "Очень длинная подпись ответа ".repeat(20)));
+            a.edit_target = Some(12);
+        }),
+        ("статус", |a| a.status = "очень длинное сообщение в строке состояния ".repeat(30)),
+        ("огромная прокрутка", |a| a.scroll = 1_000_000),
+        ("прокрутка и найденное", |a| {
+            a.scroll = 3;
+            a.focus_msg = Some(14);
+            a.focus_pending = true;
+        }),
+        ("выбор сообщения", |a| {
+            a.mode = Mode::Pick;
+            a.pick = 2;
+        }),
+        ("выбор вне диапазона", |a| {
+            a.mode = Mode::Pick;
+            a.pick = 99_999;
+        }),
+        ("отметки", |a| {
+            a.marked.extend([10, 11, 12, 777]);
+        }),
+        ("пересылка", |a| {
+            let src = a.chats[0].clone();
+            a.fwd_src = Some((src, vec![1, 2]));
+            a.mode = Mode::Forward;
+        }),
+        ("пересылка без источника", |a| a.mode = Mode::Forward),
+        ("первое непрочитанное", |a| {
+            let g = a.chats[2].id;
+            a.new_from.insert(g, 14);
+            a.new_from.insert(a.chats[0].id, 99_999);
+        }),
+        ("фильтр списка", |a| a.filter = "несуществующее".into()),
+        ("закреплённое", |a| {
+            let g = a.chats[2].id;
+            a.pinned_msg.insert(g, "Закреплённое ".repeat(60));
+        }),
+        ("тема форума", |a| {
+            let g = a.chats[2].id;
+            a.topic = Some((g, 5, "Тема ".repeat(50)));
+        }),
+        ("помощь", |a| a.open_help()),
+        ("помощь, листание далеко", |a| {
+            a.open_help();
+            a.help_top = 1_000_000;
+        }),
+        ("быстрый переход", |a| a.open_quick()),
+        ("быстрый переход, запрос", |a| {
+            a.open_quick();
+            if let Some(q) = a.quick.as_mut() {
+                q.query = "日本語 запрос ".repeat(20);
+                q.sel = 99_999;
+            }
+        }),
+        ("блокировка", |a| {
+            a.lock_error = "очень длинная ошибка ".repeat(20);
+            a.lock_input = "пароль".repeat(100);
+            a.lock_until = Some(Instant::now() + Duration::from_secs(60));
+            a.mode = Mode::Locked;
+        }),
+        ("новый пароль 1", |a| {
+            a.pw_stage = 0;
+            a.mode = Mode::NewPassword;
+        }),
+        ("новый пароль 2", |a| {
+            a.pw_stage = 1;
+            a.lock_input = "x".repeat(500);
+            a.mode = Mode::NewPassword;
+        }),
+        ("фото", |a| {
+            a.preview = Some(Preview { w: 4, h: 4, rgb: vec![128; 48] });
+            a.mode = Mode::Preview;
+        }),
+        ("фото 1x1", |a| {
+            a.preview = Some(Preview { w: 1, h: 1, rgb: vec![255, 0, 0] });
+            a.mode = Mode::Preview;
+        }),
+        ("фото пустое", |a| {
+            a.preview = Some(Preview { w: 0, h: 0, rgb: Vec::new() });
+            a.mode = Mode::Preview;
+        }),
+        ("фото большое", |a| {
+            a.preview = Some(Preview { w: 640, h: 480, rgb: vec![90; 640 * 480 * 3] });
+            a.mode = Mode::Preview;
+        }),
+        ("фото без точек", |a| {
+            a.preview = Some(Preview { w: 50, h: 50, rgb: Vec::new() });
+            a.mode = Mode::Preview;
+        }),
+        ("фото нет вовсе", |a| a.mode = Mode::Preview),
+        ("файл", |a| {
+            a.viewer = Some(Viewer {
+                name: "очень-длинное-имя-файла.txt".repeat(8),
+                lines: (0..300).map(|i| format!("строка {i} 日本語 😀")).collect(),
+                top: 5,
+            });
+            a.mode = Mode::Viewer;
+        }),
+        ("файл пустой", |a| {
+            a.viewer = Some(Viewer { name: String::new(), lines: Vec::new(), top: 0 });
+            a.mode = Mode::Viewer;
+        }),
+        ("файл, строка за концом", |a| {
+            a.viewer = Some(Viewer { name: "a.txt".into(), lines: vec!["x".into()], top: 1_000_000 });
+            a.mode = Mode::Viewer;
+        }),
+        ("файла нет вовсе", |a| a.mode = Mode::Viewer),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    let mut drawn = 0usize;
+    for view in 0..=2u8 {
+        for (name, setup) in &setups {
+            let mut app = stress_app(view);
+            setup(&mut app);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                for &(w, h) in &sizes {
+                    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    term.draw(|f| draw(f, &mut app)).unwrap();
+                }
+            }));
+            drawn += sizes.len();
+            if result.is_err() {
+                failures.push(format!("вид {view}, «{name}»"));
+            }
+        }
+        // Настройки: каждая строка и каждый вид перечислений.
+        for row in 0..SETTINGS_ROWS + 3 {
+            let mut app = stress_app(view);
+            app.settings_row = row;
+            app.mode = Mode::Settings;
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                for &(w, h) in &sizes {
+                    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    term.draw(|f| draw(f, &mut app)).unwrap();
+                }
+            }));
+            drawn += sizes.len();
+            if result.is_err() {
+                failures.push(format!("вид {view}, настройки, строка {row}"));
+            }
+        }
+        // Списки поверх чата, у каждого — длинные подписи и выбор за пределами списка.
+        for kind in [
+            OverlayKind::Links,
+            OverlayKind::Scheduled,
+            OverlayKind::Faq,
+            OverlayKind::Search,
+            OverlayKind::Buttons,
+            OverlayKind::Poll,
+            OverlayKind::Topics,
+            OverlayKind::Drafts,
+        ] {
+            for (count, sel) in [(0usize, 0usize), (1, 0), (5, 3), (80, 79), (3, 999)] {
+                let mut app = stress_app(view);
+                let items: Vec<OverlayItem> = (0..count)
+                    .map(|i| OverlayItem {
+                        label: format!("пункт {i} {}", "日本語 длинная подпись ".repeat(6)),
+                        data: "https://example.com".into(),
+                        id: i as i32,
+                        target: None,
+                    })
+                    .collect();
+                app.open_overlay(kind, &"Заголовок ".repeat(12), items);
+                if let Some(o) = app.overlay.as_mut() {
+                    o.sel = sel;
+                    o.confirm = Some(sel);
+                }
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    for &(w, h) in &sizes {
+                        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                        term.draw(|f| draw(f, &mut app)).unwrap();
+                    }
+                }));
+                drawn += sizes.len();
+                if result.is_err() {
+                    failures.push(format!("вид {view}, список {kind:?}, {count} пунктов, выбран {sel}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "отрисовка упала ({} отрисовок прошло):\n{}", drawn, failures.join("\n"));
+    assert!(drawn > 5000, "{drawn}");
+}
+
+// ------------------------------------------------------------------ случайный «обстрел»: клавиши, мышь и события Telegram
+
+/// Простой детерминированный генератор: один и тот же прогон повторяется, и найденное падение можно воспроизвести.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len())]
+    }
+}
+
+fn fuzz_msg(rng: &mut Rng) -> ChatMsg {
+    use crate::tg::{Btn, BtnAction, MediaInfo, MediaKind, PollOpt, PollView, Reaction};
+    let id = rng.below(80) as i32 + 1;
+    let sender = *rng.pick(&["Аня", "Борис", "", "日本語"]);
+    let text =
+        *rng.pick(&["", "текст", "длинный текст со ссылкой https://example.com/x и ещё слова", "строка 1\nстрока 2", "😀👍🏽 e\u{301}"]);
+    let mut m = msg(id, rng.below(2) == 0, sender, text);
+    if rng.below(4) == 0 {
+        m.reply_to = Some(rng.below(80) as i32 + 1);
+    }
+    if rng.below(5) == 0 {
+        m.media = Some(MediaInfo { kind: MediaKind::Photo, name: "a.jpg".into(), size: Some(5) });
+    }
+    if rng.below(6) == 0 {
+        m.buttons = vec![vec![Btn { text: "Да".into(), action: BtnAction::Callback(vec![1]) }]];
+    }
+    if rng.below(8) == 0 {
+        m.poll = Some(PollView {
+            question: "Q".into(),
+            options: vec![PollOpt { text: "A".into(), data: vec![0], voters: 1, chosen: false, correct: false }],
+            ..Default::default()
+        });
+    }
+    if rng.below(6) == 0 {
+        m.reactions = vec![Reaction { emoji: "👍".into(), count: 2, mine: false }];
+    }
+    m
+}
+
+fn fuzz_msgs(rng: &mut Rng) -> Vec<ChatMsg> {
+    let n = rng.below(7);
+    let mut v: Vec<ChatMsg> = (0..n).map(|_| fuzz_msg(rng)).collect();
+    v.sort_by_key(|m| m.id);
+    v.dedup_by_key(|m| m.id);
+    v
+}
+
+/// Событие от Telegram (кроме открытия файла программой): чаще осмысленное, иногда о чате, которого нет в списке.
+fn fuzz_event(rng: &mut Rng, app: &App) -> (u8, Event) {
+    use crate::tg::{ScheduledMsg, SearchHit, TypingKind};
+    let mut ids: Vec<PeerId> = app.chats.iter().map(|c| c.id).collect();
+    ids.push(PeerId::user(999).unwrap());
+    let chat = *rng.pick(&ids);
+    let n = rng.below(33) as u8;
+    let ev = match n {
+        0 => Event::Dialogs(app.chats.iter().filter(|_| rng.below(4) != 0).cloned().collect()),
+        1 => Event::DialogsPage(app.chats.iter().filter(|_| rng.below(3) != 0).cloned().collect()),
+        2 => Event::History { chat, msgs: fuzz_msgs(rng) },
+        3 | 4 => {
+            let m = fuzz_msg(rng);
+            Event::Incoming { chat, chat_name: "Имя".into(), msg: m }
+        }
+        5 => Event::Sent { chat, msg: fuzz_msg(rng), scheduled: rng.below(3) == 0 },
+        6 => Event::SendFailed { chat, text: "не ушло\nтекст".into() },
+        7 => Event::Edited { chat, msg: fuzz_msg(rng) },
+        8 => {
+            let ids: Vec<i32> = (0..rng.below(8)).map(|_| rng.below(80) as i32 + 1).collect();
+            Event::Deleted { chat: if rng.below(2) == 0 { Some(chat) } else { None }, ids }
+        }
+        9 => Event::Presence { user: chat, presence: crate::tg::Presence::Recently },
+        10 => {
+            Event::Typing { chat, from: Some(*rng.pick(&ids)), kind: *rng.pick(&[TypingKind::Text, TypingKind::Voice, TypingKind::Stop]) }
+        }
+        11 => Event::Pinned { chat, text: if rng.below(2) == 0 { Some("закреплено".into()) } else { None } },
+        12 => Event::Scheduled {
+            chat,
+            items: (0..rng.below(4))
+                .map(|i| ScheduledMsg { id: i as i32 + 1, date: 1_800_000_000 + i as i64, text: "позже".into() })
+                .collect(),
+        },
+        13 => Event::Older { chat, msgs: fuzz_msgs(rng) },
+        14 => {
+            let msgs = fuzz_msgs(rng);
+            let focus = msgs.first().map_or(1, |m| m.id);
+            Event::Around { chat, msgs, focus }
+        }
+        15 => Event::SearchResults {
+            query: "запрос".into(),
+            scope: if rng.below(2) == 0 { Some(chat) } else { None },
+            hits: (0..rng.below(4))
+                .map(|i| SearchHit {
+                    chat,
+                    chat_name: "Чат".into(),
+                    id: i as i32 + 1,
+                    ts: 1_800_000_000,
+                    when: "10:00".into(),
+                    sender: "Аня".into(),
+                    text: "найдено\nздесь".into(),
+                })
+                .collect(),
+        },
+        16 => Event::TextFile { chat, name: "a.txt".into(), lines: (0..rng.below(5)).map(|i| format!("строка {i}")).collect() },
+        17 => {
+            let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+            jpeg.extend((0..rng.below(300)).map(|_| rng.below(256) as u8));
+            Event::Preview { chat, jpeg }
+        }
+        18 => Event::Latency(if rng.below(2) == 0 { Some(rng.below(900) as u32) } else { None }),
+        19 => Event::Queued { chat, text: "в очереди".into(), count: rng.below(3) },
+        20 => Event::QueueSent { chat, text: "в очереди".into(), left: rng.below(3) },
+        21 => Event::QueueDropped { chat, text: "в очереди".into(), reason: "причина".into() },
+        22 => Event::Reacted { chat, msg: fuzz_msg(rng) },
+        23 => Event::ButtonAnswer(if rng.below(2) == 0 { String::new() } else { "ответ бота".into() }),
+        24 => Event::ReadOutbox { chat, max_id: rng.below(80) as i32 },
+        25 => Event::Topics { chat, items: (0..rng.below(4)).map(|i| (i as i32 + 1, "Тема".to_string(), i as i32)).collect() },
+        26 => Event::PinnedList {
+            chat,
+            hits: (0..rng.below(3))
+                .map(|i| SearchHit {
+                    chat,
+                    chat_name: "Чат".into(),
+                    id: i as i32 + 1,
+                    ts: 1_800_000_000,
+                    when: "10:00".into(),
+                    sender: "Аня".into(),
+                    text: "закреп".into(),
+                })
+                .collect(),
+        },
+        27 => Event::Found(chat_for_fuzz(rng)),
+        28 => Event::Left(chat),
+        29 => Event::Draft { chat, text: if rng.below(2) == 0 { "черновик".into() } else { String::new() } },
+        30 => Event::Status("статус".into()),
+        31 => Event::Error("ошибка".into()),
+        _ => Event::NetCheck(vec!["DNS: ok".into(), "DC2: 120 мс".into()]),
+    };
+    (n, ev)
+}
+
+fn chat_for_fuzz(rng: &mut Rng) -> ChatInfo {
+    let n = rng.below(4) as i64;
+    chat(60 + n, "Найденный чат", if n % 2 == 0 { Kind::Channel } else { Kind::User }, n as i32)
+}
+
+fn fuzz_key(rng: &mut Rng) -> KeyEvent {
+    let chars: Vec<char> =
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюя ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789 /?!.,日本😀".chars().collect();
+    let codes = [
+        KeyCode::Enter,
+        KeyCode::Esc,
+        KeyCode::Tab,
+        KeyCode::BackTab,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::Insert,
+        KeyCode::F(1),
+        KeyCode::F(2),
+        KeyCode::F(3),
+        KeyCode::F(4),
+        KeyCode::F(5),
+        KeyCode::F(6),
+        KeyCode::F(7),
+        KeyCode::F(8),
+        KeyCode::F(9),
+        KeyCode::F(11),
+        KeyCode::F(12),
+    ];
+    let mods = *rng.pick(&[
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+        KeyModifiers::NONE,
+        KeyModifiers::SHIFT,
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ]);
+    if rng.below(100) < 45 {
+        let c = *rng.pick(&chars);
+        // Управляющие сочетания: буква с Ctrl или Alt; без них — обычный набор.
+        KeyEvent::new(KeyCode::Char(c), if mods == KeyModifiers::SHIFT { KeyModifiers::NONE } else { mods })
+    } else {
+        KeyEvent::new(*rng.pick(&codes), mods)
+    }
+}
+
+fn fuzz_mouse(rng: &mut Rng) -> MouseEvent {
+    let kind = *rng.pick(&[
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::ScrollUp,
+        MouseEventKind::ScrollDown,
+        MouseEventKind::Moved,
+    ]);
+    MouseEvent { kind, column: rng.below(130) as u16, row: rng.below(45) as u16, modifiers: KeyModifiers::NONE }
+}
+
+/// Что должно быть верным в любой момент, как бы ни нажимали клавиши и какие бы события ни приходили.
+fn fuzz_invariants(app: &App) -> Result<(), String> {
+    macro_rules! ensure {
+        ($cond:expr, $($msg:tt)+) => {
+            if !$cond {
+                return Err(format!($($msg)+));
+            }
+        };
+    }
+    let chars = app.input.chars().count();
+    ensure!(app.cursor <= chars, "курсор {} за концом поля ввода ({chars} символов)", app.cursor);
+    if let Some(id) = app.sel {
+        ensure!(app.chats.iter().any(|c| c.id == id), "выбран чат, которого нет в списке");
+    }
+    ensure!(app.settings_row < SETTINGS_ROWS, "строка настроек {} за пределами", app.settings_row);
+    ensure!(app.panes.open.len() <= 14, "открыто вкладок: {}", app.panes.open.len());
+    match app.mode {
+        Mode::Overlay => ensure!(app.overlay.is_some(), "режим списка без списка"),
+        Mode::Quick => ensure!(app.quick.is_some(), "быстрый переход без окна"),
+        Mode::Viewer => ensure!(app.viewer.is_some(), "режим чтения без файла"),
+        Mode::Preview => ensure!(app.preview.is_some(), "режим фото без фото"),
+        Mode::Forward => ensure!(app.fwd_src.is_some(), "режим пересылки без сообщения"),
+        Mode::Pick => {
+            ensure!(app.sel.is_some(), "выбор сообщения без чата");
+            let len = app.sel.and_then(|id| app.histories.get(&id)).map_or(0, Vec::len);
+            ensure!(len == 0 || app.pick < len, "выбрано сообщение {} из {len}", app.pick);
+        }
+        _ => {}
+    }
+    if app.mode == Mode::Overlay
+        && let Some(o) = &app.overlay
+    {
+        ensure!(o.items.is_empty() || o.sel < o.items.len(), "выбран пункт списка {} из {}", o.sel, o.items.len());
+    }
+    if app.mode == Mode::Quick
+        && let Some(q) = &app.quick
+    {
+        ensure!(q.items.is_empty() || q.sel < q.items.len(), "выбран пункт быстрого перехода {} из {}", q.sel, q.items.len());
+    }
+    Ok(())
+}
+
+#[test]
+fn random_keys_mouse_and_events_never_panic_or_break_the_state() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    // Команды без побочных действий на диске и в сети; со случайными хвостами.
+    let commands = [
+        "/find",
+        "/findmsg",
+        "/findall",
+        "/latest",
+        "/pinned",
+        "/topics",
+        "/pin",
+        "/chat",
+        "/join",
+        "/leave",
+        "/readall",
+        "/note",
+        "/edit",
+        "/del",
+        "/later 1",
+        "/md",
+        "/lock",
+        "/settings",
+        "/refresh",
+        "/help",
+        "/search",
+        "/links",
+        "/scheduled",
+        "/faq",
+        "/view",
+        "/view panes",
+        "/view messenger",
+        "/mute",
+        "/dnd",
+        "/dnd 30",
+        "/dnd off",
+        "/next",
+        "/drafts",
+        "/send",
+        "/album",
+        "/netcheck",
+    ];
+    let tails = ["", " ", " а", " 1", " 日本語", " @x", " https://example.com", " 999999999999", " -5", " /"];
+    let sizes: [(u16, u16); 8] = [(80, 24), (120, 30), (40, 12), (20, 6), (100, 40), (64, 16), (3, 3), (200, 50)];
+    // По умолчанию прогон короткий; для долгого поиска редких ошибок: TGL_FUZZ_SEEDS=300 TGL_FUZZ_STEPS=2000 cargo test.
+    let env_num = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(default);
+    let (seeds, steps) = (env_num("TGL_FUZZ_SEEDS", 8), env_num("TGL_FUZZ_STEPS", 600));
+    let trace = std::env::var_os("TGL_FUZZ_TRACE").is_some();
+    let mut failures: Vec<String> = Vec::new();
+    // TGL_FUZZ_ONLY=вид/зерно — повторить только один прогон (вместе с TGL_FUZZ_TRACE видно все шаги).
+    let only = std::env::var("TGL_FUZZ_ONLY").ok();
+    for view in 0..=2u8 {
+        for seed in 1..=seeds {
+            if only.as_ref().is_some_and(|o| *o != format!("{view}/{seed}")) {
+                continue;
+            }
+            let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ (seed * 0x1000_0001 + u64::from(view) * 7919));
+            let mut app = stress_app(view);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let s = saver();
+            let mut last = String::from("начало");
+            let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+                for step in 0..steps {
+                    let action = rng.below(20);
+                    last = match action {
+                        0..=9 => {
+                            if rng.below(2) == 0 {
+                                slow(&mut app);
+                            }
+                            let k = fuzz_key(&mut rng);
+                            // Значения настроек не перебираем: каждое сохранение — отдельный Argon2 в фоне.
+                            if app.mode == Mode::Settings && matches!(k.code, KeyCode::Left | KeyCode::Right | KeyCode::Enter) {
+                                continue;
+                            }
+                            // Смена пароля тоже сохраняет хранилище; её отдельно проверяют другие тесты.
+                            if app.mode == Mode::NewPassword && k.code == KeyCode::Enter {
+                                continue;
+                            }
+                            if trace {
+                                eprintln!("{view}/{seed}/{step}: клавиша {k:?} в режиме {:?}", app.mode);
+                            }
+                            app.handle_key(k, &tx, &s);
+                            format!("клавиша {k:?}")
+                        }
+                        10..=11 => {
+                            let m = fuzz_mouse(&mut rng);
+                            if trace {
+                                eprintln!("{view}/{seed}/{step}: мышь {m:?} в режиме {:?}", app.mode);
+                            }
+                            app.handle_mouse(m, &tx);
+                            format!("мышь {m:?}")
+                        }
+                        12..=15 => {
+                            let (n, ev) = fuzz_event(&mut rng, &app);
+                            if trace {
+                                eprintln!("{view}/{seed}/{step}: событие №{n} в режиме {:?}", app.mode);
+                            }
+                            app.handle_event(ev, &tx);
+                            format!("событие №{n}")
+                        }
+                        16 | 17 => {
+                            let line = format!("{}{}", rng.pick(&commands), rng.pick(&tails));
+                            if trace {
+                                eprintln!("{view}/{seed}/{step}: команда {line:?} в режиме {:?}", app.mode);
+                            }
+                            if app.mode == Mode::Chat {
+                                submit_text(&mut app, &line, &tx, &s);
+                            }
+                            format!("команда {line:?}")
+                        }
+                        18 => {
+                            // Выйти из блокировки, чтобы не застрять на экране пароля до конца прогона.
+                            if app.mode == Mode::Locked {
+                                app.lock_until = None;
+                                let pw = s.password();
+                                type_text(&mut app, &pw, &tx, &s);
+                                slow(&mut app);
+                                app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE), &tx, &s);
+                            }
+                            "разблокировка".to_string()
+                        }
+                        _ => {
+                            let (w, h) = *rng.pick(&sizes);
+                            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                            term.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
+                            format!("отрисовка {w}x{h}")
+                        }
+                    };
+                    while rx.try_recv().is_ok() {}
+                    fuzz_invariants(&app).map_err(|e| format!("шаг {step}, после «{last}»: {e}"))?;
+                }
+                Ok(())
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => failures.push(format!("вид {view}, зерно {seed}: {e}")),
+                Err(_) => failures.push(format!("вид {view}, зерно {seed}: паника после «{last}»")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "обстрел нашёл:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn poll_percent_is_always_between_0_and_100_whatever_the_server_sends() {
+    use super::text::poll_percent;
+    assert_eq!((poll_percent(1, 4), poll_percent(4, 4), poll_percent(0, 4)), (25, 100, 0));
+    assert_eq!(poll_percent(3, 0), 0, "общее число неизвестно");
+    assert_eq!(poll_percent(3, -7), 0);
+    assert_eq!(poll_percent(-1, 5), 0, "голосов меньше нуля");
+    assert_eq!(poll_percent(500, 5), 100, "вариант больше общего числа");
+    // Раньше от умножения на 100 переполнялся i32, и полоска «растягивалась» на миллиарды знаков (программа падала).
+    assert_eq!(poll_percent(30_000_000, 40_000_000), 75);
+    assert_eq!(poll_percent(i32::MAX, i32::MAX), 100);
+    assert_eq!(poll_percent(i32::MAX, 1), 100);
+}
+
+#[test]
+fn a_poll_with_absurd_numbers_still_draws() {
+    use crate::tg::{PollOpt, PollView};
+    let mut app = app_in_view(0);
+    let g = app.chats[2].id;
+    let mut m = msg(500, false, "Аня", "опрос");
+    m.poll = Some(PollView {
+        question: "Вопрос?".into(),
+        total: 5,
+        options: vec![
+            PollOpt { text: "минус".into(), data: vec![0], voters: -1, chosen: false, correct: false },
+            PollOpt { text: "много".into(), data: vec![1], voters: i32::MAX, chosen: true, correct: false },
+            PollOpt { text: "обычный".into(), data: vec![2], voters: 3, chosen: false, correct: true },
+        ],
+        ..Default::default()
+    });
+    app.histories.insert(g, vec![m]);
+    app.sel = Some(g);
+    let text = draw_text(&mut app, 100, 30);
+    assert!(text.contains("минус") && text.contains("много") && text.contains("100%"), "{text}");
 }

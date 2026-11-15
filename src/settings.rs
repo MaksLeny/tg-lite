@@ -51,6 +51,14 @@ pub struct Settings {
     pub emoji: u8,
     /// Всплывающее уведомление Windows о новом сообщении, пока вы не за клавиатурой.
     pub notify: bool,
+    /// Вид окна: 0 классический, 1 «Мессенджер» (превью в списке, сообщения по авторам), 2 «Два окна».
+    pub view: u8,
+    /// Тихие часы (без звука и уведомлений): номер из `QUIET_PRESETS`, 0 — выключены.
+    pub quiet: u8,
+    /// Чаты, заглушённые в Tg-Lite командой `/mute` (bot-API id).
+    pub muted: Vec<i64>,
+    /// Уменьшать большие фото перед отправкой, чтобы они уходили быстрее.
+    pub compress: bool,
 }
 
 impl Default for Settings {
@@ -74,6 +82,10 @@ impl Default for Settings {
             palette: 0,
             emoji: 0,
             notify: false,
+            view: 0,
+            quiet: 0,
+            muted: Vec::new(),
+            compress: true,
         }
     }
 }
@@ -81,6 +93,8 @@ impl Default for Settings {
 pub const LOCK_CHOICES: [u32; 8] = [0, 1, 2, 5, 10, 15, 30, 60];
 pub const WIPE_CHOICES: [u32; 4] = [0, 3, 5, 10];
 pub const HISTORY_CHOICES: [u32; 4] = [30, 60, 100, 150];
+/// Тихие часы: (с какой минуты суток, до какой). Первая запись — выключено.
+pub const QUIET_PRESETS: [(u16, u16); 5] = [(0, 0), (22 * 60, 7 * 60), (23 * 60, 8 * 60), (0, 9 * 60), (60, 10 * 60)];
 pub fn accent_names() -> [&'static str; 5] {
     [tr!("Голубой", "Blue"), tr!("Зелёный", "Green"), tr!("Янтарный", "Amber"), tr!("Розовый", "Pink"), tr!("Фиолетовый", "Purple")]
 }
@@ -98,6 +112,27 @@ pub fn cycle<T: PartialEq + Copy>(list: &[T], cur: T, dir: i32) -> T {
 }
 
 impl Settings {
+    /// Читает настройки из JSON и не отказывается целиком из-за одного непонятного поля: хранилище, записанное другой
+    /// версией (новое значение перечисления, число не того вида), всё равно открывается. Негодное поле получает
+    /// значение по умолчанию, остальные сохраняются.
+    pub fn from_json_lenient(v: serde_json::Value) -> Settings {
+        if let Ok(s) = serde_json::from_value::<Settings>(v.clone()) {
+            return s;
+        }
+        let serde_json::Value::Object(fields) = v else { return Settings::default() };
+        let mut cur = serde_json::to_value(Settings::default()).unwrap_or_default();
+        for (name, value) in fields {
+            let mut trial = cur.clone();
+            if let Some(o) = trial.as_object_mut() {
+                o.insert(name, value);
+            }
+            if serde_json::from_value::<Settings>(trial.clone()).is_ok() {
+                cur = trial;
+            }
+        }
+        serde_json::from_value(cur).unwrap_or_default()
+    }
+
     pub fn lock_label(&self) -> String {
         match self.lock_minutes {
             0 => tr!("никогда", "never").to_string(),
@@ -145,6 +180,32 @@ impl Settings {
         }
     }
 
+    /// Название вида окна.
+    pub fn view_name(&self) -> &'static str {
+        [tr!("классический", "classic"), tr!("мессенджер", "messenger"), tr!("два окна", "two panes")][(self.view as usize).min(2)]
+    }
+
+    /// Тихие часы как пара «с минуты, до минуты суток»; `None`, если выключены.
+    pub fn quiet_range(&self) -> Option<(u16, u16)> {
+        QUIET_PRESETS.get(self.quiet as usize).copied().filter(|(a, b)| a != b)
+    }
+
+    pub fn quiet_label(&self) -> String {
+        match self.quiet_range() {
+            None => tr!("выключены", "off").to_string(),
+            Some((a, b)) => format!("{:02}:{:02}–{:02}:{:02}", a / 60, a % 60, b / 60, b % 60),
+        }
+    }
+
+    /// Попадает ли минута суток (0..1440) в тихие часы; интервал может переходить через полночь.
+    pub fn is_quiet_at(&self, minute: u16) -> bool {
+        match self.quiet_range() {
+            None => false,
+            Some((a, b)) if a < b => (a..b).contains(&minute),
+            Some((a, b)) => minute >= a || minute < b,
+        }
+    }
+
     pub fn width_name(v: u8, names: [&'static str; 3]) -> &'static str {
         names[(v as usize).min(2)]
     }
@@ -183,6 +244,62 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"lock_minutes":15}"#).unwrap();
         assert_eq!(s.lock_minutes, 15);
         assert!(s.show_status);
+    }
+
+    #[test]
+    fn quiet_hours_cross_midnight_and_can_be_off() {
+        let mut s = Settings::default();
+        assert!(!s.is_quiet_at(3 * 60), "по умолчанию тихих часов нет");
+        assert_eq!(s.quiet_label(), "выключены");
+        s.quiet = 1; // 22:00–07:00
+        assert_eq!(s.quiet_label(), "22:00–07:00");
+        for (minute, quiet) in [
+            (22 * 60, true),
+            (23 * 60 + 59, true),
+            (0, true),
+            (6 * 60 + 59, true),
+            (7 * 60, false),
+            (12 * 60, false),
+            (21 * 60 + 59, false),
+        ] {
+            assert_eq!(s.is_quiet_at(minute), quiet, "минута {minute}");
+        }
+        s.quiet = 3; // 00:00–09:00 не переходит через полночь
+        assert!(s.is_quiet_at(0) && s.is_quiet_at(8 * 60 + 59) && !s.is_quiet_at(9 * 60) && !s.is_quiet_at(23 * 60));
+        s.quiet = 200; // неизвестный номер из будущей версии — как «выключены»
+        assert!(!s.is_quiet_at(0) && s.quiet_label() == "выключены");
+        assert!(QUIET_PRESETS.iter().all(|(a, b)| *a < 1440 && *b < 1440));
+    }
+
+    #[test]
+    fn views_have_names_and_unknown_values_fall_back() {
+        let mut s = Settings::default();
+        assert_eq!((s.view, s.view_name()), (0, "классический"));
+        s.view = 2;
+        assert_eq!(s.view_name(), "два окна");
+        s.view = 77;
+        assert_eq!(s.view_name(), "два окна", "неизвестное значение не должно падать");
+        let old: Settings = serde_json::from_str(r#"{"lang":0}"#).unwrap();
+        assert!(old.compress && old.muted.is_empty() && old.view == 0 && old.quiet == 0);
+    }
+
+    #[test]
+    fn one_unreadable_field_does_not_lose_the_other_settings() {
+        // Значение, которого эта версия не знает (скажем, новый вид прокси), и число не того вида.
+        let json = serde_json::json!({
+            "lock_minutes": 15, "proxy_mode": "Socks5", "view": -3, "accent": "red", "pinned": [1, 2], "from_the_future": {"a": 1}, "sound": true
+        });
+        let s = Settings::from_json_lenient(json);
+        assert_eq!((s.lock_minutes, s.sound, s.pinned.clone()), (15, true, vec![1, 2]), "понятные поля сохранены");
+        assert_eq!((s.proxy_mode, s.view, s.accent), (ProxyMode::Auto, 0, 0), "негодные получили значения по умолчанию");
+        // Не объект вообще: всё по умолчанию.
+        assert_eq!(Settings::from_json_lenient(serde_json::json!([1, 2])), Settings::default());
+        assert_eq!(Settings::from_json_lenient(serde_json::Value::Null), Settings::default());
+        // Целиком понятное читается как раньше.
+        let mut full = Settings::default();
+        full.lang = 1;
+        full.view = 2;
+        assert_eq!(Settings::from_json_lenient(serde_json::to_value(&full).unwrap()), full);
     }
 
     #[test]

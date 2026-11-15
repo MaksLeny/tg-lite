@@ -168,16 +168,40 @@ pub fn extract_links(text: &str) -> Vec<String> {
     out
 }
 
+/// Путь к программе в системной папке Windows: `<корень>\System32\<имя>.exe`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn system_exe_path(root: &std::path::Path, name: &str) -> PathBuf {
+    root.join("System32").join(format!("{name}.exe"))
+}
+
+/// Системная программа Windows (`rundll32`, `clip`, `reg`) по полному пути. Просто имя искало бы её сначала в папке
+/// самой программы, и одноимённый файл, случайно оказавшийся рядом, запустился бы вместо настоящего.
+/// Нет `SystemRoot` или файла: остаётся имя, как раньше.
+#[cfg(windows)]
+pub fn system_exe(name: &str) -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(|root| system_exe_path(std::path::Path::new(&root), name))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
 /// Открывает ссылку в браузере по умолчанию. Только http и https, без участия командной строки.
 pub fn open_url(url: &str) -> bool {
-    if !(url.starts_with("http://") || url.starts_with("https://")) || url.chars().any(|c| c.is_control() || c == ' ') {
+    if !(url.starts_with("http://") || url.starts_with("https://")) || url.chars().any(|c| c.is_control() || c == ' ' || c == '"') {
         return false;
+    }
+    // Проверки (в том числе случайный «обстрел» интерфейса) проходят без запуска настоящего браузера.
+    if cfg!(test) {
+        return true;
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("rundll32")
+        std::process::Command::new(system_exe("rundll32"))
             .args(["url.dll,FileProtocolHandler", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .creation_flags(0x0800_0000) // без окна консоли
             .spawn()
             .is_ok()
@@ -206,32 +230,115 @@ pub fn debug(msg: &str) {
     }
 }
 
-/// Отчёт для поддержки: версия, система, настройки (без адреса прокси, пароля и номера)
-/// и последние строки журнала. Текстов переписки в нём нет: их нет и в журнале.
-pub fn build_report(settings: &crate::settings::Settings, chats: usize, log_tail: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("Tg-Lite {}\n", env!("CARGO_PKG_VERSION")));
-    out.push_str(&format!("OS: {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
-    out.push_str(&format!("terminal: {}\n", if in_windows_terminal() { "Windows Terminal" } else { "other console" }));
-    out.push_str(&format!(
-        "settings: lock={}min proxy={:?} sound={} notify={} emoji={} theme={} lang={} mouse={} cloud_drafts={}\n",
-        settings.lock_minutes,
-        settings.proxy_mode,
-        settings.sound,
-        settings.notify,
-        settings.emoji,
-        settings.palette,
-        settings.lang,
-        settings.mouse,
-        settings.cloud_drafts
-    ));
-    out.push_str(&format!("chats loaded: {chats}\n"));
-    out.push_str("\n--- log (last lines; no message texts, passwords or phone numbers) ---\n");
-    for line in log_tail.lines() {
-        out.push_str(&hide_numbers(&crate::proxy::redact_text(line)));
-        out.push('\n');
+static ROUTE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Запоминает, каким путём подключились к Telegram (для отчёта).
+pub fn set_route(desc: &str) {
+    *ROUTE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = desc.to_string();
+}
+
+/// Состояние программы для отчёта.
+pub struct ReportState<'a> {
+    pub settings: &'a crate::settings::Settings,
+    pub chats: usize,
+    /// Чатов, у которых загружена история, и всего сообщений в памяти.
+    pub histories: usize,
+    pub messages: usize,
+    pub queued: usize,
+    pub connection: String,
+    pub app_uptime: std::time::Duration,
+    pub terminal: Option<(u16, u16)>,
+    pub locked: bool,
+    pub netcheck: &'a [String],
+}
+
+/// Можно ли создавать файлы в папке программы: отчёт, журнал и настройки пишутся туда.
+fn folder_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!("tglite-write-test-{}.tmp", std::process::id()));
+    let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// Отчёт для поддержки: программа, Windows, процессор и память, терминал, сеть, состояние, настройки, файлы и
+/// журнал. В нём нет переписки, паролей, номера телефона, имени пользователя Windows и адресов прокси.
+pub fn build_report(state: &ReportState, log_tail: &str, old_log_tail: &str) -> String {
+    use crate::sysinfo::{Section, bytes, describe_proxy, duration, render};
+    let dir = data_dir();
+    let s = state.settings;
+
+    let mut program = Section::new("program");
+    program.add("version", env!("CARGO_PKG_VERSION"));
+    program.add("build", format!("{} {}", if cfg!(debug_assertions) { "debug" } else { "release" }, std::env::consts::ARCH));
+    if let Ok(exe) = std::env::current_exe() {
+        let size = std::fs::metadata(&exe).map(|m| bytes(m.len())).unwrap_or_default();
+        program.add("program file", format!("{} ({size})", exe.display()));
     }
-    out
+    program.add("data folder", format!("{}, {}", dir.display(), if folder_writable(&dir) { "writable" } else { "NOT writable" }));
+    program.add("running for", duration(state.app_uptime.as_secs()));
+    program.add("interface language", if s.lang == 1 { "English" } else { "Russian" });
+
+    let known = crate::sysinfo::known_proxy_addresses(&s.proxy_manual);
+    let mut network = Section::new("network");
+    network.add("connection", &state.connection);
+    network.add("route used", ROUTE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone());
+    network.add("proxy setting", format!("{:?}, address: {}", s.proxy_mode, describe_proxy(&s.proxy_manual)));
+    network.add("proxy variables", crate::sysinfo::proxy_env_row());
+    for (i, line) in state.netcheck.iter().take(24).enumerate() {
+        network.add(&format!("netcheck {}", i + 1), hide_numbers(&crate::sysinfo::hide_addresses(line, &known)));
+    }
+
+    let mut app = Section::new("state");
+    app.add("chats loaded", state.chats.to_string());
+    app.add("histories in memory", format!("{} chats, {} messages", state.histories, state.messages));
+    app.add("unsent queue", state.queued.to_string());
+    app.add("locked", if state.locked { "yes" } else { "no" });
+
+    let mut settings = Section::new("settings");
+    settings.add("auto-lock", format!("{} min", s.lock_minutes));
+    settings.add("wipe after wrong passwords", s.wipe_after.to_string());
+    settings.add("sound / notifications", format!("{} / {}", s.sound, s.notify));
+    settings.add("status in list", s.show_status.to_string());
+    settings.add("messages per chat", s.history_limit.to_string());
+    settings.add("cloud drafts", s.cloud_drafts.to_string());
+    settings.add("mouse", s.mouse.to_string());
+    settings.add("emoji mode / active", format!("{} / {}", s.emoji, emoji_active()));
+    settings.add("theme / accent / lock background", format!("{} / {} / {}", s.palette, s.accent, s.lock_bg));
+    settings.add("list width / bubble width", format!("{} / {}", s.list_width, s.bubble_width));
+    settings.add("pinned chats", s.pinned.len().to_string());
+
+    let mut sections = vec![program];
+    sections.extend(crate::sysinfo::system_sections(&dir));
+    let mut terminal = crate::sysinfo::terminal_section(state.terminal);
+    terminal.add("emoji", if emoji_active() { "shown" } else { "hidden" });
+    sections.push(terminal);
+    sections.push(crate::sysinfo::process_section());
+    sections.push(crate::sysinfo::components_section());
+    sections.push(network);
+    sections.push(app);
+    sections.push(settings);
+    sections.push(crate::sysinfo::files_section(&dir));
+
+    let mut out = String::new();
+    let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::system());
+    out.push_str(&format!("Tg-Lite report, {}\n", now.strftime("%Y-%m-%d %H:%M:%S %:z")));
+    out.push_str("No messages, passwords, phone numbers, Windows user name or proxy addresses are included.\n\n");
+    out.push_str(&render(&sections));
+    let mut log_section = |title: &str, tail: &str| {
+        let lines: Vec<&str> = tail.lines().collect();
+        out.push_str(&format!("[{title}: {} lines]\n", lines.len()));
+        for line in lines {
+            out.push_str(&hide_numbers(&crate::sysinfo::hide_addresses(line, &known)));
+            out.push('\n');
+        }
+        out.push('\n');
+    };
+    log_section("log (tglite.log, newest last)", log_tail);
+    if !old_log_tail.trim().is_empty() {
+        log_section("previous log (tglite.old.log)", old_log_tail);
+    }
+    let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).ok();
+    crate::sysinfo::hide_user(&out, user.as_deref())
 }
 
 /// Длинные числа (телефоны, идентификаторы) заменяются на `<число>`.
@@ -258,21 +365,32 @@ fn hide_numbers(line: &str) -> String {
     out
 }
 
+/// Последние `n` строк файла журнала (пусто, если файла нет).
+fn log_tail(name: &str, n: usize) -> String {
+    let text = std::fs::read_to_string(data_dir().join(name)).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
 /// Сохраняет отчёт в `tglite-report.txt` рядом с программой.
-pub fn write_report(settings: &crate::settings::Settings, chats: usize) -> std::io::Result<PathBuf> {
-    let tail = std::fs::read_to_string(data_dir().join("tglite.log")).unwrap_or_default();
-    let lines: Vec<&str> = tail.lines().collect();
-    let tail = lines[lines.len().saturating_sub(60)..].join("\n");
+pub fn write_report(state: &ReportState) -> std::io::Result<PathBuf> {
+    let current = log_tail("tglite.log", 200);
+    // Если в свежем журнале мало строк (его только что начали заново), добавляем хвост предыдущего.
+    let old = if current.lines().count() < 60 { log_tail("tglite.old.log", 60) } else { String::new() };
     let path = data_dir().join("tglite-report.txt");
-    std::fs::write(&path, build_report(settings, chats, &tail))?;
+    std::fs::write(&path, build_report(state, &current, &old))?;
     Ok(path)
 }
 
-/// Сохраняет текст в `export/<имя>.txt` рядом с программой. Возвращает путь к файлу.
-pub fn write_export(chat_name: &str, text: &str) -> std::io::Result<PathBuf> {
-    let dir = data_dir().join("export");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.txt", safe_filename(chat_name)));
+/// Папка для сохранённых переписок: `export` рядом с программой.
+pub fn export_dir() -> PathBuf {
+    data_dir().join("export")
+}
+
+/// Сохраняет текст в `<папка>/<имя чата>.<расширение>`. Возвращает путь к файлу.
+pub fn write_export(dir: &std::path::Path, chat_name: &str, ext: &str, text: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}.{ext}", safe_filename(chat_name)));
     std::fs::write(&path, text)?;
     Ok(path)
 }
@@ -287,6 +405,11 @@ pub fn set_emoji(on: bool) {
 /// Запущено ли приложение в Windows Terminal: он рисует цветные эмодзи, старая консоль нет.
 pub fn in_windows_terminal() -> bool {
     std::env::var_os("WT_SESSION").is_some()
+}
+
+/// Показываются ли сейчас простые эмодзи.
+pub fn emoji_active() -> bool {
+    EMOJI.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Решает, показывать ли эмодзи, по настройке: 0 авто, 1 всегда, 2 никогда.
@@ -426,10 +549,18 @@ pub fn notify(title: &str, body: &str) {
             $t.Item(0).AppendChild($x.CreateTextNode($env:TGL_TITLE))|Out-Null;\
             $t.Item(1).AppendChild($x.CreateTextNode($env:TGL_BODY))|Out-Null;\
             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
-        let _ = std::process::Command::new("powershell")
+        // Своих потоков у программы нет: всё, что PowerShell напишет (например, сообщение об ошибке), ушло бы в окно приложения.
+        let powershell = std::env::var_os("SystemRoot")
+            .map(|root| std::path::Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| PathBuf::from("powershell"));
+        let _ = std::process::Command::new(powershell)
             .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", SCRIPT])
             .env("TGL_TITLE", clean(title))
             .env("TGL_BODY", clean(body))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .creation_flags(0x0800_0000) // без окна консоли
             .spawn();
     }
@@ -541,12 +672,21 @@ pub fn dib_to_png(dib: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Самая большая картинка (в точках), которую показываем в просмотре.
+const MAX_DECODE_PIXELS: usize = 32_000_000;
+
 /// Декодирует JPEG в RGB: (ширина, высота, точки подряд).
 pub fn decode_jpeg(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     let mut dec = jpeg_decoder::Decoder::new(bytes);
-    let data = dec.decode().ok()?;
+    dec.read_info().ok()?;
     let info = dec.info()?;
-    let (w, h) = (info.width as usize, info.height as usize);
+    let (w, h) = (usize::from(info.width), usize::from(info.height));
+    // Размеры в заголовке может написать кто угодно (например, отправитель подделанной «обложки» файла): под картинку
+    // в десятки тысяч точек по каждой стороне память не выделяем, иначе программа упала бы.
+    if w == 0 || h == 0 || w * h > MAX_DECODE_PIXELS {
+        return None;
+    }
+    let data = dec.decode().ok()?;
     let rgb = match info.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => data,
         jpeg_decoder::PixelFormat::L8 => data.iter().flat_map(|&g| [g, g, g]).collect(),
@@ -571,6 +711,10 @@ pub fn fit_cells(w: usize, h: usize, cols: usize, rows: usize) -> (usize, usize)
 
 /// Уменьшает RGB-картинку до `pw`×`ph` точек усреднением (чётче, чем выбор ближайшей).
 pub fn shrink_rgb(w: usize, h: usize, rgb: &[u8], pw: usize, ph: usize) -> Vec<[u8; 3]> {
+    // Точек меньше, чем сказано размерами (повреждённая картинка): чёрный кадр вместо паники.
+    if w.checked_mul(h).and_then(|n| n.checked_mul(3)).is_none_or(|n| rgb.len() < n) {
+        return vec![[0, 0, 0]; pw * ph];
+    }
     let mut out = Vec::with_capacity(pw * ph);
     for y in 0..ph {
         let (y0, y1) = (y * h / ph, ((y + 1) * h / ph).max(y * h / ph + 1).min(h));
@@ -622,7 +766,7 @@ pub fn clipboard_set(text: &str) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let mut cmd = Command::new("clip");
+        let mut cmd = Command::new(system_exe("clip"));
         cmd.creation_flags(0x0800_0000); // без окна консоли
         run(cmd, &utf16le_with_bom(&windows_newlines(text)))
     }
@@ -673,10 +817,7 @@ pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
 /// Читается ли файл с таким именем как текст.
 pub fn is_text_file(file_name: &str) -> bool {
-    match file_name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
-        _ => false,
-    }
+    TEXT_EXTS.contains(&file_ext(file_name).as_str())
 }
 
 /// Текст файла для показа: без непечатаемого, строки не длиннее 5000 (остальное отбрасывается).
@@ -688,12 +829,71 @@ pub fn text_for_view(bytes: &[u8]) -> Vec<String> {
 /// Максимальный размер файла для `/open` (байт): больше качайте через `/save`.
 pub const MAX_OPEN_BYTES: u64 = 50 * 1024 * 1024;
 
+/// Расширение имени файла в нижнем регистре, без точки (`Отчёт.PDF` → `pdf`). Нет расширения — пустая строка.
+pub fn file_ext(file_name: &str) -> String {
+    match file_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => ext.to_lowercase(),
+        _ => String::new(),
+    }
+}
+
 /// Можно ли открывать файл с таким именем программой по умолчанию.
 pub fn is_openable(file_name: &str) -> bool {
-    match file_name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => OPENABLE.contains(&ext.to_ascii_lowercase().as_str()),
-        _ => false,
+    OPENABLE.contains(&file_ext(file_name).as_str())
+}
+
+/// Есть ли в системе программа, которая откроет файл с таким расширением (без точки). Ответ запоминается:
+/// подсказка в строке состояния спрашивает об этом на каждой перерисовке. Не Windows: узнать нечего, считаем, что есть.
+pub fn has_handler(ext: &str) -> bool {
+    static CACHE: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, found)) = cache.iter().find(|(e, _)| e == ext) {
+        return *found;
     }
+    let found = system_has_handler(ext);
+    cache.push((ext.to_string(), found));
+    found
+}
+
+#[cfg(windows)]
+fn system_has_handler(ext: &str) -> bool {
+    #[link(name = "shlwapi")]
+    unsafe extern "system" {
+        fn AssocQueryStringW(flags: u32, what: u32, assoc: *const u16, extra: *const u16, out: *mut u16, out_len: *mut u32) -> i32;
+    }
+    const ASSOCF_NOTRUNCATE: u32 = 0x20;
+    const ASSOCF_INIT_IGNOREUNKNOWN: u32 = 0x400;
+    const ASSOCSTR_COMMAND: u32 = 1;
+    const ASSOCSTR_EXECUTABLE: u32 = 2;
+    const ASSOCSTR_FRIENDLYAPPNAME: u32 = 4;
+    const E_POINTER: i32 = 0x8007_007Au32 as i32;
+    if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    let assoc: Vec<u16> = format!(".{ext}").encode_utf16().chain(Some(0)).collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+    // Программа может быть и обычной, и из магазина: об одной из них система обычно расскажет хотя бы одним из трёх способов.
+    [ASSOCSTR_COMMAND, ASSOCSTR_EXECUTABLE, ASSOCSTR_FRIENDLYAPPNAME].into_iter().any(|what| {
+        let mut buf = [0u16; 520];
+        let mut len = buf.len() as u32;
+        // Безопасность: обе строки оканчиваются нулём, буфер и его длина согласованы.
+        let hr = unsafe {
+            AssocQueryStringW(
+                ASSOCF_NOTRUNCATE | ASSOCF_INIT_IGNOREUNKNOWN,
+                what,
+                assoc.as_ptr(),
+                verb.as_ptr(),
+                buf.as_mut_ptr(),
+                &mut len,
+            )
+        };
+        hr == 0 || hr == E_POINTER
+    })
+}
+
+#[cfg(not(windows))]
+fn system_has_handler(_ext: &str) -> bool {
+    true
 }
 
 /// Папка для файлов, скачанных только для просмотра (`/open`): `tglite-view` рядом с программой.
@@ -736,10 +936,21 @@ pub fn open_path(path: &std::path::Path) -> bool {
     if !is_openable(name) || !path.is_file() {
         return false;
     }
+    if cfg!(test) {
+        return true; // в проверках программу не запускаем
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("rundll32").arg("url.dll,FileProtocolHandler").arg(path).creation_flags(0x0800_0000).spawn().is_ok()
+        std::process::Command::new(system_exe("rundll32"))
+            .arg("url.dll,FileProtocolHandler")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .is_ok()
     }
     #[cfg(target_os = "macos")]
     {
@@ -1011,6 +1222,28 @@ mod tests {
         assert!(!open_url("javascript:alert(1)"));
         assert!(!open_url("https://a.b/c d"));
         assert!(!open_url("calc.exe"));
+        assert!(!open_url("https://a.b/\"c"), "кавычка в ссылке: отказ");
+        assert!(!open_url("https://a.b/c\nd"), "перевод строки в ссылке: отказ");
+        assert!(!open_url("https://a.b/c\td"), "управляющий символ в ссылке: отказ");
+        assert!(!open_url(""));
+    }
+
+    #[test]
+    fn shrinking_a_damaged_picture_gives_a_black_frame_not_a_panic() {
+        assert_eq!(shrink_rgb(50, 50, &[], 4, 4), vec![[0, 0, 0]; 16]);
+        assert_eq!(shrink_rgb(2, 2, &[1; 11], 2, 2), vec![[0, 0, 0]; 4], "на один байт меньше нужного");
+        assert_eq!(shrink_rgb(usize::MAX, 2, &[1; 12], 2, 2), vec![[0, 0, 0]; 4], "размеры, от которых переполняется счёт");
+        // Целая картинка усредняется как раньше.
+        assert_eq!(shrink_rgb(2, 2, &[10, 20, 30, 10, 20, 30, 50, 60, 70, 50, 60, 70], 1, 1), vec![[30, 40, 50]]);
+    }
+
+    #[test]
+    fn system_programs_are_taken_from_the_system_folder() {
+        let p = system_exe_path(std::path::Path::new("C:\\Windows"), "reg");
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("reg.exe"));
+        assert_eq!(p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()), Some("System32"));
+        let p = system_exe_path(std::path::Path::new("/win"), "rundll32");
+        assert!(p.ends_with("System32/rundll32.exe") || p.ends_with("System32\\rundll32.exe"), "{p:?}");
     }
 
     #[test]
@@ -1085,20 +1318,56 @@ mod media_tests {
     }
 
     #[test]
-    fn report_has_no_secrets_and_hides_long_numbers() {
+    fn report_is_detailed_and_has_no_secrets() {
         let mut s = crate::settings::Settings::default();
         s.proxy_manual = "socks5://bob:hunter2@10.0.0.1:1080".into();
         let log = "2026-11-09 10:00:00 connect via socks5://bob:hunter2@10.0.0.1:1080 failed\n2026-11-09 10:01:00 login +79001234567 error";
-        let r = build_report(&s, 12, log);
-        assert!(r.contains("Tg-Lite ") && r.contains("chats loaded: 12"));
+        let netcheck = vec!["DC1 149.154.175.50: ok 42 ms".to_string(), "proxy socks5://bob:hunter2@10.0.0.1:1080: timeout".to_string()];
+        let state = ReportState {
+            settings: &s,
+            chats: 12,
+            histories: 3,
+            messages: 410,
+            queued: 1,
+            connection: "online, 42 ms".into(),
+            app_uptime: std::time::Duration::from_secs(754),
+            terminal: Some((120, 30)),
+            locked: false,
+            netcheck: &netcheck,
+        };
+        let r = build_report(&state, log, "2026-11-08 09:00:00 old line");
+        for section in
+            ["[program]", "[system]", "[hardware]", "[terminal]", "[network]", "[state]", "[settings]", "[log (tglite.log", "[previous log"]
+        {
+            assert!(r.contains(section), "нет раздела {section}: {r}");
+        }
+        assert!(r.contains("chats loaded") && r.contains("12"), "{r}");
+        assert!(r.contains("histories in memory : 3 chats, 410 messages"), "{r}");
+        assert!(r.contains("running for") && r.contains("12 min 34 s"), "{r}");
+        assert!(r.contains("window size") && r.contains("120x30"), "{r}");
+        assert!(r.contains("DC1 149.154.175.50: ok 42 ms"), "результат проверки связи попадает в отчёт: {r}");
         assert!(!r.contains("hunter2") && !r.contains("bob"), "{r}");
+        assert!(!r.contains("10.0.0.1:1080") && r.contains("host and port hidden"), "адрес прокси скрыт: {r}");
         assert!(!r.contains("79001234567") && r.contains("<number>"), "{r}");
-        assert!(r.contains("2026-11-09 10:00:00"), "даты остаются: {r}");
+        assert!(r.contains("2026-11-09 10:00:00") && r.contains("old line"), "даты и прошлый журнал остаются: {r}");
+        assert!(r.contains("No messages, passwords"), "{r}");
     }
 
     #[test]
     fn jpeg_decoding_rejects_garbage() {
         assert!(decode_jpeg(b"not a jpeg").is_none());
         assert!(decode_jpeg(&[]).is_none());
+    }
+
+    #[test]
+    fn jpeg_with_a_lying_header_is_not_decoded_into_gigabytes() {
+        // Настоящий маленький JPEG, у которого в заголовке SOF0 приписаны размеры 65535×65535.
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 80).encode(&[120u8; 16 * 16 * 3], 16, 16, jpeg_encoder::ColorType::Rgb).unwrap();
+        assert!(decode_jpeg(&jpeg).is_some(), "исходный JPEG читается");
+        let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).expect("в файле есть SOF0");
+        // SOF0: маркер(2) длина(2) точность(1) высота(2) ширина(2).
+        jpeg[sof + 5..sof + 9].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(decode_jpeg(&jpeg).is_none());
     }
 }

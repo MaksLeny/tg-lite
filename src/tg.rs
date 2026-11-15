@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow};
-use grammers_client::media::{Downloadable, Media};
+use grammers_client::media::Downloadable;
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::peer::Peer;
 use grammers_client::session::types::{PeerId, PeerRef};
@@ -113,6 +113,14 @@ pub struct ChatInfo {
     pub read_out: i32,
     /// Черновик, сохранённый в Telegram (набран на телефоне или в другом клиенте).
     pub draft: String,
+    /// Можно ли вам писать в этот чат (в канале — только администраторам, в группе бывает запрет).
+    pub can_write: bool,
+    /// Последнее сообщение одной строкой («Анна: привет») для списка чатов в виде «Мессенджер».
+    pub preview: String,
+    /// Время последнего сообщения (Unix-секунды); 0 — неизвестно.
+    pub last_ts: i64,
+    /// Чат заглушён в Telegram: без звука и всплывающих уведомлений.
+    pub muted: bool,
 }
 
 /// Папка чатов из аккаунта Telegram.
@@ -286,6 +294,20 @@ pub struct ChatMsg {
     pub buttons: Vec<Vec<Btn>>,
     /// Опрос (если сообщение — опрос).
     pub poll: Option<PollView>,
+    /// Вложение, которое можно скачать (фото, файл, голосовое, видео, стикер).
+    /// У геопозиции, контакта, опроса и просроченного фото его нет: скачивать там нечего.
+    pub media: Option<MediaInfo>,
+    /// Карточка ссылки (заголовок и описание страницы), если Telegram её прислал.
+    pub link: Option<LinkCard>,
+}
+
+/// Карточка ссылки: то, что Telegram уже узнал о странице; программа сама никуда не ходит.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LinkCard {
+    pub site: String,
+    pub title: String,
+    pub desc: String,
+    pub url: String,
 }
 
 /// Найденное сообщение.
@@ -366,11 +388,12 @@ pub enum Cmd {
         chat: ChatInfo,
         id: i32,
     },
-    /// Отправить файл с диска.
+    /// Отправить файл с диска; картинки при `compress` перед отправкой уменьшаются.
     SendFile {
         chat: ChatInfo,
         path: PathBuf,
         caption: String,
+        compress: bool,
     },
     /// Показать отложенные сообщения чата.
     ListScheduled(ChatInfo),
@@ -416,6 +439,7 @@ pub enum Cmd {
         chat: ChatInfo,
         paths: Vec<PathBuf>,
         caption: String,
+        compress: bool,
     },
     /// Проверка связи: DNS, прокси и дата-центры Telegram.
     NetCheck(Box<crate::settings::Settings>),
@@ -455,8 +479,10 @@ pub enum Event {
         msg: ChatMsg,
         scheduled: bool,
     },
-    /// Отправка не удалась: текст возвращается в поле ввода, чтобы не пропал.
+    /// Отправка не удалась: текст возвращается в поле ввода своего чата (или в его черновик), чтобы не пропал.
+    /// У длинного текста, который уходил частями, это остаток, начиная с части, не вышедшей в Telegram.
     SendFailed {
+        chat: PeerId,
         text: String,
     },
     Edited {
@@ -674,6 +700,9 @@ pub struct Queued {
 /// Сколько сообщений держим в очереди без связи (только текст, в памяти).
 pub const MAX_QUEUED: usize = 30;
 
+/// Пауза между частями длинного текста.
+const PART_GAP: Duration = Duration::from_millis(400);
+
 /// Пытается отправить очередь по порядку. На первой же сетевой ошибке останавливается и оставляет остаток.
 async fn flush_queue(client: &Client, events: &mpsc::UnboundedSender<Event>, queue: &mut std::collections::VecDeque<Queued>) {
     flush_with(queue, events, |q: Queued| {
@@ -792,6 +821,106 @@ pub fn fmt_duration(secs: f64) -> String {
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
 
+/// Вид вложения: от него зависит, какие действия предлагает режим выбора сообщения (`F7`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaKind {
+    Photo,
+    Voice,
+    Audio,
+    Video,
+    /// Круглое видеосообщение.
+    VideoNote,
+    Gif,
+    Sticker,
+    #[default]
+    File,
+}
+
+/// Вложение, которое можно скачать: вид, имя файла (каким оно будет на диске) и размер.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaInfo {
+    pub kind: MediaKind,
+    pub name: String,
+    pub size: Option<u64>,
+}
+
+/// Вид и имя файла для документа по его атрибутам и типу содержимого. `id` — номер сообщения: он нужен
+/// имени, когда у файла нет своего (`voice_123.ogg`).
+pub fn document_info(attrs: &[tl::enums::DocumentAttribute], mime: &str, size: u64, id: i32) -> MediaInfo {
+    use tl::enums::DocumentAttribute as A;
+    let (mut sticker, mut animated, mut file_name) = (false, false, None::<String>);
+    let mut kind = None;
+    for a in attrs {
+        match a {
+            A::Sticker(_) => sticker = true,
+            A::Animated => animated = true,
+            A::Audio(au) if kind.is_none() => kind = Some(if au.voice { MediaKind::Voice } else { MediaKind::Audio }),
+            A::Video(v) if kind.is_none() => kind = Some(if v.round_message { MediaKind::VideoNote } else { MediaKind::Video }),
+            A::Filename(f) => file_name = Some(f.file_name.clone()),
+            _ => {}
+        }
+    }
+    let kind = if sticker {
+        MediaKind::Sticker
+    } else if animated {
+        MediaKind::Gif
+    } else if let Some(k) = kind {
+        k
+    } else if mime.starts_with("audio/") {
+        MediaKind::Audio
+    } else if mime.starts_with("video/") {
+        MediaKind::Video
+    } else {
+        MediaKind::File
+    };
+    let mime_ext = ext_from_mime(mime);
+    let base = file_name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let name = match base {
+        // Имя без расширения, но с известным типом: добавляем расширение, чтобы файл можно было открыть.
+        Some(n) if !n.contains('.') && !mime_ext.is_empty() => format!("{n}.{mime_ext}"),
+        Some(n) => n,
+        None => {
+            let stem = match kind {
+                MediaKind::Voice => "voice",
+                MediaKind::VideoNote => "videonote",
+                MediaKind::Gif => "animation",
+                MediaKind::Audio => "audio",
+                MediaKind::Video => "video",
+                MediaKind::Sticker => "sticker",
+                MediaKind::Photo => "photo",
+                MediaKind::File => "file",
+            };
+            if mime_ext.is_empty() { format!("{stem}_{id}") } else { format!("{stem}_{id}.{mime_ext}") }
+        }
+    };
+    MediaInfo { kind, name: crate::util::safe_file_name(&name), size: Some(size) }
+}
+
+/// Описание вложения, которое можно скачать. Фото или файл без содержимого (просроченное самоуничтожающееся
+/// и т. п.) и всё, что не файл (контакт, геопозиция, опрос, кубик), дают `None`: скачивать там нечего,
+/// а вызов `Photo::id()` и `Document::name()` библиотеки на таком сообщении аварийно завершил бы программу.
+pub fn media_info_of(media: &grammers_client::media::Media, id: i32) -> Option<MediaInfo> {
+    use grammers_client::media::Media as M;
+    let from_doc = |d: &grammers_client::media::Document| match d.raw.document.as_ref() {
+        Some(tl::enums::Document::Document(doc)) => Some(document_info(&doc.attributes, &doc.mime_type, doc.size.max(0) as u64, id)),
+        _ => None,
+    };
+    match media {
+        M::Photo(p) => match p.raw.photo.as_ref() {
+            Some(tl::enums::Photo::Photo(ph)) => {
+                Some(MediaInfo { kind: MediaKind::Photo, name: format!("photo_{}.jpg", ph.id), size: p.size().map(|s| s as u64) })
+            }
+            _ => None,
+        },
+        M::Sticker(s) => from_doc(&s.document).map(|mut i| {
+            i.kind = MediaKind::Sticker;
+            i
+        }),
+        M::Document(d) => from_doc(d),
+        _ => None,
+    }
+}
+
 /// Подпись файла-документа по его атрибутам: голосовое, видео, GIF, аудио или просто файл.
 pub fn doc_label(attrs: &[tl::enums::DocumentAttribute], mime: &str, size: Option<usize>) -> String {
     use tl::enums::DocumentAttribute as A;
@@ -906,6 +1035,43 @@ pub fn to_chat_msg(m: &Message, fallback_name: &str) -> ChatMsg {
         reactions: reactions_of(m),
         buttons: buttons_of(m),
         poll: poll_of(m),
+        media: m.media().and_then(|md| media_info_of(&md, m.id())),
+        link: link_card_of(m),
+    }
+}
+
+/// Карточка ссылки сообщения: только если Telegram прислал готовую страницу с заголовком или описанием.
+pub fn link_card_of(m: &Message) -> Option<LinkCard> {
+    let tl::enums::Message::Message(x) = &m.raw else { return None };
+    match x.media.as_ref()? {
+        tl::enums::MessageMedia::WebPage(w) => link_card(&w.webpage),
+        _ => None,
+    }
+}
+
+fn link_card(page: &tl::enums::WebPage) -> Option<LinkCard> {
+    let tl::enums::WebPage::Page(p) = page else { return None };
+    let text = |s: &Option<String>| s.as_deref().map(|t| crate::util::clean(t).trim().to_string()).unwrap_or_default();
+    let card = LinkCard { site: text(&p.site_name), title: text(&p.title), desc: text(&p.description), url: p.url.clone() };
+    (!card.title.is_empty() || !card.desc.is_empty()).then_some(card)
+}
+
+/// Заглушён ли чат по настройкам уведомлений из Telegram (`mute_until` ещё не наступило).
+pub fn notify_muted(s: &tl::enums::PeerNotifySettings, now: i64) -> bool {
+    let tl::enums::PeerNotifySettings::Settings(s) = s;
+    s.mute_until.is_some_and(|t| i64::from(t) > now)
+}
+
+/// Строка-превью последнего сообщения: «Анна: текст» в группах, «Я: текст» у своих, в личных и каналах — просто текст.
+pub fn preview_line(kind: Kind, outgoing: bool, sender: &str, text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat: String = flat.chars().take(140).collect();
+    if outgoing {
+        format!("{}: {flat}", tr!("Я", "Me"))
+    } else if kind == Kind::Group && !sender.trim().is_empty() {
+        format!("{}: {flat}", sender.split_whitespace().next().unwrap_or(sender))
+    } else {
+        flat
     }
 }
 
@@ -1067,11 +1233,58 @@ fn chat_info(p: &Peer, id: PeerId, peer: PeerRef, unread: i32, mentions: i32, re
         is_self,
         read_out,
         draft,
+        can_write: can_write(p),
+        preview: String::new(),
+        last_ts: 0,
+        muted: false,
+    }
+}
+
+/// Можно ли вам писать в чат. Узнаётся из прав в данных чата: в канале пишут только администраторы с правом
+/// публикации, в группе может быть общий запрет. Если Telegram прав не прислал, считаем, что писать можно.
+fn can_write(p: &Peer) -> bool {
+    use tl::enums::{ChatAdminRights as AR, ChatBannedRights as BR};
+    fn muted(r: &Option<BR>) -> bool {
+        matches!(r, Some(BR::Rights(b)) if b.send_messages)
+    }
+    fn posts(r: &Option<AR>) -> bool {
+        matches!(r, Some(AR::Rights(a)) if a.post_messages)
+    }
+    fn channel(c: &tl::types::Channel) -> bool {
+        if c.left {
+            return false;
+        }
+        if c.broadcast {
+            return c.creator || posts(&c.admin_rights);
+        }
+        // Права именно для вас (если есть) важнее общих запретов группы: администратор мог сделать для вас исключение.
+        let rights = if c.banned_rights.is_some() { &c.banned_rights } else { &c.default_banned_rights };
+        c.creator || c.admin_rights.is_some() || !muted(rights)
+    }
+    match p {
+        Peer::Channel(c) => channel(&c.raw),
+        Peer::Group(g) => match &g.raw {
+            tl::enums::Chat::Channel(c) => channel(c),
+            tl::enums::Chat::Chat(c) => {
+                !(c.left || c.deactivated) && (c.creator || c.admin_rights.is_some() || !muted(&c.default_banned_rights))
+            }
+            _ => false,
+        },
+        _ => true,
     }
 }
 
 fn dialog_info(d: &grammers_client::peer::Dialog) -> ChatInfo {
-    chat_info(d.peer(), d.peer_id(), d.peer_ref(), dialog_unread(d), dialog_mentions(d), dialog_read_out(d), dialog_draft(d))
+    let mut c = chat_info(d.peer(), d.peer_id(), d.peer_ref(), dialog_unread(d), dialog_mentions(d), dialog_read_out(d), dialog_draft(d));
+    if let tl::enums::Dialog::Dialog(x) = &d.raw {
+        c.muted = notify_muted(&x.notify_settings, jiff::Timestamp::now().as_second());
+    }
+    if let Some(m) = &d.last_message {
+        let msg = to_chat_msg(m, &c.name);
+        c.preview = preview_line(c.kind, msg.outgoing, &msg.sender, &msg.text);
+        c.last_ts = msg.ts;
+    }
+    c
 }
 
 /// Текст черновика из диалога.
@@ -1224,10 +1437,19 @@ fn ext_from_mime(mime: &str) -> &'static str {
         "image/webp" => "webp",
         "image/gif" => "gif",
         "video/mp4" => "mp4",
-        "audio/ogg" => "ogg",
-        "audio/mpeg" => "mp3",
+        "audio/ogg" | "audio/opus" | "audio/x-opus+ogg" => "ogg",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        "video/x-matroska" => "mkv",
+        "application/x-tgsticker" => "tgs",
         "application/pdf" => "pdf",
         "application/zip" => "zip",
+        "text/plain" => "txt",
+        "application/json" => "json",
         _ => "",
     }
 }
@@ -1249,25 +1471,10 @@ pub async fn save_attachment(
     let msgs = client.get_messages_by_id(chat.peer, &[id]).await.map_err(|e| anyhow!("{e}"))?;
     let msg = msgs.into_iter().next().flatten().ok_or_else(|| anyhow!(tr!("сообщение не найдено", "message not found")))?;
     let media = msg.media().ok_or_else(|| anyhow!(tr!("в сообщении нет вложения", "the message has no attachment")))?;
-    let name = match &media {
-        Media::Photo(p) => format!("photo_{}.jpg", p.id()),
-        Media::Sticker(_) => format!("sticker_{id}.webp"),
-        Media::Document(d) => {
-            let base = d.name().map(str::to_string).filter(|n| !n.trim().is_empty());
-            match base {
-                // Имя без расширения, но с известным типом: добавляем расширение, чтобы файл можно было открыть.
-                Some(n) if !n.contains('.') && !ext_from_mime(d.mime_type().unwrap_or("")).is_empty() => {
-                    format!("{n}.{}", ext_from_mime(d.mime_type().unwrap_or("")))
-                }
-                Some(n) => n,
-                None => {
-                    let ext = ext_from_mime(d.mime_type().unwrap_or(""));
-                    if ext.is_empty() { format!("file_{id}") } else { format!("file_{id}.{ext}") }
-                }
-            }
-        }
-        _ => return Err(anyhow!(tr!("это вложение нельзя скачать", "this attachment cannot be downloaded"))),
-    };
+    let info = media_info_of(&media, id).ok_or_else(|| {
+        anyhow!(tr!("у этого сообщения нет файла, который можно скачать", "this message has no file that can be downloaded"))
+    })?;
+    let name = info.name;
     if for_view {
         if !crate::util::is_openable(&crate::util::safe_file_name(&name)) {
             return Err(anyhow!(tr!(
@@ -1338,13 +1545,63 @@ pub async fn save_attachment(
 /// Предел размера файла для обычного аккаунта.
 pub const MAX_UPLOAD: u64 = 2000 * 1024 * 1024;
 
-pub async fn send_file(client: &Client, chat: &ChatInfo, path: &Path, caption: &str) -> Result<ChatMsg> {
+/// Загружает файл на серверы Telegram. Обычные картинки при `compress` сначала уменьшаются в памяти
+/// (см. `shrink`): так фото с телефона уходит за секунды, а не за минуты. Возвращает загруженный файл и
+/// признак «отправлять как фото»; остальное уходит файлом без пережатия.
+async fn upload_for_send(
+    client: &Client,
+    path: &Path,
+    compress: bool,
+    events: Option<&mpsc::UnboundedSender<Event>>,
+) -> Result<(grammers_client::media::Uploaded, bool)> {
     let meta = check_upload(path)?;
-    let up = client.upload_file(path).await.map_err(|e| anyhow!("{e}"))?;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let msg = InputMessage::new().text(caption);
+    let is_image = matches!(ext.as_str(), "jpg" | "jpeg" | "png");
+    if is_image && compress && meta.len() <= crate::shrink::MAX_INPUT_BYTES {
+        let src = path.to_path_buf();
+        // Разбор и сжатие картинки занимают секунды процессора: считаем не в основной задаче.
+        let shrunk = tokio::task::spawn_blocking(move || {
+            let bytes = std::fs::read(&src).ok()?;
+            let old = bytes.len();
+            crate::shrink::shrink(&bytes).map(|s| (old, s))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some((old, s)) = shrunk {
+            if let Some(ev) = events {
+                let _ = ev.send(Event::Status(trf!(
+                    "Фото сжато: {} → {} ({}×{}), загружаю…",
+                    "Photo shrunk: {} → {} ({}×{}), uploading…",
+                    fmt_size(old),
+                    fmt_size(s.jpeg.len()),
+                    s.width,
+                    s.height
+                )));
+            }
+            let stem = path.file_stem().and_then(|n| n.to_str()).filter(|n| !n.is_empty()).unwrap_or("photo");
+            let size = s.jpeg.len();
+            let mut stream = std::io::Cursor::new(s.jpeg);
+            let up = client.upload_stream(&mut stream, size, format!("{stem}.jpg")).await.map_err(|e| anyhow!("{e}"))?;
+            return Ok((up, true));
+        }
+    }
+    let up = client.upload_file(path).await.map_err(|e| anyhow!("{e}"))?;
     // Обычные картинки уходят как фото, всё остальное как файл без пережатия.
-    let msg = if matches!(ext.as_str(), "jpg" | "jpeg" | "png") && meta.len() < 10 * 1024 * 1024 { msg.photo(up) } else { msg.file(up) };
+    Ok((up, is_image && meta.len() < 10 * 1024 * 1024))
+}
+
+pub async fn send_file(
+    client: &Client,
+    chat: &ChatInfo,
+    path: &Path,
+    caption: &str,
+    compress: bool,
+    events: &mpsc::UnboundedSender<Event>,
+) -> Result<ChatMsg> {
+    let (up, as_photo) = upload_for_send(client, path, compress, Some(events)).await?;
+    let msg = InputMessage::new().text(caption);
+    let msg = if as_photo { msg.photo(up) } else { msg.file(up) };
     let sent = client.send_message(chat.peer, msg).await.map_err(|e| anyhow!("{e}"))?;
     Ok(to_chat_msg(&sent, &chat.name))
 }
@@ -1366,22 +1623,16 @@ fn check_upload(path: &Path) -> Result<std::fs::Metadata> {
 
 /// Отправляет несколько файлов одним альбомом: картинки как фото, остальное как файлы.
 /// Подпись ставится на первый элемент.
-pub async fn send_album(client: &Client, chat: &ChatInfo, paths: &[PathBuf], caption: &str) -> Result<Vec<ChatMsg>> {
+pub async fn send_album(client: &Client, chat: &ChatInfo, paths: &[PathBuf], caption: &str, compress: bool) -> Result<Vec<ChatMsg>> {
     use grammers_client::media::InputMedia;
     if !(2..=10).contains(&paths.len()) {
         return Err(anyhow!(tr!("в альбоме должно быть от 2 до 10 файлов", "an album needs 2 to 10 files")));
     }
     let mut medias = Vec::new();
     for (i, path) in paths.iter().enumerate() {
-        let meta = check_upload(path)?;
-        let up = client.upload_file(path).await.map_err(|e| anyhow!("{e}"))?;
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let (up, as_photo) = upload_for_send(client, path, compress, None).await?;
         let media = InputMedia::new().caption(if i == 0 { caption } else { "" });
-        medias.push(if matches!(ext.as_str(), "jpg" | "jpeg" | "png") && meta.len() < 10 * 1024 * 1024 {
-            media.photo(up)
-        } else {
-            media.document(up)
-        });
+        medias.push(if as_photo { media.photo(up) } else { media.document(up) });
     }
     let sent = client.send_album(chat.peer, medias).await.map_err(|e| anyhow!("{e}"))?;
     Ok(sent.into_iter().flatten().map(|m| to_chat_msg(&m, &chat.name)).collect())
@@ -1629,15 +1880,13 @@ pub async fn react(client: &Client, chat: &ChatInfo, id: i32, emoji: Option<&str
 /// Скачивает небольшой текстовый файл из сообщения в память (не на диск) и возвращает имя и строки.
 pub async fn fetch_text_file(client: &Client, chat: &ChatInfo, id: i32) -> Result<(String, Vec<String>)> {
     let msg = fetch_message(client, chat, id).await?;
-    let Some(Media::Document(d)) = msg.media() else {
-        return Err(anyhow!(tr!("в сообщении нет файла", "this message has no file")));
-    };
-    let name = d.name().map(str::to_string).unwrap_or_default();
+    let media = msg.media().ok_or_else(|| anyhow!(tr!("в сообщении нет файла", "this message has no file")))?;
+    let info = media_info_of(&media, id).ok_or_else(|| anyhow!(tr!("в сообщении нет файла", "this message has no file")))?;
+    let name = info.name;
     if !crate::util::is_text_file(&name) {
         return Err(anyhow!(tr!("это не текстовый файл", "this is not a text file")));
     }
-    let media = Media::Document(d);
-    if Downloadable::size(&media).is_some_and(|n| n > crate::util::MAX_TEXT_BYTES) {
+    if info.size.is_some_and(|n| n > crate::util::MAX_TEXT_BYTES as u64) {
         return Err(anyhow!(tr!(
             "файл больше 1 МБ: откройте его через O или сохраните через S",
             "the file is larger than 1 MB: open it with O or save it with S"
@@ -1990,12 +2239,12 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                     });
                 }
-                Cmd::SendFile { chat, path, caption } => {
+                Cmd::SendFile { chat, path, caption, compress } => {
                     let client = client.clone();
                     let events = events.clone();
                     tokio::spawn(async move {
                         let _ = events.send(Event::Status(tr!("Загружаю файл…", "Uploading file…").into()));
-                        match send_file(&client, &chat, &path, &caption).await {
+                        match send_file(&client, &chat, &path, &caption, compress, &events).await {
                             Ok(msg) => {
                                 let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: false });
                             }
@@ -2022,12 +2271,12 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                         }
                     });
                 }
-                Cmd::SendAlbum { chat, paths, caption } => {
+                Cmd::SendAlbum { chat, paths, caption, compress } => {
                     let client = client.clone();
                     let events = events.clone();
                     tokio::spawn(async move {
                         let _ = events.send(Event::Status(tr!("Загружаю альбом…", "Uploading the album…").into()));
-                        match send_album(&client, &chat, &paths, &caption).await {
+                        match send_album(&client, &chat, &paths, &caption, compress).await {
                             Ok(msgs) => {
                                 for msg in msgs {
                                     let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: false });
@@ -2087,32 +2336,45 @@ pub fn spawn_worker(conn: Connection, events: mpsc::UnboundedSender<Event>) -> m
                     }
                 },
                 Cmd::Send { chat, text, markdown, delay_minutes, reply_to } => {
-                    // Пока в очереди есть сообщения, новые встают за ними: порядок не нарушается.
-                    if !queue.is_empty() && delay_minutes.is_none() {
-                        if queue.len() < MAX_QUEUED {
-                            queue.push_back(Queued { chat: chat.clone(), text: text.clone(), markdown, reply_to });
-                            let _ = events.send(Event::Queued { chat: chat.id, text, count: queue.len() });
-                        } else {
-                            let _ = events.send(Event::Error(
-                                tr!("очередь переполнена, сообщение не принято", "queue is full, message rejected").into(),
-                            ));
-                            let _ = events.send(Event::SendFailed { text });
+                    // Длинный текст уходит несколькими сообщениями по порядку; ответом на чужое сообщение
+                    // становится только первое. Остановились на ошибке — остаток текста возвращается автору.
+                    for (i, part) in crate::split::split_message(&text, markdown).into_iter().enumerate() {
+                        if i > 0 {
+                            tokio::time::sleep(PART_GAP).await; // подряд без пауз Telegram отвечает FLOOD_WAIT
                         }
-                        continue;
-                    }
-                    match send(&client, &chat, &text, markdown, delay_minutes, reply_to).await {
-                        Ok(msg) => {
-                            let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: delay_minutes.is_some() });
+                        let rest = text[part.start..].to_string();
+                        let reply_to = if i == 0 { reply_to } else { None };
+                        let part = part.text;
+                        // Пока в очереди есть сообщения, новые встают за ними: порядок не нарушается.
+                        if !queue.is_empty() && delay_minutes.is_none() {
+                            if queue.len() < MAX_QUEUED {
+                                queue.push_back(Queued { chat: chat.clone(), text: part.clone(), markdown, reply_to });
+                                let _ = events.send(Event::Queued { chat: chat.id, text: part, count: queue.len() });
+                            } else {
+                                let _ = events.send(Event::Error(
+                                    tr!("очередь переполнена, сообщение не принято", "queue is full, message rejected").into(),
+                                ));
+                                let _ = events.send(Event::SendFailed { chat: chat.id, text: rest });
+                                break;
+                            }
+                            continue;
                         }
-                        Err(e) if delay_minutes.is_none() && is_network_error(&e.to_string()) => {
-                            log(&format!("send (queued): {e}"));
-                            queue.push_back(Queued { chat: chat.clone(), text: text.clone(), markdown, reply_to });
-                            let _ = events.send(Event::Queued { chat: chat.id, text, count: queue.len() });
-                        }
-                        Err(e) => {
-                            log(&format!("send: {e}"));
-                            let _ = events.send(Event::Error(trf!("не отправлено: {}", "not sent: {}", friendly_error(&e.to_string()))));
-                            let _ = events.send(Event::SendFailed { text });
+                        match send(&client, &chat, &part, markdown, delay_minutes, reply_to).await {
+                            Ok(msg) => {
+                                let _ = events.send(Event::Sent { chat: chat.id, msg, scheduled: delay_minutes.is_some() });
+                            }
+                            Err(e) if delay_minutes.is_none() && is_network_error(&e.to_string()) => {
+                                log(&format!("send (queued): {e}"));
+                                queue.push_back(Queued { chat: chat.clone(), text: part.clone(), markdown, reply_to });
+                                let _ = events.send(Event::Queued { chat: chat.id, text: part, count: queue.len() });
+                            }
+                            Err(e) => {
+                                log(&format!("send: {e}"));
+                                let _ =
+                                    events.send(Event::Error(trf!("не отправлено: {}", "not sent: {}", friendly_error(&e.to_string()))));
+                                let _ = events.send(Event::SendFailed { chat: chat.id, text: rest });
+                                break;
+                            }
                         }
                     }
                 }
@@ -2376,6 +2638,10 @@ mod tests {
             mentions: 0,
             read_out: 0,
             draft: String::new(),
+            can_write: true,
+            preview: String::new(),
+            last_ts: 0,
+            muted: false,
         }
     }
 
