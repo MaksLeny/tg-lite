@@ -845,6 +845,10 @@ pub fn is_openable(file_name: &str) -> bool {
 /// Есть ли в системе программа, которая откроет файл с таким расширением (без точки). Ответ запоминается:
 /// подсказка в строке состояния спрашивает об этом на каждой перерисовке. Не Windows: узнать нечего, считаем, что есть.
 pub fn has_handler(ext: &str) -> bool {
+    // В тестах «программа есть для всего»: на чистой машине (сервер сборки) её нет, а проверяется не система.
+    if cfg!(test) {
+        return true;
+    }
     static CACHE: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
     let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((_, found)) = cache.iter().find(|(e, _)| e == ext) {

@@ -96,16 +96,16 @@ fn decode_png(bytes: &[u8]) -> Option<Rgb> {
         ColorType::Grayscale if px.len() >= w * h => px[..w * h].iter().flat_map(|g| [*g, *g, *g]).collect(),
         // С прозрачностью картинку не трогаем: в JPEG её не сохранить.
         ColorType::Rgba if px.len() >= w * h * 4 => {
-            if px[..w * h * 4].chunks_exact(4).any(|p| p[3] != 255) {
+            if px[..w * h * 4].as_chunks::<4>().0.iter().any(|p| p[3] != 255) {
                 return None;
             }
-            px[..w * h * 4].chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+            px[..w * h * 4].as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()
         }
         ColorType::GrayscaleAlpha if px.len() >= w * h * 2 => {
-            if px[..w * h * 2].chunks_exact(2).any(|p| p[1] != 255) {
+            if px[..w * h * 2].as_chunks::<2>().0.iter().any(|p| p[1] != 255) {
                 return None;
             }
-            px[..w * h * 2].chunks_exact(2).flat_map(|p| [p[0], p[0], p[0]]).collect()
+            px[..w * h * 2].as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0]]).collect()
         }
         _ => return None,
     };

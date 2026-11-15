@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 argon2 = "0.6.0"
-base64 = "0.23.1"
 chacha20poly1305 = "0.11.0"
 crossterm = "0.29.0"
 getrandom = "0.4.3"

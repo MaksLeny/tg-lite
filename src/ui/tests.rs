@@ -5557,7 +5557,7 @@ fn random_keys_mouse_and_events_never_panic_or_break_the_state() {
                         _ => {
                             let (w, h) = *rng.pick(&sizes);
                             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-                            term.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
+                            term.draw(|f| draw(f, &mut app)).unwrap();
                             format!("отрисовка {w}x{h}")
                         }
                     };
