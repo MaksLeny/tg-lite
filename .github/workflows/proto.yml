@@ -1,0 +1,35 @@
+name: Prototypes (v2)
+
+# Собирает маленькие окна-прототипы для замера памяти на слабом ПК. Запускается при загрузке файлов в proto/.
+on:
+  push:
+    paths: ["proto/**", ".github/workflows/proto.yml"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: ${{ matrix.name }} (Windows)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [slint, iced]
+    defaults:
+      run:
+        working-directory: proto/${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: proto/${{ matrix.name }}
+      - run: cargo build --release
+      - name: Size
+        shell: pwsh
+        run: |
+          $f = Get-Item target/release/proto-${{ matrix.name }}.exe
+          "proto-${{ matrix.name }}.exe: $([math]::Round($f.Length / 1KB)) KB" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v6
+        with:
+          name: proto-${{ matrix.name }}-windows
+          path: proto/${{ matrix.name }}/target/release/proto-${{ matrix.name }}.exe
