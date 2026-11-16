@@ -1,0 +1,18 @@
+[package]
+name = "proto-iced"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Прототип для замера: Iced с программным рендером tiny-skia (без видеокарты и wgpu).
+[dependencies]
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "x11", "crisp", "thread-pool"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]

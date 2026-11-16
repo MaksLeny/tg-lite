@@ -1,0 +1,21 @@
+[package]
+name = "proto-slint"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Прототип для замера: Slint с программным рендером (без видеокарты).
+[dependencies]
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
+
+[build-dependencies]
+slint-build = "1.18"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]

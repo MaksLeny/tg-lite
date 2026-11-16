@@ -1,0 +1,79 @@
+import { ListView, ScrollView, LineEdit } from "std-widgets.slint";
+
+export struct Chat { name: string, preview: string, time: string, unread: int, color: color, initial: string }
+export struct Msg { text: string, time: string, out: bool, author: string }
+
+component Avatar inherits Rectangle {
+    in property <string> initial;
+    in property <color> tint;
+    width: 44px; height: 44px; border-radius: 22px; background: tint;
+    Text { text: initial; color: white; font-size: 18px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+}
+
+export component App inherits Window {
+    title: "Tg-Lite 2.0 prototype: Slint (software renderer)";
+    preferred-width: 1000px;
+    preferred-height: 650px;
+    background: #0e1621;
+    in property <[Chat]> chats;
+    in property <[Msg]> msgs;
+    in-out property <length> chat-y <=> chat-list.content-y;
+    in-out property <length> msg-y <=> msg-scroll.content-y;
+    out property <length> msg-viewport-h: msg-scroll.content-height;
+    out property <length> msg-visible-h: msg-scroll.visible-height;
+    property <length> bubble-max: (root.width - 320px) * 0.62;
+
+    HorizontalLayout {
+        Rectangle {
+            width: 320px;
+            background: #17212b;
+            chat-list := ListView {
+                for c in chats : Rectangle {
+                    height: 64px;
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 10px;
+                        Avatar { initial: c.initial; tint: c.color; }
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                Text { text: c.name; color: white; font-size: 14px; font-weight: 600; overflow: elide; horizontal-stretch: 1; }
+                                Text { text: c.time; color: #6d7f8f; font-size: 11px; }
+                            }
+                            HorizontalLayout {
+                                Text { text: c.preview; color: #7f91a4; font-size: 12px; overflow: elide; horizontal-stretch: 1; }
+                                if c.unread > 0 : Rectangle {
+                                    background: #3b82c4; border-radius: 9px; width: 18px; height: 18px;
+                                    Text { text: c.unread; color: white; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            Rectangle { height: 48px; background: #17212b; Text { text: "Чат"; color: white; font-size: 16px; x: 16px; vertical-alignment: center; } }
+            msg-scroll := ScrollView {
+                VerticalLayout {
+                    padding: 12px; spacing: 6px;
+                    for m in msgs : HorizontalLayout {
+                        if m.out : Rectangle { horizontal-stretch: 1; }
+                        Rectangle {
+                            background: m.out ? #2b5278 : #182533;
+                            border-radius: 12px;
+                            max-width: bubble-max;
+                            VerticalLayout {
+                                padding: 8px; spacing: 2px;
+                                if !m.out : Text { text: m.author; color: #6ab3f3; font-size: 12px; font-weight: 600; }
+                                Text { text: m.text; color: white; font-size: 14px; wrap: word-wrap; }
+                                Text { text: m.time; color: #8aa0b4; font-size: 10px; horizontal-alignment: right; }
+                            }
+                        }
+                        if !m.out : Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+            }
+            Rectangle { height: 52px; background: #17212b; LineEdit { x: 12px; width: parent.width - 24px; placeholder-text: "Написать сообщение…"; } }
+        }
+    }
+}
